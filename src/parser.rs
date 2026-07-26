@@ -2,11 +2,14 @@ use crate::ast::{Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeRef};
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
 
+const MAX_PARSE_DEPTH: usize = 128;
+
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, Vec<NivError>> {
     Parser {
         tokens,
         current: 0,
         errors: vec![],
+        depth: 0,
     }
     .program()
 }
@@ -15,6 +18,7 @@ struct Parser {
     tokens: Vec<Token>,
     current: usize,
     errors: Vec<NivError>,
+    depth: usize,
 }
 
 impl Parser {
@@ -219,6 +223,13 @@ impl Parser {
     }
 
     fn type_ref(&mut self) -> Result<TypeRef, NivError> {
+        self.enter_nested_syntax()?;
+        let result = self.type_ref_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn type_ref_inner(&mut self) -> Result<TypeRef, NivError> {
         let mut result = if self.matches(&[TokenKind::LeftBracket]) {
             let span = self.previous_span();
             let element = self.type_ref()?;
@@ -251,6 +262,13 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Stmt, NivError> {
+        self.enter_nested_syntax()?;
+        let result = self.statement_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn statement_inner(&mut self) -> Result<Stmt, NivError> {
         if self.matches(&[TokenKind::Print]) {
             return self.print_statement();
         }
@@ -368,10 +386,20 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Expr, NivError> {
-        self.assignment()
+        self.enter_nested_syntax()?;
+        let result = self.assignment();
+        self.depth -= 1;
+        result
     }
 
     fn assignment(&mut self) -> Result<Expr, NivError> {
+        self.enter_nested_syntax()?;
+        let result = self.assignment_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn assignment_inner(&mut self) -> Result<Expr, NivError> {
         let expression = self.coalesce()?;
         if self.matches(&[TokenKind::Equal]) {
             let span = self.previous_span();
@@ -389,6 +417,13 @@ impl Parser {
     }
 
     fn coalesce(&mut self) -> Result<Expr, NivError> {
+        self.enter_nested_syntax()?;
+        let result = self.coalesce_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn coalesce_inner(&mut self) -> Result<Expr, NivError> {
         let expression = self.or()?;
         if self.matches(&[TokenKind::QuestionQuestion]) {
             let span = self.previous_span();
@@ -468,6 +503,13 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Result<Expr, NivError> {
+        self.enter_nested_syntax()?;
+        let result = self.unary_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn unary_inner(&mut self) -> Result<Expr, NivError> {
         if self.matches(&[TokenKind::Bang, TokenKind::Minus]) {
             let operator = self.previous().kind.clone();
             let span = self.previous_span();
@@ -643,6 +685,13 @@ impl Parser {
     }
     fn error_here(&self, message: &str) -> NivError {
         NivError::new(message, self.peek().line, self.peek().column)
+    }
+    fn enter_nested_syntax(&mut self) -> Result<(), NivError> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(self.error_here("syntax nesting exceeds the supported limit"));
+        }
+        self.depth += 1;
+        Ok(())
     }
     fn synchronize(&mut self) {
         if !self.is_at_end() {

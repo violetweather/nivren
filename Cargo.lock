@@ -500,7 +500,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nivren"
-version = "0.10.0-beta.3"
+version = "0.10.0-beta.4"
 dependencies = [
  "ed25519-dalek",
  "nivren-jit",
@@ -514,14 +514,14 @@ dependencies = [
 
 [[package]]
 name = "nivren-ffi"
-version = "0.10.0-beta.3"
+version = "0.10.0-beta.4"
 dependencies = [
  "nivren",
 ]
 
 [[package]]
 name = "nivren-jit"
-version = "0.10.0-beta.3"
+version = "0.10.0-beta.4"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",

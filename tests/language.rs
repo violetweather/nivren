@@ -82,6 +82,13 @@ fn scanner_reports_locations() {
 }
 
 #[test]
+fn parser_rejects_excessive_nesting_without_exhausting_the_stack() {
+    let source = format!("{}1", "-".repeat(4_096));
+    let errors = nivren::parser::parse(nivren::lexer::scan(&source).unwrap()).unwrap_err();
+    assert!(errors[0].message.contains("nesting"));
+}
+
+#[test]
 fn prototype_spellings_are_not_part_of_edition_two() {
     for source in [
         "let value = 1",

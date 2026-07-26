@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.10.0-beta.3 — 2026-07-26
+## 0.10.0-beta.4 — 2026-07-26
 
 - Established Nivren Edition 2 with the distinctive `keep`, `change`, `define`, `gives`, `give`, `when`, `otherwise`, `repeat`, `each`, `within`, `shape`, `choice`, `choose`, `use`, `expose`, `yes`, `no`, `none`, and `show` vocabulary.
 - Removed the earlier TypeScript-like prototype spellings and the migration command; Nivren had no users requiring source compatibility.
