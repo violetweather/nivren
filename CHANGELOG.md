@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.0-beta.3 — 2026-07-26
+
+- Made explicit full garbage collection wait for concurrent marking and deterministically sweep unreachable cycles on every supported architecture.
+
 ## 0.9.0-beta.2 — 2026-07-26
 
 - Made Windows release executables reproducible by enabling the MSVC linker's deterministic output mode.

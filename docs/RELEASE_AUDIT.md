@@ -6,7 +6,7 @@ This document maps the 1.0 requirements to reviewable evidence. “Ready locally
 
 ## Current decision
 
-**1.0 is not releasable.** `niv release check .` correctly rejects the current tree because the Edition 1 freeze ends on 2027-01-26, the toolchain version is `0.9.0-beta.2`, and zero of three required independent 30-day production pilots are recorded.
+**1.0 is not releasable.** `niv release check .` correctly rejects the current tree because the Edition 1 freeze ends on 2027-01-26, the toolchain version is `0.9.0-beta.3`, and zero of three required independent 30-day production pilots are recorded.
 
 ## Requirement matrix
 

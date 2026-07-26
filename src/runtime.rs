@@ -419,7 +419,13 @@ impl Interpreter {
     }
 
     pub fn collect_garbage(&mut self) {
-        self.collect(&[]);
+        self.collector.collect_full(
+            &mut self.environments,
+            &self.globals,
+            &self.environment,
+            &self.roots,
+            &[],
+        );
     }
 
     pub fn heap_stats(&self) -> HeapStats {
@@ -1601,6 +1607,14 @@ trait Collector {
         roots: &[Env],
         stack: &[Value],
     );
+    fn collect_full(
+        &mut self,
+        environments: &mut Vec<Weak<Mutex<Scope>>>,
+        globals: &Env,
+        current: &Env,
+        roots: &[Env],
+        stack: &[Value],
+    );
     fn collections(&self) -> usize;
     fn minor_collections(&self) -> usize;
     fn major_collections(&self) -> usize;
@@ -1670,6 +1684,29 @@ impl Collector for GenerationalCollector {
         self.refresh_ages(environments, &marked);
         self.collections = self.collections.saturating_add(1);
         self.minor_collections = self.minor_collections.saturating_add(1);
+    }
+
+    fn collect_full(
+        &mut self,
+        environments: &mut Vec<Weak<Mutex<Scope>>>,
+        globals: &Env,
+        current: &Env,
+        roots: &[Env],
+        stack: &[Value],
+    ) {
+        // An explicit collection is a synchronization point: wait for any
+        // concurrent marker to release its root snapshots, then rescan the
+        // current roots and perform a complete sweep. This makes the public
+        // operation deterministic even on slower architectures.
+        if let Some(receiver) = self.pending.take() {
+            let _ = receiver.recv();
+        }
+        let mut marked = std::collections::HashSet::new();
+        mark_roots(globals, current, roots, stack, &mut marked);
+        sweep_environments(environments, &marked, None);
+        self.refresh_ages(environments, &marked);
+        self.collections = self.collections.saturating_add(1);
+        self.major_collections = self.major_collections.saturating_add(1);
     }
 
     fn collections(&self) -> usize {
