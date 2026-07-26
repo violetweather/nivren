@@ -58,3 +58,31 @@ Status: the Edition 2 language, bytecode, package, and standard-library specific
 
 - All conformance, security, performance, platform, documentation, registry, and production-pilot gates pass
 - Strict SemVer and editions begin; first annual LTS receives three years of fixes
+
+## Beyond 1.0 — No artificial ceiling
+
+These are long-term directions, not promises for the 1.0 compatibility surface. New syntax must earn its place through prototypes, user testing, specification review, and an Edition boundary.
+
+### Capability foundation
+
+- A broad native interface: stable C ABI imports, generated bindings, dynamic libraries, memory-safe foreign handles, callbacks, and async interoperability with existing C and Rust libraries
+- A serious public package ecosystem covering TLS, WebSockets, databases, web servers, cryptography, GUI, audio/video, compression, cloud services, chat platforms, and testing
+- Production cross-platform async I/O with an event loop, cancellation, timers, sockets, files, backpressure, and high-level HTTP and WebSocket clients and servers
+- Reusable abstractions through parametric types, protocols, generic constraints, iterators, and collection algorithms without template-heavy syntax
+- Explicit systems escape hatches for unsafe memory, SIMD, atomics, threads, devices, embedded targets, and no-runtime environments
+- Native ahead-of-time binaries, WebAssembly, shared and static libraries, mobile platforms, and carefully evaluated GPU targets
+- Industrial tooling for incremental builds, workspaces, refactoring, debugger integration, tracing, fuzzing, hosted documentation, compatibility testing, and long-term reproducibility
+- A hardened runtime and specification with sandboxing, resource limits, independent implementations, extensive fuzzing, external security audits, and sustained compatibility evidence
+
+### Recognizable Nivren identity
+
+- Keep one intent-first vocabulary: `keep`/`change`, `define`/`give`, `when`/`otherwise`, `each`/`within`, and `shape`/`choice`/`choose`, without accumulating synonyms
+- Explore explicit capability declarations such as `needs FileRead` so a function's effects are visible, checkable, and suitable for sandbox policy
+- Explore concise typed failure propagation while preserving `choose` for explicit, exhaustive handling
+- Prototype a readable word-based pipeline such as `through` only if it improves real programs without weakening precedence or tooling
+- Give structured concurrency a small, scoped vocabulary such as `start`, `wait`, `together`, and `race`; spawned work must not silently outlive its owner
+- Make the project path obvious with consistent commands such as `niv new`, `niv add`, `niv dev`, `niv test`, and `niv ship`, one standard layout, and minimal configuration
+- Give diagnostics a distinctive intent-first voice: explain what the program attempted, show the relevant types or values, and suggest a concrete correction
+- Maintain short, stable, batteries-included namespaces such as `web`, `json`, `files`, `time`, `tasks`, and `process`, leaving specialized integrations to packages
+- Enforce a punctuation budget: prefer familiar structure and meaningful words over cryptic operators or ornamental syntax
+- Publish and conformance-test an idiomatic style guide so Nivren code remains recognizable across projects and teams
