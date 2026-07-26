@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
-    [string]$Version = "0.10.0-beta.4",
+    [string]$Version = "0.10.0-beta.5",
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "Nivren"),
     [switch]$Yes,
     [switch]$NoPath,

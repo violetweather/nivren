@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="0.10.0-beta.4"
+VERSION="0.10.0-beta.5"
 INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/nivren"
 BIN_DIR="$HOME/.local/bin"
 ADD_PATH=ask
@@ -13,7 +13,7 @@ usage() {
 Nivren installer
 
 Usage: install.sh [options]
-  --version VERSION       Install a specific release (default: 0.10.0-beta.4)
+  --version VERSION       Install a specific release (default: 0.10.0-beta.5)
   --install-root PATH     Keep versions and documentation here
   --bin-dir PATH          Put the stable niv command here
   --yes                   Accept recommended choices without prompting

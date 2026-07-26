@@ -2,7 +2,7 @@
   "name": "nivren",
   "displayName": "Nivren",
   "description": "Language support for Nivren",
-  "version": "0.10.0-beta.4",
+  "version": "0.10.0-beta.5",
   "publisher": "nivren-lang",
   "license": "Apache-2.0",
   "engines": {
@@ -50,7 +50,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "compile": "tsc",
-    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository"
+    "package": "npm run compile && vsce package --no-dependencies --allow-missing-repository"
   },
   "dependencies": {
     "vscode-languageclient": "10.1.0"
