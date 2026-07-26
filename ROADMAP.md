@@ -69,10 +69,20 @@ These are long-term directions, not promises for the 1.0 compatibility surface. 
 - A serious public package ecosystem covering TLS, WebSockets, databases, web servers, cryptography, GUI, audio/video, compression, cloud services, chat platforms, and testing
 - Production cross-platform async I/O with an event loop, cancellation, timers, sockets, files, backpressure, and high-level HTTP and WebSocket clients and servers
 - Reusable abstractions through parametric types, protocols, generic constraints, iterators, and collection algorithms without template-heavy syntax
+- Deterministic resource management for files, sockets, locks, transactions, native handles, and other values that must be released promptly alongside the managed heap
+- A complete data model for byte buffers, fixed-width signed and unsigned numbers, decimal and arbitrary-precision arithmetic, Unicode text, dates/time zones, serialization, streaming, and large-data processing
+- Safe reflection and schema inspection, plus narrowly scoped hygienic compile-time generation for bindings, serializers, queries, and repetitive declarations; generated code must remain inspectable and toolable
 - Explicit systems escape hatches for unsafe memory, SIMD, atomics, threads, devices, embedded targets, and no-runtime environments
 - Native ahead-of-time binaries, WebAssembly, shared and static libraries, mobile platforms, and carefully evaluated GPU targets
+- First-class browser, server, desktop, mobile, game/media, data-science/ML, automation, embedded, and systems-development paths with maintained reference applications for each supported domain
+- A versioned compiler-as-a-library and tooling protocol so build systems, editors, notebooks, language servers, debuggers, profilers, documentation tools, and deployment platforms do not depend on compiler internals
+- Application distribution through self-contained binaries, libraries, containers, WebAssembly components, installers, code signing, update channels, and reproducible deployment metadata
+- Production observability with structured logging, metrics, traces, crash reports, source maps, runtime inspection, and stable hooks for monitoring systems
+- Testing at every level: unit, integration, snapshot, property, fuzz, benchmark, concurrency, compatibility, platform, and end-to-end deployment tests with deterministic test controls
 - Industrial tooling for incremental builds, workspaces, refactoring, debugger integration, tracing, fuzzing, hosted documentation, compatibility testing, and long-term reproducibility
 - A hardened runtime and specification with sandboxing, resource limits, independent implementations, extensive fuzzing, external security audits, and sustained compatibility evidence
+
+Capability coverage is not complete merely because a low-level primitive exists. Each supported domain requires an idiomatic safe API, a small end-to-end example, reference documentation, actionable diagnostics, editor support, cross-platform tests, performance expectations, and a maintained deployment story. Features that cannot meet Nivren's clarity and predictability standards remain packages or explicit escape hatches rather than expanding the core language.
 
 ### Recognizable Nivren identity
 
