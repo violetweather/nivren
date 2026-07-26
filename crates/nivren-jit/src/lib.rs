@@ -169,7 +169,7 @@ impl CompiledFunction {
                 }
             }
             if !returned {
-                return Err("JIT function has no return".into());
+                return Err("JIT function has no give".into());
             }
             function.switch_to_block(overflow);
             function.seal_block(overflow);

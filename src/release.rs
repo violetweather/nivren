@@ -18,7 +18,7 @@ struct Policy {
     minimum_pilots: usize,
     minimum_pilot_days: u64,
     minimum_conformance_cases: usize,
-    edition1_baseline_sha256: String,
+    edition2_baseline_sha256: String,
     required_files: Vec<String>,
     tier_one_platforms: Vec<String>,
 }
@@ -49,13 +49,13 @@ pub struct Audit {
 
 pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
     let policy: Policy = read_json(&root.join("release/policy.json"), "release policy")?;
-    if policy.format != 1 || policy.edition != "1" {
+    if policy.format != 1 || policy.edition != "2" {
         return Err(release_error("unsupported release policy"));
     }
     let mut blockers = vec![];
     if now < policy.freeze_ends_unix {
         blockers.push(format!(
-            "Edition 1 compatibility freeze does not end until {}",
+            "Edition 2 compatibility freeze does not end until {}",
             policy.freeze_ends
         ));
     }
@@ -74,7 +74,7 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
         }
     }
 
-    let baseline_path = root.join("conformance/edition1-baseline.json");
+    let baseline_path = root.join("conformance/edition2-baseline.json");
     let baseline_bytes = fs::read(&baseline_path).map_err(|error| {
         release_error(format!(
             "cannot read conformance baseline '{}': {error}",
@@ -82,8 +82,8 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
         ))
     })?;
     let baseline_digest = encode_hex(&Sha256::digest(&baseline_bytes));
-    if baseline_digest != policy.edition1_baseline_sha256 {
-        blockers.push("Edition 1 conformance baseline was modified".into());
+    if baseline_digest != policy.edition2_baseline_sha256 {
+        blockers.push("Edition 2 conformance baseline was modified".into());
     }
     let cases: serde_json::Value = serde_json::from_slice(&baseline_bytes)
         .map_err(|error| release_error(format!("invalid conformance baseline: {error}")))?;
@@ -145,7 +145,7 @@ fn valid_pilot(pilot: &Pilot, minimum_days: u64) -> bool {
     pilot.format == 1
         && !pilot.pilot_id.trim().is_empty()
         && !pilot.workload.trim().is_empty()
-        && pilot.toolchain.starts_with("0.9.")
+        && pilot.toolchain.starts_with("0.10.")
         && date_shape(&pilot.started_at)
         && date_shape(&pilot.completed_at)
         && pilot.duration_days >= minimum_days

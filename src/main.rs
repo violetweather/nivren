@@ -90,9 +90,6 @@ fn main() -> ExitCode {
         [command, flag, path] if command == "fmt" && flag == "--check" => format_path(path, true),
         [command] if command == "doc" => document_project("."),
         [command, path] if command == "doc" => document_project(path),
-        [command, flag, version, path] if command == "migrate" && flag == "--from" => {
-            migrate_path(path, version)
-        }
         [command, path] if command == "disasm" => disassemble_path(path),
         [command, path] if command == "debug" => debug_path(path),
         [command, path] if command == "profile" => observe_path(path, false),
@@ -884,41 +881,6 @@ fn document_project(path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn migrate_path(path: &str, version: &str) -> ExitCode {
-    let mut files = vec![];
-    if let Err(error) = collect_sources(Path::new(path), &mut files) {
-        eprintln!("error: cannot discover sources in {path}: {error}");
-        return ExitCode::from(66);
-    }
-    files.sort();
-    let mut changed = 0;
-    for file in &files {
-        let source = match fs::read_to_string(file) {
-            Ok(source) => source,
-            Err(error) => {
-                eprintln!("error: cannot read {}: {error}", file.display());
-                return ExitCode::from(66);
-            }
-        };
-        let migrated = match nivren::migration::migrate(&source, version) {
-            Ok(source) => source,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::from(64);
-            }
-        };
-        if migrated != source {
-            if let Err(error) = fs::write(file, migrated) {
-                eprintln!("error: cannot write {}: {error}", file.display());
-                return ExitCode::from(73);
-            }
-            changed += 1;
-        }
-    }
-    println!("migrated {changed} of {} file(s)", files.len());
-    ExitCode::SUCCESS
-}
-
 fn collect_sources(path: &Path, files: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
     if path.is_file() {
         if path.extension().is_some_and(|extension| extension == "niv") {
@@ -1265,7 +1227,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nUsage:\n  niv run [file.niv|file.nivb|project]\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n  niv disasm <file.niv|file.nivb|project>\n  niv debug <file.niv|file.nivb|project>\n  niv profile <file.niv|file.nivb|project>\n  niv coverage <file.niv|file.nivb|project>\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv migrate --from <version> <file|path>\n  niv test [path]\n  niv repl\n  niv lsp\n  niv version\n  niv help",
+        "Nivren {}\n\nUsage:\n  niv run [file.niv|file.nivb|project]\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n  niv disasm <file.niv|file.nivb|project>\n  niv debug <file.niv|file.nivb|project>\n  niv profile <file.niv|file.nivb|project>\n  niv coverage <file.niv|file.nivb|project>\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv test [path]\n  niv repl\n  niv lsp\n  niv version\n  niv help",
         nivren::VERSION
     );
 }

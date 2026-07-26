@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-fn edition_one_black_box_conformance_vectors() {
+fn edition_two_black_box_conformance_vectors() {
     let cases: serde_json::Value =
-        serde_json::from_str(include_str!("../conformance/edition1-baseline.json")).unwrap();
+        serde_json::from_str(include_str!("../conformance/edition2-baseline.json")).unwrap();
     let cases = cases.as_array().unwrap();
     let directory = std::env::temp_dir().join(format!(
         "nivren-conformance-{}-{:?}",

@@ -11,15 +11,15 @@
     },
     {
       "name": "constant.language.nivren",
-      "match": "\\b(?:true|false|null)\\b"
+      "match": "\\b(?:yes|no|none)\\b"
     },
     {
       "name": "keyword.control.nivren",
-      "match": "\\b(?:if|else|while|for|in|return|match)\\b"
+      "match": "\\b(?:when|otherwise|repeat|each|within|give|choose)\\b"
     },
     {
       "name": "keyword.declaration.nivren",
-      "match": "\\b(?:let|var|fun|record|enum|import|export)\\b"
+      "match": "\\b(?:keep|change|define|gives|shape|choice|use|expose)\\b"
     },
     {
       "name": "storage.type.nivren",
@@ -27,7 +27,7 @@
     },
     {
       "name": "entity.name.function.nivren",
-      "match": "(?<=\\bfun\\s)[A-Za-z_][A-Za-z0-9_]*"
+      "match": "(?<=\\bdefine\\s)[A-Za-z_][A-Za-z0-9_]*"
     }
   ],
   "repository": {

@@ -770,7 +770,7 @@ mod tests {
         .unwrap();
         fs::write(
             dependency_root.join("main.niv"),
-            "let value = 42; export { value };",
+            "keep value = 42; expose { value };",
         )
         .unwrap();
         fs::write(
@@ -778,11 +778,7 @@ mod tests {
             "[package]\nname = \"app\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[dependencies]\nlibrary = \"1.0.0\"\n",
         )
         .unwrap();
-        fs::write(
-            app_root.join("main.niv"),
-            "import \"@library\"; library.value",
-        )
-        .unwrap();
+        fs::write(app_root.join("main.niv"), "use \"@library\"; library.value").unwrap();
 
         let dependency = Manifest::load(&dependency_root).unwrap();
         let package = super::Package::build(&dependency)

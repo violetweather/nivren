@@ -65,7 +65,7 @@ impl Loader {
                 .collect();
             cycle.push(canonical.display().to_string());
             return Err(vec![NivError::new(
-                format!("import cycle: {}", cycle.join(" -> ")),
+                format!("use cycle: {}", cycle.join(" -> ")),
                 1,
                 1,
             )]);
@@ -110,7 +110,7 @@ impl Loader {
                 let loaded = self.file(&resolved).map_err(|mut errors| {
                     for error in &mut errors {
                         error.message = format!(
-                            "imported at {}:{}:{}: {}",
+                            "used at {}:{}:{}: {}",
                             canonical.display(),
                             span.line,
                             span.column,
@@ -166,21 +166,21 @@ impl Loader {
             })
         {
             return Err(vec![NivError::new(
-                "package imports must have the form '@identifier'",
+                "package uses must have the form '@identifier'",
                 span.line,
                 span.column,
             )]);
         }
         let root = self.root.as_ref().ok_or_else(|| {
             vec![NivError::new(
-                "package imports require a Nivren project",
+                "package uses require a Nivren project",
                 span.line,
                 span.column,
             )]
         })?;
         let owner = manifest_ancestor(importer, root).ok_or_else(|| {
             vec![NivError::new(
-                "cannot determine the importing package",
+                "cannot determine the using package",
                 span.line,
                 span.column,
             )]

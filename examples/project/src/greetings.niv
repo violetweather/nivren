@@ -1,7 +1,7 @@
-fun message(name: String) -> String {
-    return "Hello, " + name + "!"
+define message(name: String) gives String {
+    give "Hello, " + name + "!"
 }
 
-let internalPrefix = "private"
+keep internalPrefix = "private"
 
-export { message }
+expose { message }

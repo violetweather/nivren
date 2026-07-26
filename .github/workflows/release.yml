@@ -100,16 +100,21 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
-          path: dist
-          merge-multiple: true
+          path: downloaded
+          merge-multiple: false
+      - name: Collect release archives
+        run: |
+          mkdir -p release
+          find downloaded -type f -name 'niv-*.zip' -exec cp {} release/ \;
+          test "$(find release -maxdepth 1 -type f -name 'niv-*.zip' | wc -l)" -eq 6
       - name: Write checksums
-        working-directory: dist
+        working-directory: release
         run: sha256sum niv-* > SHA256SUMS
       - name: Sign release provenance
         uses: actions/attest@v4
         with:
-          subject-path: dist/*
+          subject-path: release/*
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes
+        run: gh release create "${{ github.ref_name }}" release/* --verify-tag --generate-notes

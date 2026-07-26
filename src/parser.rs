@@ -130,8 +130,8 @@ impl Parser {
 
     fn record(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        let name = self.consume_identifier("expected record name")?;
-        self.consume(&TokenKind::LeftBrace, "expected '{' after record name")?;
+        let name = self.consume_identifier("expected shape name")?;
+        self.consume(&TokenKind::LeftBrace, "expected '{' after shape name")?;
         let mut fields = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
             let field_span = Span {
@@ -149,30 +149,30 @@ impl Parser {
             if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
-                return Err(self.error_here("expected ',' or '}' after record field"));
+                return Err(self.error_here("expected ',' or '}' after shape field"));
             }
         }
-        self.consume(&TokenKind::RightBrace, "expected '}' after record")?;
+        self.consume(&TokenKind::RightBrace, "expected '}' after shape")?;
         Ok(Stmt::Record { name, fields, span })
     }
 
     fn enum_declaration(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        let name = self.consume_identifier("expected enum name")?;
-        self.consume(&TokenKind::LeftBrace, "expected '{' after enum name")?;
+        let name = self.consume_identifier("expected choice name")?;
+        self.consume(&TokenKind::LeftBrace, "expected '{' after choice name")?;
         let mut variants = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
             variants.push(self.consume_identifier("expected variant name")?);
             if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
-                return Err(self.error_here("expected ',' or '}' after enum variant"));
+                return Err(self.error_here("expected ',' or '}' after choice variant"));
             }
         }
-        self.consume(&TokenKind::RightBrace, "expected '}' after enum")?;
+        self.consume(&TokenKind::RightBrace, "expected '}' after choice")?;
         if variants.is_empty() {
             return Err(NivError::new(
-                "enum requires at least one variant",
+                "choice requires at least one variant",
                 span.line,
                 span.column,
             ));
@@ -188,7 +188,7 @@ impl Parser {
         let span = self.previous_span();
         let path = match self.advance().kind.clone() {
             TokenKind::String(path) => path,
-            _ => return Err(self.error_here("expected quoted import path")),
+            _ => return Err(self.error_here("expected quoted use path")),
         };
         self.optional_semicolon();
         Ok(Stmt::Import { path, span })
@@ -196,21 +196,21 @@ impl Parser {
 
     fn export_declaration(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        self.consume(&TokenKind::LeftBrace, "expected '{' after export")?;
+        self.consume(&TokenKind::LeftBrace, "expected '{' after expose")?;
         let mut names = vec![];
         if !self.check(&TokenKind::RightBrace) {
             loop {
-                names.push(self.consume_identifier("expected exported name")?);
+                names.push(self.consume_identifier("expected exposed name")?);
                 if !self.matches(&[TokenKind::Comma]) {
                     break;
                 }
             }
         }
-        self.consume(&TokenKind::RightBrace, "expected '}' after exports")?;
+        self.consume(&TokenKind::RightBrace, "expected '}' after exposed names")?;
         self.optional_semicolon();
         if names.is_empty() {
             return Err(NivError::new(
-                "export list cannot be empty",
+                "expose list cannot be empty",
                 span.line,
                 span.column,
             ));
@@ -279,7 +279,7 @@ impl Parser {
         let span = self.previous_span();
         let value = if self.matches(&[TokenKind::LeftParen]) {
             let expression = self.expression()?;
-            self.consume(&TokenKind::RightParen, "expected ')' after print value")?;
+            self.consume(&TokenKind::RightParen, "expected ')' after show value")?;
             expression
         } else {
             self.expression()?
@@ -301,7 +301,7 @@ impl Parser {
 
     fn if_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        let condition = self.parenthesized_condition("if")?;
+        let condition = self.control_condition("when")?;
         let then_branch = Box::new(self.statement()?);
         let else_branch = if self.matches(&[TokenKind::Else]) {
             Some(Box::new(self.statement()?))
@@ -318,7 +318,7 @@ impl Parser {
 
     fn while_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        let condition = self.parenthesized_condition("while")?;
+        let condition = self.control_condition("repeat")?;
         let body = Box::new(self.statement()?);
         Ok(Stmt::While {
             condition,
@@ -329,11 +329,13 @@ impl Parser {
 
     fn for_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        self.consume(&TokenKind::LeftParen, "expected '(' after for")?;
+        let parenthesized = self.matches(&[TokenKind::LeftParen]);
         let name = self.consume_identifier("expected iteration binding")?;
-        self.consume(&TokenKind::In, "expected 'in' after iteration binding")?;
+        self.consume(&TokenKind::In, "expected 'within' after iteration binding")?;
         let iterable = self.expression()?;
-        self.consume(&TokenKind::RightParen, "expected ')' after iterable")?;
+        if parenthesized {
+            self.consume(&TokenKind::RightParen, "expected ')' after iterable")?;
+        }
         let body = Box::new(self.statement()?);
         Ok(Stmt::For {
             name,
@@ -343,14 +345,17 @@ impl Parser {
         })
     }
 
-    fn parenthesized_condition(&mut self, keyword: &str) -> Result<Expr, NivError> {
-        self.consume(
-            &TokenKind::LeftParen,
-            &format!("expected '(' after {keyword}"),
-        )?;
-        let condition = self.expression()?;
-        self.consume(&TokenKind::RightParen, "expected ')' after condition")?;
-        Ok(condition)
+    fn control_condition(&mut self, keyword: &str) -> Result<Expr, NivError> {
+        if self.matches(&[TokenKind::LeftParen]) {
+            let condition = self.expression()?;
+            self.consume(
+                &TokenKind::RightParen,
+                &format!("expected ')' after {keyword} condition"),
+            )?;
+            Ok(condition)
+        } else {
+            self.expression()
+        }
     }
 
     fn block_contents(&mut self) -> Result<Vec<Stmt>, NivError> {
@@ -544,10 +549,14 @@ impl Parser {
     }
 
     fn match_expression(&mut self, span: Span) -> Result<Expr, NivError> {
-        self.consume(&TokenKind::LeftParen, "expected '(' after match")?;
-        let subject = self.expression()?;
-        self.consume(&TokenKind::RightParen, "expected ')' after match value")?;
-        self.consume(&TokenKind::LeftBrace, "expected '{' before match arms")?;
+        let subject = if self.matches(&[TokenKind::LeftParen]) {
+            let value = self.expression()?;
+            self.consume(&TokenKind::RightParen, "expected ')' after choose value")?;
+            value
+        } else {
+            self.expression()?
+        };
+        self.consume(&TokenKind::LeftBrace, "expected '{' before choose arms")?;
         let mut arms = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
             let arm_span = Span {
@@ -562,7 +571,7 @@ impl Parser {
             } else {
                 None
             };
-            self.consume(&TokenKind::FatArrow, "expected '=>' after variant")?;
+            self.consume(&TokenKind::FatArrow, "expected '=>' after choice arm")?;
             let value = self.expression()?;
             arms.push(MatchArm {
                 variant,
@@ -573,10 +582,10 @@ impl Parser {
             if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
-                return Err(self.error_here("expected ',' or '}' after match arm"));
+                return Err(self.error_here("expected ',' or '}' after choose arm"));
             }
         }
-        self.consume(&TokenKind::RightBrace, "expected '}' after match")?;
+        self.consume(&TokenKind::RightBrace, "expected '}' after choose")?;
         Ok(Expr::Match(Box::new(subject), arms, span))
     }
 

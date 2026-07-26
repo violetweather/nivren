@@ -8,9 +8,9 @@
 - `version` is canonical `major.minor.patch` decimal with no leading zero except `0`.
 - `entry` is a relative path without a parent component and MUST resolve inside the canonical project root.
 
-Relative imports discovered from the entry MUST remain inside that root. `import "@name"` resolves the declared dependency's entry module and exposes it as namespace `name`. Dependency packages use their own manifests when resolving transitive imports.
+Relative modules discovered from the entry MUST remain inside that root. `use "@name"` resolves the declared dependency's entry module and exposes it as namespace `name`. Dependency packages use their own manifests when resolving transitive `use` declarations.
 
-`niv.lock` format 1 is deterministic and generated. It starts with `format = 1` and one `[[package]]` name/version record, followed in bytewise `(name, version)` order by the complete transitive graph as `[[dependency]]` records containing exact name, version, and lowercase SHA-256 package-archive digest. Implementations MUST NOT use map iteration order, timestamps, or host paths in it. A build MUST reject missing/stale locks, undeclared package imports, missing archives, identity/checksum mismatches, and installed source that differs from its locked archive.
+`niv.lock` format 1 is deterministic and generated. It starts with `format = 1` and one `[[package]]` name/version record, followed in bytewise `(name, version)` order by the complete transitive graph as `[[dependency]]` records containing exact name, version, and lowercase SHA-256 package-archive digest. Implementations MUST NOT use map iteration order, timestamps, or host paths in it. A build MUST reject missing/stale locks, undeclared package uses, missing archives, identity/checksum mismatches, and installed source that differs from its locked archive.
 
 `niv install <registry> [project]` resolves the exact graph from registry v1 metadata, verifies every package, installs it below `.niv/deps/<name>-<version>`, and atomically replaces the lockfile. Installers MUST reject symlinked state/store/package paths and MUST NOT execute package code.
 

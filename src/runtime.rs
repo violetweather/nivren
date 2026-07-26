@@ -106,9 +106,10 @@ impl Display for Value {
             Self::Int(number) => write!(formatter, "{number}"),
             Self::Float(number) => write!(formatter, "{number}"),
             Self::String(string) => write!(formatter, "{string}"),
-            Self::Bool(boolean) => write!(formatter, "{boolean}"),
-            Self::Null => write!(formatter, "null"),
-            Self::Function(function) => write!(formatter, "<fun {}>", function.name),
+            Self::Bool(true) => write!(formatter, "yes"),
+            Self::Bool(false) => write!(formatter, "no"),
+            Self::Null => write!(formatter, "none"),
+            Self::Function(function) => write!(formatter, "<define {}>", function.name),
             Self::Native(function) => write!(formatter, "<native {}>", function.name),
             Self::Array(values) => {
                 write!(formatter, "[")?;
@@ -120,7 +121,7 @@ impl Display for Value {
                 }
                 write!(formatter, "]")
             }
-            Self::RecordType(record) => write!(formatter, "<record {}>", record.name),
+            Self::RecordType(record) => write!(formatter, "<shape {}>", record.name),
             Self::Record(record) => {
                 write!(formatter, "{} {{ ", record.type_name)?;
                 for (index, (name, value)) in record.fields.iter().enumerate() {
@@ -131,7 +132,7 @@ impl Display for Value {
                 }
                 write!(formatter, " }}")
             }
-            Self::EnumType(value) => write!(formatter, "<enum {}>", value.name),
+            Self::EnumType(value) => write!(formatter, "<choice {}>", value.name),
             Self::Enum(value) => write!(formatter, "{}.{}", value.type_name, value.variant),
             Self::Ok(value) => write!(formatter, "Ok({value})"),
             Self::Err(value) => write!(formatter, "Err({value})"),
@@ -385,7 +386,7 @@ impl Interpreter {
                 Flow::Continue(next) => value = next,
                 Flow::Return(_) => {
                     return Err(NivError::new(
-                        "return may only appear inside a function",
+                        "give may only appear inside a function",
                         statement_span(statement).line,
                         statement_span(statement).column,
                     ));
@@ -400,7 +401,7 @@ impl Interpreter {
         let result = match self.execute_chunk(chunk)? {
             VmFlow::Continue(value) => Ok(value),
             VmFlow::Return(_) => Err(NivError::new(
-                "return may only appear inside a function",
+                "give may only appear inside a function",
                 1,
                 1,
             )),
@@ -621,7 +622,7 @@ impl Interpreter {
                 Ok(Flow::Continue(value))
             }
             Stmt::Import { span, .. } => Err(NivError::new(
-                "import requires file-context compilation",
+                "use requires file-context compilation",
                 span.line,
                 span.column,
             )),
@@ -640,7 +641,7 @@ impl Interpreter {
                     Flow::Continue(_) => {}
                     Flow::Return(_) => {
                         return Err(NivError::new(
-                            "return may only appear inside a function",
+                            "give may only appear inside a function",
                             span.line,
                             span.column,
                         ));
@@ -651,7 +652,7 @@ impl Interpreter {
                 for export in exports {
                     let value = scope.values.get(export).ok_or_else(|| {
                         NivError::new(
-                            format!("module '{name}' does not declare export '{export}'"),
+                            format!("module '{name}' does not declare expose '{export}'"),
                             span.line,
                             span.column,
                         )
@@ -809,7 +810,7 @@ impl Interpreter {
                 }
                 Value::Module(module) => module.get(name).cloned().ok_or_else(|| {
                     NivError::new(
-                        format!("module has no exported member '{name}'"),
+                        format!("module has no exposed member '{name}'"),
                         span.line,
                         span.column,
                     )
@@ -827,7 +828,7 @@ impl Interpreter {
                         .find(|arm| arm.variant == value.variant)
                         .ok_or_else(|| {
                             NivError::new(
-                                format!("no match arm for {}.{}", value.type_name, value.variant),
+                                format!("no choose arm for {}.{}", value.type_name, value.variant),
                                 span.line,
                                 span.column,
                             )
@@ -836,7 +837,7 @@ impl Interpreter {
                 }
                 Value::Ok(value) => {
                     let arm = arms.iter().find(|arm| arm.variant == "Ok").ok_or_else(|| {
-                        NivError::new("no match arm for Ok", span.line, span.column)
+                        NivError::new("no choose arm for Ok", span.line, span.column)
                     })?;
                     self.evaluate_match_arm(arm, Some(value.as_ref().clone()))
                 }
@@ -845,12 +846,15 @@ impl Interpreter {
                         .iter()
                         .find(|arm| arm.variant == "Err")
                         .ok_or_else(|| {
-                            NivError::new("no match arm for Err", span.line, span.column)
+                            NivError::new("no choose arm for Err", span.line, span.column)
                         })?;
                     self.evaluate_match_arm(arm, Some(value.as_ref().clone()))
                 }
                 other => Err(NivError::new(
-                    format!("match requires enum value, found {}", other.type_name()),
+                    format!(
+                        "choose requires choice or Result value, found {}",
+                        other.type_name()
+                    ),
                     span.line,
                     span.column,
                 )),
@@ -1439,7 +1443,10 @@ impl Interpreter {
             Value::Err(value) => ("Err".into(), Some(value.as_ref().clone())),
             other => {
                 return Err(NivError::new(
-                    format!("match requires enum value, found {}", other.type_name()),
+                    format!(
+                        "choose requires choice or Result value, found {}",
+                        other.type_name()
+                    ),
                     span.line,
                     span.column,
                 ));
@@ -1450,7 +1457,7 @@ impl Interpreter {
             .find(|arm| arm.variant == variant)
             .ok_or_else(|| {
                 NivError::new(
-                    format!("no match arm for {variant}"),
+                    format!("no choose arm for {variant}"),
                     span.line,
                     span.column,
                 )
@@ -1491,7 +1498,7 @@ impl Interpreter {
         self.environment = previous;
         if matches!(execution?, VmFlow::Return(_)) {
             return Err(NivError::new(
-                "return may only appear inside a function",
+                "give may only appear inside a function",
                 span.line,
                 span.column,
             ));
@@ -1501,7 +1508,7 @@ impl Interpreter {
         for export in exports {
             let binding = scope.values.get(export).ok_or_else(|| {
                 NivError::new(
-                    format!("module '{name}' does not declare export '{export}'"),
+                    format!("module '{name}' does not declare expose '{export}'"),
                     span.line,
                     span.column,
                 )
@@ -1904,14 +1911,14 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Index => "index",
         Op::Coalesce(_) => "coalesce",
         Op::Get(_) => "get",
-        Op::Print => "print",
+        Op::Print => "show",
         Op::EnterScope => "enter_scope",
         Op::ExitScope => "exit_scope",
         Op::MakeFunction { .. } => "make_function",
-        Op::Return => "return",
+        Op::Return => "give",
         Op::DefineRecord { .. } => "define_record",
         Op::DefineEnum { .. } => "define_enum",
-        Op::Match(_) => "match",
+        Op::Match(_) => "choose",
         Op::DefineModule { .. } => "define_module",
         Op::Iterate { .. } => "iterate",
     }
@@ -2847,7 +2854,7 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
         )),
         Value::Module(module) => module.get(name).cloned().ok_or_else(|| {
             NivError::new(
-                format!("module has no exported member '{name}'"),
+                format!("module has no exposed member '{name}'"),
                 span.line,
                 span.column,
             )

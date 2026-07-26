@@ -1,13 +1,13 @@
-let language: String = "Nivren"
-let values: [Int] = [2, 3, 5, 7]
+keep language: String = "Nivren"
+keep values: [Int] = [2, 3, 5, 7]
 
-fun sum(items: [Int]) -> Int {
-    var total: Int = 0
-    for (value in items) {
+define sum(items: [Int]) gives Int {
+    change total: Int = 0
+    each (value within items) {
         total = total + value
     }
-    return total
+    give total
 }
 
-print("Hello, " + language + "!")
-print(sum(values))
+show("Hello, " + language + "!")
+show(sum(values))

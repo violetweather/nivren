@@ -151,9 +151,31 @@ fn document_end(source: &str) -> Value {
 
 fn completions() -> Vec<&'static str> {
     vec![
-        "let", "var", "fun", "return", "if", "else", "while", "for", "in", "record", "enum",
-        "match", "import", "export", "true", "false", "null", "print", "std", "Result", "Int",
-        "Float", "String", "Bool",
+        "keep",
+        "change",
+        "define",
+        "give",
+        "when",
+        "otherwise",
+        "repeat",
+        "each",
+        "within",
+        "shape",
+        "choice",
+        "choose",
+        "use",
+        "expose",
+        "yes",
+        "no",
+        "none",
+        "show",
+        "gives",
+        "std",
+        "Result",
+        "Int",
+        "Float",
+        "String",
+        "Bool",
     ]
 }
 
@@ -169,7 +191,7 @@ mod tests {
     fn language_server_publishes_diagnostics_formats_and_completes() {
         let messages = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///main.niv","text":"fun main() {\nlet value: String = 42\n}"}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///main.niv","text":"define main() {\nkeep value: String = 42\n}"}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///main.niv"}}}),
             json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{}}),
             json!({"jsonrpc":"2.0","id":4,"method":"shutdown","params":null}),
@@ -197,14 +219,14 @@ mod tests {
                 && response
                     .pointer("/result/0/newText")
                     .and_then(Value::as_str)
-                    .is_some_and(|text| text.contains("    let value"))
+                    .is_some_and(|text| text.contains("    keep value"))
         }));
         assert!(responses.iter().any(|response| {
             response.get("id") == Some(&json!(3))
                 && response
                     .get("result")
                     .and_then(Value::as_array)
-                    .is_some_and(|items| items.iter().any(|item| item["label"] == "match"))
+                    .is_some_and(|items| items.iter().any(|item| item["label"] == "choose"))
         }));
     }
 

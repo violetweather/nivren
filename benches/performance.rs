@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use nivren::runtime::{Interpreter, Value};
 
 fn main() {
-    let source = "fun kernel(a: Int, b: Int) -> Int { return (a + b) * 2; } var index = 0; var result = 0; while (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
+    let source = "define kernel(a: Int, b: Int) gives Int { give (a + b) * 2; } change index = 0; change result = 0; repeat (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
     let tokens = nivren::lexer::scan(source).unwrap();
     let program = nivren::parser::parse(tokens).unwrap();
     nivren::typecheck::check(&program).unwrap();

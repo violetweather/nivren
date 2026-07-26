@@ -24,7 +24,7 @@ proptest! {
         name in "[a-z][a-z0-9_]{0,15}",
         value in any::<i64>(),
     ) {
-        let source = format!("let   {name}:Int={value};\n{name}");
+        let source = format!("keep   {name}:Int={value};\n{name}");
         let once = nivren::formatter::format(&source);
         let twice = nivren::formatter::format(&once);
         prop_assert_eq!(once, twice);

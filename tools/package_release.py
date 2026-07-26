@@ -22,10 +22,10 @@ DOCUMENTS = (
     "THIRD_PARTY.md",
     "Cargo.lock",
     "docs/GETTING_STARTED.md",
-    "spec/LANGUAGE-1.md",
+    "spec/LANGUAGE-2.md",
     "spec/BYTECODE-1.md",
     "spec/PACKAGE-1.md",
-    "spec/STANDARD-LIBRARY-1.md",
+    "spec/STANDARD-LIBRARY-2.md",
 )
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)

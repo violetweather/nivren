@@ -132,14 +132,7 @@ impl Lexer {
                 self.add(kind);
             }
             '+' => self.add(TokenKind::Plus),
-            '-' => {
-                let kind = if self.matches('>') {
-                    TokenKind::Arrow
-                } else {
-                    TokenKind::Minus
-                };
-                self.add(kind);
-            }
+            '-' => self.add(TokenKind::Minus),
             '*' => self.add(TokenKind::Star),
             '%' => self.add(TokenKind::Percent),
             '!' => {
@@ -296,24 +289,25 @@ impl Lexer {
         }
         let text: String = self.chars[self.start..self.current].iter().collect();
         let kind = match text.as_str() {
-            "let" => TokenKind::Let,
-            "var" => TokenKind::Var,
-            "fun" => TokenKind::Fun,
-            "return" => TokenKind::Return,
-            "if" => TokenKind::If,
-            "else" => TokenKind::Else,
-            "while" => TokenKind::While,
-            "for" => TokenKind::For,
-            "in" => TokenKind::In,
-            "true" => TokenKind::True,
-            "false" => TokenKind::False,
-            "null" => TokenKind::Null,
-            "print" => TokenKind::Print,
-            "record" => TokenKind::Record,
-            "enum" => TokenKind::Enum,
-            "match" => TokenKind::Match,
-            "import" => TokenKind::Import,
-            "export" => TokenKind::Export,
+            "keep" => TokenKind::Let,
+            "change" => TokenKind::Var,
+            "define" => TokenKind::Fun,
+            "give" => TokenKind::Return,
+            "when" => TokenKind::If,
+            "otherwise" => TokenKind::Else,
+            "repeat" => TokenKind::While,
+            "each" => TokenKind::For,
+            "within" => TokenKind::In,
+            "yes" => TokenKind::True,
+            "no" => TokenKind::False,
+            "none" => TokenKind::Null,
+            "show" => TokenKind::Print,
+            "shape" => TokenKind::Record,
+            "choice" => TokenKind::Enum,
+            "choose" => TokenKind::Match,
+            "use" => TokenKind::Import,
+            "expose" => TokenKind::Export,
+            "gives" => TokenKind::Arrow,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             _ => TokenKind::Identifier(text),

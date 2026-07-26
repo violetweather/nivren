@@ -3,10 +3,10 @@
 Build from the repository root:
 
 ```text
-docker build -f deploy/registry/Dockerfile -t nivren-registry:0.9-beta.1 .
+docker build -f deploy/registry/Dockerfile -t nivren-registry:0.10-beta.1 .
 docker run --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   --mount type=bind,src=/srv/nivren-registry,dst=/registry \
-  -p 127.0.0.1:8080:8080 nivren-registry:0.9-beta.1
+  -p 127.0.0.1:8080:8080 nivren-registry:0.10-beta.1
 ```
 
 Provision `/srv/nivren-registry/v1/trust/root.pub`, `status.json`, and `advisories.json` before starting. The image runs as UID/GID 10001 and only the registry volume is writable.

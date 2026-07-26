@@ -39,14 +39,14 @@ fn arithmetic_and_precedence() {
 
 #[test]
 fn immutable_bindings_reject_assignment() {
-    let errors = nivren::run("let answer = 42; answer = 7;").unwrap_err();
+    let errors = nivren::run("keep answer = 42; answer = 7;").unwrap_err();
     assert!(errors[0].message.contains("immutable"));
 }
 
 #[test]
 fn mutable_bindings_and_loops_work() {
     assert_eq!(
-        eval("var n = 0; while (n < 5) { n = n + 1; } n"),
+        eval("change n = 0; repeat (n < 5) { n = n + 1; } n"),
         Value::Int(5)
     );
 }
@@ -54,7 +54,7 @@ fn mutable_bindings_and_loops_work() {
 #[test]
 fn functions_return_values() {
     assert_eq!(
-        eval("fun add(a, b) { return a + b; } add(20, 22)"),
+        eval("define add(a, b) { give a + b; } add(20, 22)"),
         Value::Int(42)
     );
 }
@@ -63,7 +63,7 @@ fn functions_return_values() {
 fn closures_capture_scope() {
     assert_eq!(
         eval(
-            "fun outer(x) { fun inner(y) { return x + y; } return inner; } let add2 = outer(2); add2(40)"
+            "define outer(x) { define inner(y) { give x + y; } give inner; } keep add2 = outer(2); add2(40)"
         ),
         Value::Int(42)
     );
@@ -71,14 +71,37 @@ fn closures_capture_scope() {
 
 #[test]
 fn conditions_require_booleans() {
-    let errors = nivren::run("if (1) { 2 }").unwrap_err();
+    let errors = nivren::run("when 1 { 2 }").unwrap_err();
     assert!(errors[0].message.contains("expected Bool"));
 }
 
 #[test]
 fn scanner_reports_locations() {
-    let errors = nivren::check("let x = @;").unwrap_err();
-    assert_eq!((errors[0].line, errors[0].column), (1, 9));
+    let errors = nivren::check("keep x = @;").unwrap_err();
+    assert_eq!((errors[0].line, errors[0].column), (1, 10));
+}
+
+#[test]
+fn prototype_spellings_are_not_part_of_edition_two() {
+    for source in [
+        "let value = 1",
+        "var value = 1",
+        "fun value() { return 1 }",
+        "if (true) { print(1) } else { print(0) }",
+        "while (false) {}",
+        "for (value in [1]) {}",
+        "record Value { item: Int }",
+        "enum Value { One }",
+        "match (value) { One => 1 }",
+        "import \"value.niv\"",
+        "export { value }",
+        "null",
+    ] {
+        assert!(
+            nivren::check(source).is_err(),
+            "accepted prototype source: {source}"
+        );
+    }
 }
 
 #[test]
@@ -94,7 +117,7 @@ fn undefined_names_fail_during_check() {
 
 #[test]
 fn operator_misuse_fails_during_check() {
-    let errors = nivren::check("true - 1").unwrap_err();
+    let errors = nivren::check("yes - 1").unwrap_err();
     assert!(
         errors
             .iter()
@@ -104,15 +127,18 @@ fn operator_misuse_fails_during_check() {
 
 #[test]
 fn arity_fails_during_check() {
-    let errors = nivren::check("fun pair(a, b) { return a; } pair(1)").unwrap_err();
+    let errors = nivren::check("define pair(a, b) { give a; } pair(1)").unwrap_err();
     assert!(errors[0].message.contains("expects 2"));
 }
 
 #[test]
 fn immutable_arrays_support_safe_indexing() {
-    assert_eq!(eval("let values = [10, 20, 30]; values[1]"), Value::Int(20));
     assert_eq!(
-        eval("let values = append([1, 2], 3); len(values)"),
+        eval("keep values = [10, 20, 30]; values[1]"),
+        Value::Int(20)
+    );
+    assert_eq!(
+        eval("keep values = append([1, 2], 3); len(values)"),
         Value::Int(3)
     );
 }
@@ -125,19 +151,18 @@ fn array_bounds_are_checked() {
 
 #[test]
 fn mixed_array_types_fail_check() {
-    let errors = nivren::check("[1, true]").unwrap_err();
+    let errors = nivren::check("[1, yes]").unwrap_err();
     assert!(errors[0].message.contains("one type"));
 }
 
 #[test]
 fn annotations_check_bindings_arguments_and_returns() {
-    let source =
-        "fun add(a: Int, b: Int) -> Int { return a + b; } let answer: Int = add(20, 22); answer";
+    let source = "define add(a: Int, b: Int) gives Int { give a + b; } keep answer: Int = add(20, 22); answer";
     assert_eq!(eval(source), Value::Int(42));
-    assert!(nivren::check("let value: String = 42").is_err());
-    assert!(nivren::check("fun bad() -> Bool { return 1; }").is_err());
+    assert!(nivren::check("keep value: String = 42").is_err());
+    assert!(nivren::check("define bad() gives Bool { give 1; }").is_err());
     assert!(
-        nivren::check("fun onlyInt(value: Int) -> Int { return value; } onlyInt(true)").is_err()
+        nivren::check("define onlyInt(value: Int) gives Int { give value; } onlyInt(yes)").is_err()
     );
 }
 
@@ -145,7 +170,7 @@ fn annotations_check_bindings_arguments_and_returns() {
 fn assertions_can_guard_language_tests() {
     assert_eq!(eval("assert(2 + 2 == 4, \"math\")"), Value::Null);
     assert!(
-        nivren::run("assert(false, \"broken\")").unwrap_err()[0]
+        nivren::run("assert(no, \"broken\")").unwrap_err()[0]
             .message
             .contains("broken")
     );
@@ -154,26 +179,26 @@ fn assertions_can_guard_language_tests() {
 #[test]
 fn nullable_types_require_explicit_declaration_and_fallback() {
     assert_eq!(
-        eval("let missing: String? = null; missing ?? \"fallback\""),
+        eval("keep missing: String? = none; missing ?? \"fallback\""),
         Value::String("fallback".into())
     );
     assert_eq!(
-        eval("let present: String? = \"value\"; present ?? \"fallback\""),
+        eval("keep present: String? = \"value\"; present ?? \"fallback\""),
         Value::String("value".into())
     );
-    assert!(nivren::check("let invalid: String = null").is_err());
-    assert!(nivren::check("let plain: Int = 1; plain ?? 2").is_err());
+    assert!(nivren::check("keep invalid: String = none").is_err());
+    assert!(nivren::check("keep plain: Int = 1; plain ?? 2").is_err());
 }
 
 #[test]
 fn records_are_nominal_typed_values() {
     let source =
-        "record Person { name: String, age: Int } let ada: Person = Person(\"Ada\", 37); ada.name";
+        "shape Person { name: String, age: Int } keep ada: Person = Person(\"Ada\", 37); ada.name";
     assert_eq!(eval(source), Value::String("Ada".into()));
-    assert!(nivren::check("record Person { name: String } let person = Person(42)").is_err());
+    assert!(nivren::check("shape Person { name: String } keep person = Person(42)").is_err());
     assert!(
         nivren::check(
-            "record Person { name: String } let person = Person(\"Ada\"); person.missing"
+            "shape Person { name: String } keep person = Person(\"Ada\"); person.missing"
         )
         .is_err()
     );
@@ -181,28 +206,32 @@ fn records_are_nominal_typed_values() {
 
 #[test]
 fn sealed_enums_require_exhaustive_matches() {
-    let source = "enum State { Idle, Running, Done } let state: State = State.Running; match (state) { Idle => 0, Running => 1, Done => 2 }";
+    let source = "choice State { Idle, Running, Done } keep state: State = State.Running; choose (state) { Idle => 0, Running => 1, Done => 2 }";
     assert_eq!(eval(source), Value::Int(1));
     assert!(
         nivren::check(
-            "enum State { Idle, Done } let state = State.Idle; match (state) { Idle => 0 }"
+            "choice State { Idle, Done } keep state = State.Idle; choose (state) { Idle => 0 }"
         )
         .is_err()
     );
-    assert!(nivren::check("enum State { Idle } let state = State.Missing").is_err());
+    assert!(nivren::check("choice State { Idle } keep state = State.Missing").is_err());
 }
 
 #[test]
 fn for_iteration_is_typed_and_unicode_safe() {
     assert_eq!(
-        eval("var total: Int = 0; for (value in [1, 2, 3]) { total = total + value; } total"),
+        eval(
+            "change total: Int = 0; each (value within [1, 2, 3]) { total = total + value; } total"
+        ),
         Value::Int(6)
     );
     assert_eq!(
-        eval("var count: Int = 0; for (character in \"a💡c\") { count = count + 1; } count"),
+        eval(
+            "change count: Int = 0; each (character within \"a💡c\") { count = count + 1; } count"
+        ),
         Value::Int(3)
     );
-    assert!(nivren::check("for (value in 42) { print(value) }").is_err());
+    assert!(nivren::check("each (value within 42) { show(value) }").is_err());
 }
 
 #[test]
@@ -216,15 +245,15 @@ fn integers_and_floats_are_distinct_and_overflow_is_trapped() {
 
 #[test]
 fn typed_results_require_exhaustive_payload_matching() {
-    let source = "fun parse(valid: Bool) -> Result<Int, String> { if (valid) { return ok(42); } return err(\"invalid\"); } let result: Result<Int, String> = parse(true); match (result) { Ok(value) => value, Err(message) => 0 }";
+    let source = "define parse(valid: Bool) gives Result<Int, String> { when (valid) { give ok(42); } give err(\"invalid\"); } keep result: Result<Int, String> = parse(yes); choose (result) { Ok(value) => value, Err(message) => 0 }";
     assert_eq!(eval(source), Value::Int(42));
     assert!(
         nivren::check(
-            "let result: Result<Int, String> = ok(1); match (result) { Ok(value) => value }"
+            "keep result: Result<Int, String> = ok(1); choose (result) { Ok(value) => value }"
         )
         .is_err()
     );
-    assert!(nivren::check("let result: Result<Int, String> = err(\"bad\"); match (result) { Ok => 1, Err(error) => 0 }").is_err());
+    assert!(nivren::check("keep result: Result<Int, String> = err(\"bad\"); choose (result) { Ok => 1, Err(error) => 0 }").is_err());
 }
 
 fn module_fixture(name: &str) -> PathBuf {
@@ -242,13 +271,13 @@ fn file_modules_resolve_relative_imports_once() {
     let directory = module_fixture("modules");
     fs::write(
         directory.join("math.niv"),
-        "fun double(value: Int) -> Int { return value * 2; } let private = 7; export { double };",
+        "define double(value: Int) gives Int { give value * 2; } keep private = 7; expose { double };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
     fs::write(
         &entry,
-        "import \"math.niv\"; import \"math.niv\"; math.double(21)",
+        "use \"math.niv\"; use \"math.niv\"; math.double(21)",
     )
     .unwrap();
 
@@ -267,15 +296,15 @@ fn module_members_are_private_unless_exported() {
     let directory = module_fixture("private-modules");
     fs::write(
         directory.join("secrets.niv"),
-        "let visible = 1; let hidden = 2; export { visible };",
+        "keep visible = 1; keep hidden = 2; expose { visible };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
-    fs::write(&entry, "import \"secrets.niv\"; secrets.hidden").unwrap();
+    fs::write(&entry, "use \"secrets.niv\"; secrets.hidden").unwrap();
 
     let program = nivren::modules::load(&entry).unwrap();
     let errors = nivren::typecheck::check(&program).unwrap_err();
-    assert!(errors[0].message.contains("no exported member 'hidden'"));
+    assert!(errors[0].message.contains("no exposed member 'hidden'"));
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -285,18 +314,18 @@ fn module_record_types_are_nominally_namespaced() {
     let directory = module_fixture("nominal-modules");
     fs::write(
         directory.join("numbers.niv"),
-        "record Box { value: Int } fun read(box: Box) -> Int { return box.value; } export { Box, read };",
+        "shape Box { value: Int } define read(box: Box) gives Int { give box.value; } expose { Box, read };",
     )
     .unwrap();
     fs::write(
         directory.join("strings.niv"),
-        "record Box { value: String } export { Box };",
+        "shape Box { value: String } expose { Box };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
     fs::write(
         &entry,
-        "import \"numbers.niv\"; import \"strings.niv\"; numbers.read(strings.Box(\"wrong\"))",
+        "use \"numbers.niv\"; use \"strings.niv\"; numbers.read(strings.Box(\"wrong\"))",
     )
     .unwrap();
 
@@ -312,11 +341,11 @@ fn module_record_types_are_nominally_namespaced() {
 fn file_modules_reject_import_cycles() {
     let directory = module_fixture("cycles");
     let first = directory.join("first.niv");
-    fs::write(&first, "import \"second.niv\";").unwrap();
-    fs::write(directory.join("second.niv"), "import \"first.niv\";").unwrap();
+    fs::write(&first, "use \"second.niv\";").unwrap();
+    fs::write(directory.join("second.niv"), "use \"first.niv\";").unwrap();
 
     let errors = nivren::modules::load(&first).unwrap_err();
-    assert!(errors[0].message.contains("import cycle"));
+    assert!(errors[0].message.contains("use cycle"));
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -370,7 +399,7 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
     .unwrap();
     fs::write(
         dependency_root.join("main.niv"),
-        "fun answer() -> Int { return 42; } export { answer };",
+        "define answer() gives Int { give 42; } expose { answer };",
     )
     .unwrap();
     let dependency = nivren::project::Manifest::load(&dependency_root).unwrap();
@@ -390,7 +419,7 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
     .unwrap();
     fs::write(
         app.join("main.niv"),
-        "import \"@answerlib\"; answerlib.answer()",
+        "use \"@answerlib\"; answerlib.answer()",
     )
     .unwrap();
     let app_manifest = nivren::project::Manifest::load(&app).unwrap();
@@ -412,7 +441,7 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
 
     fs::write(
         app.join(".niv/deps/answerlib-1.0.0/main.niv"),
-        "export { answer }; let answer = 0;",
+        "expose { answer }; keep answer = 0;",
     )
     .unwrap();
     assert!(nivren::package::installed_lockfile(&app_manifest).is_err());
@@ -447,12 +476,12 @@ fn project_modules_cannot_escape_the_root() {
         std::process::id(),
         std::thread::current().id()
     ));
-    fs::write(&outside, "let secret = 42;").unwrap();
+    fs::write(&outside, "keep secret = 42;").unwrap();
     let entry = directory.join("main.niv");
     fs::write(
         &entry,
         format!(
-            "import \"../{}\";",
+            "use \"../{}\";",
             outside.file_name().unwrap().to_string_lossy()
         ),
     )
@@ -467,46 +496,17 @@ fn project_modules_cannot_escape_the_root() {
 
 #[test]
 fn formatter_is_comment_safe_and_idempotent() {
-    let source = "fun main() {\nlet text = \"{not a block}\" // }\n/* { nested /* } */ ok */\nif (true) {\nprint(text)\n}\n}\n";
+    let source = "define main() {\nkeep text = \"{not a block}\" // }\n/* { nested /* } */ ok */\nwhen yes {\nshow(text)\n}\n}\n";
     let formatted = nivren::formatter::format(source);
-    assert!(formatted.contains("    let text = \"{not a block}\" // }"));
+    assert!(formatted.contains("    keep text = \"{not a block}\" // }"));
     assert!(formatted.contains("    /* { nested /* } */ ok */"));
     assert_eq!(nivren::formatter::format(&formatted), formatted);
 }
 
 #[test]
-fn migrations_change_code_without_changing_comments_or_strings() {
-    let source = "let before: Number = 1 // Number\nlet text = \"Number\"\nlet after: Number = 2\n";
-    let migrated = nivren::migration::migrate(source, "0.2").unwrap();
-    assert_eq!(
-        migrated,
-        "let before: Int = 1 // Number\nlet text = \"Number\"\nlet after: Int = 2\n"
-    );
-    assert_eq!(
-        nivren::migration::migrate(&migrated, "0.2").unwrap(),
-        migrated
-    );
-}
-
-#[test]
-fn every_pre_one_release_has_an_idempotent_migration() {
-    let source = "fun answer() -> Int { return 42; } answer()";
-    for version in ["0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9"] {
-        let migrated = nivren::migration::migrate(source, version).unwrap();
-        assert_eq!(migrated, source, "unexpected {version} migration");
-        assert_eq!(
-            nivren::migration::migrate(&migrated, version).unwrap(),
-            migrated,
-            "{version} migration is not idempotent"
-        );
-    }
-    assert!(nivren::migration::migrate(source, "0.1").is_err());
-}
-
-#[test]
 fn documentation_lists_only_explicit_module_exports() {
     let source =
-        "fun public(value: Int) -> Int { return value; } let hidden = 1; export { public };";
+        "define public(value: Int) gives Int { give value; } keep hidden = 1; expose { public };";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "sample".into(),
@@ -515,13 +515,13 @@ fn documentation_lists_only_explicit_module_exports() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(docs.contains("fun public(value: Int) -> Int"));
+    assert!(docs.contains("define public(value: Int) gives Int"));
     assert!(!docs.contains("hidden"));
 }
 
 #[test]
 fn bytecode_is_versioned_verified_and_deterministic() {
-    let source = "fun sum(limit: Int) -> Int { var total = 0; var index = 0; while (index < limit) { total = total + index; index = index + 1; } return total; } sum(5)";
+    let source = "define sum(limit: Int) gives Int { change total = 0; change index = 0; repeat (index < limit) { total = total + index; index = index + 1; } give total; } sum(5)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -600,7 +600,7 @@ fn bytecode_verifier_rejects_invalid_operands_and_scopes() {
 
 #[test]
 fn binary_bundles_round_trip_and_execute() {
-    let source = "record Pair { left: Int, right: Int } enum Choice { First, Second } fun choose(value: Choice) -> Int { return match (value) { First => 1, Second => 2 }; } var total = 0; for (value in [10, 20]) { total = total + value; } let pair = Pair(total, choose(Choice.Second)); pair.left + pair.right";
+    let source = "shape Pair { left: Int, right: Int } choice Choice { First, Second } define pick(value: Choice) gives Int { give choose value { First => 1, Second => 2 }; } change total = 0; each value within [10, 20] { total = total + value; } keep pair = Pair(total, pick(Choice.Second)); pair.left + pair.right";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let compiled = nivren::bytecode::compile(&program).unwrap();
@@ -653,7 +653,7 @@ fn binary_bundle_decoder_rejects_hostile_input() {
 
 #[test]
 fn gc_stress_preserves_escaping_closures_and_collects_cycles() {
-    let source = "fun make(base: Int) { fun add(value: Int) -> Int { return base + value; } return add; } let escaped = make(40); var index = 0; while (index < 100) { fun temporary() -> Int { return index; } temporary(); index = index + 1; } escaped(2)";
+    let source = "define make(base: Int) { define add(value: Int) gives Int { give base + value; } give add; } keep escaped = make(40); change index = 0; repeat (index < 100) { define temporary() gives Int { give index; } temporary(); index = index + 1; } escaped(2)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -674,11 +674,11 @@ fn typed_standard_library_handles_files_paths_time_and_process_errors() {
     let file = directory.join("message.txt");
     let path = file.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
-        "let writeResult: Result<Null, String> = std.fs.write(\"{path}\", \"hello\"); assert(match (writeResult) {{ Ok(value) => true, Err(error) => false }}, \"write\"); let readResult: Result<String, String> = std.fs.read(\"{path}\"); let text = match (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(std.fs.exists(\"{path}\"), \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
+        "keep writeResult: Result<Null, String> = std.fs.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ Ok(value) => yes, Err(error) => no }}, \"write\"); keep readResult: Result<String, String> = std.fs.read(\"{path}\"); keep text = choose (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(std.fs.exists(\"{path}\"), \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
 
-    let process = "let result: Result<String, String> = std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); match (result) { Ok(output) => false, Err(error) => true }";
+    let process = "keep result: Result<String, String> = std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); choose (result) { Ok(output) => no, Err(error) => yes }";
     assert_eq!(eval_vm(process), Value::Bool(true));
     assert!(nivren::check("std.fs.read(42)").is_err());
 
@@ -707,7 +707,7 @@ fn bounded_json_engine_validates_unicode_and_formats_deterministically() {
         );
     }
 
-    let program = "let result: Result<String, String> = std.json.compact(\"{\\\"ok\\\": true}\"); match (result) { Ok(value) => value, Err(error) => error }";
+    let program = "keep result: Result<String, String> = std.json.compact(\"{\\\"ok\\\": true}\"); choose result { Ok(value) => value, Err(error) => error }";
     assert_eq!(eval_vm(program), Value::String("{\"ok\":true}".into()));
 }
 
@@ -743,7 +743,7 @@ fn typed_tcp_standard_library_uses_bounded_timeouts() {
         stream.write_all(b"hello").unwrap();
     });
     let source = format!(
-        "let connection = std.net.connect(\"127.0.0.1\", {port}, 2.0); match (connection) {{ Ok(stream) => match (std.net.read(stream, 5)) {{ Ok(text) => text, Err(error) => error }}, Err(error) => error }}"
+        "keep connection = std.net.connect(\"127.0.0.1\", {port}, 2.0); choose (connection) {{ Ok(stream) => choose (std.net.read(stream, 5)) {{ Ok(text) => text, Err(error) => error }}, Err(error) => error }}"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
     server.join().unwrap();
@@ -752,10 +752,10 @@ fn typed_tcp_standard_library_uses_bounded_timeouts() {
 
 #[test]
 fn structured_tasks_cancel_and_exchange_channel_values() {
-    let source = "let channel = std.channel.create(1); fun producer() -> Int { let sent = std.channel.send(channel, 42, 2.0); return match (sent) { Ok(value) => 1, Err(error) => 0 }; } let task = std.task.spawn(producer); let received = std.channel.receive(channel, 2.0); let value = match (received) { Ok(item) => item, Err(error) => 0 }; let completed = std.task.await(task); assert(match (completed) { Ok(code) => code == 1, Err(error) => false }, \"task completion\"); value";
+    let source = "keep channel = std.channel.create(1); define producer() gives Int { keep sent = std.channel.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.task.spawn(producer); keep received = std.channel.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.task.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
     assert_eq!(eval_vm(source), Value::Int(42));
 
-    let cancellation = "fun forever() -> Int { var value = 0; while (value < 9223372036854775807) { value = value + 1; } return value; } let task = std.task.spawn(forever); std.task.cancel(task); let result = std.task.await(task); match (result) { Ok(value) => false, Err(error) => true }";
+    let cancellation = "define forever() gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.task.spawn(forever); std.task.cancel(task); keep result = std.task.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
     assert_eq!(eval_vm(cancellation), Value::Bool(true));
     assert!(nivren::check("std.task.spawn(42)").is_err());
     assert!(nivren::run("std.task.spawn(42)").is_err());
@@ -765,16 +765,16 @@ fn structured_tasks_cancel_and_exchange_channel_values() {
 fn bytecode_vm_matches_the_tree_interpreter() {
     let programs = [
         "2 + 3 * 4",
-        "var n = 0; while (n < 5) { n = n + 1; } n",
-        "if (true and !false) { 42 } else { 0 }",
-        "fun outer(x: Int) { fun inner(y: Int) { return x + y; } return inner; } outer(2)(40)",
-        "let values = append([1, 2], 3); values[2]",
-        "let missing: String? = null; missing ?? \"fallback\"",
-        "record Person { name: String, age: Int } let person = Person(\"Ada\", 37); person.age",
-        "enum State { Idle, Ready } let state = State.Ready; match (state) { Idle => 0, Ready => 42 }",
-        "let result: Result<Int, String> = ok(42); match (result) { Ok(value) => value, Err(message) => 0 }",
-        "var total = 0; for (value in [10, 20, 12]) { total = total + value; } total",
-        "fun first() -> Int { for (value in [42, 0]) { return value; } return 0; } first()",
+        "change n = 0; repeat (n < 5) { n = n + 1; } n",
+        "when yes and !no { 42 } otherwise { 0 }",
+        "define outer(x: Int) { define inner(y: Int) { give x + y; } give inner; } outer(2)(40)",
+        "keep values = append([1, 2], 3); values[2]",
+        "keep missing: String? = none; missing ?? \"fallback\"",
+        "shape Person { name: String, age: Int } keep person = Person(\"Ada\", 37); person.age",
+        "choice State { Idle, Ready } keep state = State.Ready; choose (state) { Idle => 0, Ready => 42 }",
+        "keep result: Result<Int, String> = ok(42); choose (result) { Ok(value) => value, Err(message) => 0 }",
+        "change total = 0; each (value within [10, 20, 12]) { total = total + value; } total",
+        "define first() gives Int { each (value within [42, 0]) { give value; } give 0; } first()",
     ];
     for source in programs {
         assert_eq!(
@@ -790,11 +790,11 @@ fn bytecode_vm_executes_namespaced_modules() {
     let directory = module_fixture("bytecode-modules");
     fs::write(
         directory.join("answer.niv"),
-        "fun value() -> Int { return 42; } export { value };",
+        "define value() gives Int { give 42; } expose { value };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
-    fs::write(&entry, "import \"answer.niv\"; answer.value()").unwrap();
+    fs::write(&entry, "use \"answer.niv\"; answer.value()").unwrap();
     let program = nivren::modules::load(&entry).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -810,7 +810,7 @@ fn bytecode_vm_executes_namespaced_modules() {
 #[test]
 fn bytecode_runtime_errors_include_call_frames() {
     let errors = nivren::run(
-        "fun inner() -> Int { return 1 / 0; } fun outer() -> Int { return inner(); } outer()",
+        "define inner() gives Int { give 1 / 0; } define outer() gives Int { give inner(); } outer()",
     )
     .unwrap_err();
     let functions: Vec<&str> = errors[0]
@@ -824,7 +824,7 @@ fn bytecode_runtime_errors_include_call_frames() {
 #[test]
 fn runtime_metrics_cover_nested_bytecode_and_operations() {
     let source =
-        "fun twice(value: Int) -> Int { return value * 2; }\nlet answer = twice(21);\nanswer";
+        "define twice(value: Int) gives Int { give value * 2; }\nkeep answer = twice(21);\nanswer";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -851,7 +851,7 @@ fn runtime_metrics_cover_nested_bytecode_and_operations() {
 
 #[test]
 fn debugger_hook_steps_source_and_exposes_user_variables() {
-    let source = "let answer = 42;\nanswer + 1";
+    let source = "keep answer = 42;\nanswer + 1";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -882,7 +882,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
         "[package]\nname = \"sample\"\nversion = \"1.2.3\"\nentry = \"src/main.niv\"\n",
     )
     .unwrap();
-    fs::write(project.join("src/main.niv"), "let answer = 42; answer").unwrap();
+    fs::write(project.join("src/main.niv"), "keep answer = 42; answer").unwrap();
     let manifest = nivren::project::Manifest::load(&project).unwrap();
     let package = nivren::package::Package::build(&manifest).unwrap();
     let first = package.encode().unwrap();
@@ -910,7 +910,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
     let mut changed = package.clone();
     changed
         .files
-        .insert("src/main.niv".into(), b"let answer = 7; answer".to_vec());
+        .insert("src/main.niv".into(), b"keep answer = 7; answer".to_vec());
     assert!(nivren::package::publish(&changed.encode().unwrap(), &registry).is_err());
     let mut unsafe_package = package;
     unsafe_package
@@ -925,7 +925,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
 
 #[test]
 fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
-    let source = "fun twice_sum(a: Int, b: Int) -> Int { let sum = a + b; return sum * 2; } twice_sum(1, 2); twice_sum(20, 1)";
+    let source = "define twice_sum(a: Int, b: Int) gives Int { keep sum = a + b; give sum * 2; } twice_sum(1, 2); twice_sum(20, 1)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -940,7 +940,8 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
         }
     );
 
-    let overflow = "fun add(a: Int, b: Int) -> Int { return a + b; } add(9223372036854775807, 1)";
+    let overflow =
+        "define add(a: Int, b: Int) gives Int { give a + b; } add(9223372036854775807, 1)";
     let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();

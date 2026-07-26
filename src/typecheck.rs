@@ -424,7 +424,7 @@ impl Checker {
                     self.require(&found, &expected, *span);
                 } else {
                     self.errors.push(NivError::new(
-                        "return may only appear inside a function",
+                        "give may only appear inside a function",
                         span.line,
                         span.column,
                     ));
@@ -433,7 +433,7 @@ impl Checker {
             Stmt::Record { name, fields, span } => {
                 if self.type_names.contains_key(name) {
                     self.errors.push(NivError::new(
-                        format!("record '{name}' is already declared"),
+                        format!("shape '{name}' is already declared"),
                         span.line,
                         span.column,
                     ));
@@ -471,7 +471,7 @@ impl Checker {
             } => {
                 if self.type_names.contains_key(name) {
                     self.errors.push(NivError::new(
-                        format!("enum '{name}' is already declared"),
+                        format!("choice '{name}' is already declared"),
                         span.line,
                         span.column,
                     ));
@@ -520,13 +520,13 @@ impl Checker {
                 for export in exports {
                     if !seen.insert(export) {
                         self.errors.push(NivError::new(
-                            format!("duplicate export '{export}'"),
+                            format!("duplicate expose '{export}'"),
                             span.line,
                             span.column,
                         ));
                     } else if !declared.contains(export.as_str()) {
                         self.errors.push(NivError::new(
-                            format!("module '{name}' does not declare export '{export}'"),
+                            format!("module '{name}' does not declare expose '{export}'"),
                             span.line,
                             span.column,
                         ));
@@ -794,7 +794,7 @@ impl Checker {
                 }
                 Type::Module(members) => members.get(name).cloned().unwrap_or_else(|| {
                     self.errors.push(NivError::new(
-                        format!("module has no exported member '{name}'"),
+                        format!("module has no exposed member '{name}'"),
                         span.line,
                         span.column,
                     ));
@@ -825,7 +825,7 @@ impl Checker {
                     other => {
                         self.errors.push(NivError::new(
                             format!(
-                                "match requires enum or Result value, found {}",
+                                "choose requires choice or Result value, found {}",
                                 other.name()
                             ),
                             span.line,
@@ -845,7 +845,7 @@ impl Checker {
                         ));
                     } else if !seen.insert(arm.variant.clone()) {
                         self.errors.push(NivError::new(
-                            format!("duplicate match arm '{}'", arm.variant),
+                            format!("duplicate choose arm '{}'", arm.variant),
                             arm.span.line,
                             arm.span.column,
                         ));
@@ -896,7 +896,7 @@ impl Checker {
                 if !missing.is_empty() {
                     self.errors.push(NivError::new(
                         format!(
-                            "non-exhaustive match for {type_name}; missing {}",
+                            "non-exhaustive choose for {type_name}; missing {}",
                             missing.join(", ")
                         ),
                         span.line,

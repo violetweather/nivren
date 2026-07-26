@@ -7,7 +7,6 @@ pub mod formatter;
 pub mod json;
 pub mod lexer;
 pub mod lsp;
-pub mod migration;
 pub mod modules;
 pub mod package;
 pub mod parser;

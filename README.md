@@ -1,6 +1,6 @@
 # Nivren
 
-Nivren is a new application programming language focused on safety, clarity, and a small coherent core. This repository contains the executable 0.9 compatibility beta on the road to 1.0.
+Nivren is a new application programming language focused on safety, clarity, and a small coherent core. This repository contains the executable 0.10 Edition 2 beta on the road to 1.0.
 
 Start with `docs/GETTING_STARTED.md` for archive verification, installation, and a first project.
 
@@ -31,25 +31,24 @@ niv profile examples/hello.niv
 niv coverage examples/hello.niv
 niv fmt --check .
 niv doc .
-niv migrate --from 0.2 .
 niv test [path]
 niv repl
 ```
 
 ## Implemented language surface
 
-- Signed 64-bit integers, binary64 floats, strings, booleans, and `null`
-- Immutable `let` and mutable `var` bindings
+- Signed 64-bit integers, binary64 floats, strings, booleans, and `none`
+- Immutable `keep` and mutable `change` bindings
 - Arithmetic, comparison, equality, and short-circuit logic
-- `if`/`else`, `while`, blocks, and lexical scope
-- Functions, recursion, closures, and `return`
+- `when`/`otherwise`, `repeat`, blocks, and lexical scope
+- Functions, recursion, closures, and `give`
 - Optional semicolons and nested block comments
 - Unicode identifiers and UTF-8 strings
 - Source-located lexer, parser, and runtime diagnostics
 - Explicit binding, parameter, array, and return type annotations
 - Built-in language test discovery with `assert(condition, message)`
-- Private-by-default modules with explicit exports and namespaced access
-- Strict manifests, transitive exact-version dependencies, checksum-pinned deterministic lockfiles, project-root confinement, formatting, API docs, and migrations
+- Private-by-default modules with explicit `expose` declarations and namespaced access
+- Strict manifests, transitive exact-version dependencies, checksum-pinned deterministic lockfiles, project-root confinement, formatting, and API docs
 - Verified versioned bytecode, portable application bundles, call-frame traces, and precise closure-environment collection
 - Typed application APIs for files, paths, environment, processes, time, strict JSON, TCP, HTTP, certificate-verified TLS, and logging
 - Structured worker tasks, cooperative cancellation and deadlines, bounded channels, and an isolated C embedding ABI
@@ -58,7 +57,7 @@ niv repl
 
 The implementation remains pre-1.0 until the six-platform hosted checks, compatibility-freeze period, and three independent production-pilot gates are complete.
 
-The normative Edition 1 drafts live in `spec/`. The hash-pinned, implementation-independent vectors in `conformance/edition1-baseline.json` are exercised against the external `niv` process by the black-box conformance runner.
+The normative Edition 2 drafts live in `spec/`. The hash-pinned, implementation-independent vectors in `conformance/edition2-baseline.json` are exercised against the external `niv` process by the black-box conformance runner.
 
 ## Editor support
 

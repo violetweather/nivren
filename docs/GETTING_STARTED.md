@@ -1,6 +1,6 @@
 # Getting started with Nivren
 
-Nivren 0.9 is a compatibility beta. Use it to evaluate Edition 1 and report problems, but do not run untrusted `.niv`, `.nivb`, or `.nivpkg` files yet.
+Nivren 0.10 is the Edition 2 beta. Use it to evaluate the new language and report problems, but do not run untrusted `.niv`, `.nivb`, or `.nivpkg` files yet.
 
 ## Install a release archive
 
@@ -41,19 +41,19 @@ You can also run the executable directly from the extracted `bin` directory with
 Create `hello.niv`:
 
 ```nivren
-let language: String = "Nivren"
-let values: [Int] = [2, 3, 5, 7]
+keep language: String = "Nivren"
+keep values: [Int] = [2, 3, 5, 7]
 
-fun sum(items: [Int]) -> Int {
-    var total: Int = 0
-    for (value in items) {
+define sum(items: [Int]) gives Int {
+    change total: Int = 0
+    each value within items {
         total = total + value
     }
-    return total
+    give total
 }
 
-print("Hello, " + language + "!")
-print(sum(values))
+show("Hello, " + language + "!")
+show(sum(values))
 ```
 
 Check it without executing it, then run it:
@@ -101,7 +101,7 @@ niv run .
 niv build .
 ```
 
-The build creates a portable verified bytecode bundle under `target/`. The complete language guide is in `docs/LANGUAGE.md`; the Edition 1 specification in `spec/LANGUAGE-1.md` is normative when the two differ.
+The build creates a portable verified bytecode bundle under `target/`. The complete language guide is in `docs/LANGUAGE.md`; the Edition 2 specification in `spec/LANGUAGE-2.md` is normative when the two differ.
 
 ## Editor support and help
 

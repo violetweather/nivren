@@ -1,26 +1,26 @@
 # Nivren Language Guide
 
-This guide describes the implemented Nivren 0.9 beta language. Edition 1 is frozen for compatibility testing; `spec/LANGUAGE-1.md` is the normative definition used by the 1.0 release gate.
+This guide describes the implemented Nivren 0.10 beta language. Edition 2 is frozen for compatibility testing; `spec/LANGUAGE-2.md` is the normative definition used by the 1.0 release gate.
 
 ## Values and types
 
 Nivren has `Int`, `Float`, `String`, `Bool`, `Null`, function, and homogeneous array values. Local bindings infer their type, or declare it explicitly:
 
 ```nivren
-let name: String = "Nivren"
-let primes: [Int] = [2, 3, 5, 7]
-var attempts: Int = 0
+keep name: String = "Nivren"
+keep primes: [Int] = [2, 3, 5, 7]
+change attempts: Int = 0
 ```
 
-`let` is immutable. `var` permits reassignment, but the new value must retain the inferred or declared type. Arrays are immutable values; `append(array, value)` returns a new array.
+`keep` is immutable. `change` permits reassignment, but the new value must retain the inferred or declared type. Arrays are immutable values; `append(array, value)` returns a new array.
 
 `Int` is a signed 64-bit integer. Overflow always raises a source-located error in both debug and optimized builds. `Float` is IEEE-754 binary64. There are no implicit conversions between them.
 
-Types are non-null by default. `T?` explicitly permits `null`, and `nullable ?? fallback` produces a non-null `T`:
+Types are non-null by default. `T?` explicitly permits `none`, and `nullable ?? fallback` produces a non-null `T`:
 
 ```nivren
-let label: String? = null
-let displayed: String = label ?? "untitled"
+keep label: String? = none
+keep displayed: String = label ?? "untitled"
 ```
 
 ## Expressions
@@ -32,57 +32,57 @@ Array and string indexing is zero-based. Indices must be non-negative whole numb
 ## Control flow
 
 ```nivren
-if (ready and attempts < 3) {
-    print("starting")
-} else {
-    print("waiting")
+when ready and attempts < 3 {
+    show("starting")
+} otherwise {
+    show("waiting")
 }
 
-while (attempts < 3) {
+repeat attempts < 3 {
     attempts = attempts + 1
 }
 
-for (value in [1, 2, 3]) {
-    print(value)
+each value within [1, 2, 3] {
+    show(value)
 }
 ```
 
-Blocks and each `for` iteration create lexical scopes. Arrays iterate by element and strings by Unicode scalar value. Semicolons are optional. `//` starts a line comment; `/* ... */` comments may nest.
+Blocks and every `each` iteration create lexical scopes. Arrays iterate by element and strings by Unicode scalar value. Semicolons are optional. `//` starts a line comment; `/* ... */` comments may nest.
 
 ## Functions
 
 ```nivren
-fun total(values: [Int]) -> Int {
-    var result: Int = 0
-    var index: Int = 0
-    while (index < len(values)) {
+define total(values: [Int]) gives Int {
+    change result: Int = 0
+    change index: Int = 0
+    repeat index < len(values) {
         result = result + values[index]
         index = index + 1
     }
-    return result
+    give result
 }
 ```
 
-Functions are first-class lexical closures and may recurse. Parameter and return annotations are optional during the prototype phase; public functions will require them at the 1.0 stability boundary.
+Functions are first-class lexical closures and may recurse. Parameter and result annotations are optional during the prototype phase; public functions will require them at the 1.0 stability boundary.
 
-## Records
+## Shapes
 
-Records are nominal, immutable structured values. Their declaration also defines a checked positional constructor:
+Shapes are nominal, immutable structured values. Their declaration also defines a checked positional constructor:
 
 ```nivren
-record User { name: String, active: Bool }
-let user: User = User("Ada", true)
-print(user.name)
+shape User { name: String, active: Bool }
+keep user: User = User("Ada", yes)
+show(user.name)
 ```
 
-## Sealed enums and matching
+## Sealed choices
 
-Enums define a closed set of values. `match` is an expression and must cover every variant exactly once:
+Choices define a closed set of values. `choose` is an expression and must cover every variant exactly once:
 
 ```nivren
-enum State { Idle, Running, Done }
-let state: State = State.Running
-let label: String = match (state) {
+choice State { Idle, Running, Done }
+keep state: State = State.Running
+keep label: String = choose state {
     Idle => "idle",
     Running => "running",
     Done => "done"
@@ -91,16 +91,16 @@ let label: String = match (state) {
 
 ## Recoverable errors
 
-Expected failures use `Result<T, E>`. `ok(value)` and `err(error)` construct results, and exhaustive matching safely binds their payloads:
+Expected failures use `Result<T, E>`. `ok(value)` and `err(error)` construct results, and exhaustive choosing safely binds their payloads:
 
 ```nivren
-fun load(found: Bool) -> Result<String, String> {
-    if (found) { return ok("contents") }
-    return err("not found")
+define load(found: Bool) gives Result<String, String> {
+    when found { give ok("contents") }
+    give err("not found")
 }
 
-let outcome: Result<String, String> = load(true)
-let text: String = match (outcome) {
+keep outcome: Result<String, String> = load(yes)
+keep text: String = choose outcome {
     Ok(value) => value,
     Err(message) => "error: " + message
 }
@@ -108,7 +108,7 @@ let text: String = match (outcome) {
 
 ## Built-ins
 
-- `print(value)` writes a value followed by a newline.
+- `show(value)` writes a value followed by a newline.
 - `clock()` returns Unix time in seconds.
 - `len(value)` returns the Unicode-scalar length of a string or element count of an array.
 - `type(value)` returns its runtime type name.
@@ -117,22 +117,22 @@ let text: String = match (outcome) {
 
 ## Modules and projects
 
-An import creates a namespace from the imported filename. Declarations are private unless explicitly exported:
+A `use` declaration creates a namespace from the used filename. Declarations are private unless explicitly exposed:
 
 ```nivren
 // math.niv
-fun double(value: Int) -> Int { return value * 2 }
-let privateConstant = 7
-export { double }
+define double(value: Int) gives Int { give value * 2 }
+keep privateConstant = 7
+expose { double }
 ```
 
 ```nivren
 // main.niv
-import "math.niv"
-print(math.double(21))
+use "math.niv"
+show(math.double(21))
 ```
 
-Imports are relative to the importing file, loaded once per module, and may not form cycles. Project builds reject imports outside their root. A project uses `niv.toml`:
+Used modules are relative to the file using them, loaded once per module, and may not form cycles. Project builds reject modules outside their root. A project uses `niv.toml`:
 
 ```toml
 [package]
@@ -144,7 +144,7 @@ entry = "src/main.niv"
 text_utils = "1.2.3"
 ```
 
-Dependencies use exact versions. `niv install <registry> [project]` verifies and installs the complete graph, then writes a checksum-pinned `niv.lock`. Import a dependency's entry module with `import "@text_utils"`.
+Dependencies use exact versions. `niv install <registry> [project]` verifies and installs the complete graph, then writes a checksum-pinned `niv.lock`. Load a dependency's entry module with `use "@text_utils"`.
 
 ## Commands
 
@@ -154,7 +154,6 @@ Dependencies use exact versions. `niv install <registry> [project]` verifies and
 - `niv install registry [project]` installs exact dependency versions and writes their checksums to the lockfile.
 - `niv fmt [--check] file|path` applies or verifies source-preserving formatting.
 - `niv doc [project]` writes export-aware API documentation.
-- `niv migrate --from version file|path` applies an idempotent source migration.
 - `niv test [path]` recursively executes files named `*_test.niv`.
 - `niv repl` starts an interactive session with persistent global bindings.
 - `niv version` prints the toolchain version.

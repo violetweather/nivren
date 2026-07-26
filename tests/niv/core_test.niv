@@ -1,45 +1,45 @@
-fun sum(values: [Int]) -> Int {
-    var total: Int = 0
-    var index: Int = 0
-    while (index < len(values)) {
+define sum(values: [Int]) gives Int {
+    change total: Int = 0
+    change index: Int = 0
+    repeat index < len(values) {
         total = total + values[index]
         index = index + 1
     }
-    return total
+    give total
 }
 
 assert(sum([1, 2, 3, 4]) == 10, "sum should add every array element")
 assert("Nivren"[0] == "N", "string indexing should use Unicode characters")
 assert(len(append([1, 2], 3)) == 3, "append should return a longer immutable array")
 
-record Point { x: Int, y: Int }
-let origin: Point = Point(0, 0)
-assert(origin.x == 0 and origin.y == 0, "record fields should retain constructor values")
+shape Point { x: Int, y: Int }
+keep origin: Point = Point(0, 0)
+assert(origin.x == 0 and origin.y == 0, "shape fields should retain constructor values")
 
-enum Direction { North, South, East, West }
-let direction: Direction = Direction.East
-let directionName: String = match (direction) {
+choice Direction { North, South, East, West }
+keep direction: Direction = Direction.East
+keep directionName: String = choose direction {
     North => "north",
     South => "south",
     East => "east",
     West => "west"
 }
-assert(directionName == "east", "exhaustive match should select the active enum variant")
+assert(directionName == "east", "exhaustive choose should select the active choice variant")
 
-var iteratedTotal: Int = 0
-for (value in [2, 4, 6]) {
+change iteratedTotal: Int = 0
+each value within [2, 4, 6] {
     iteratedTotal = iteratedTotal + value
 }
-assert(iteratedTotal == 12, "for should iterate array elements")
+assert(iteratedTotal == 12, "each should iterate array elements")
 assert(1.5 + 2.5 == 4.0, "Float arithmetic should remain distinct from Int arithmetic")
 
-fun checkedValue(valid: Bool) -> Result<Int, String> {
-    if (valid) { return ok(42) }
-    return err("invalid")
+define checkedValue(valid: Bool) gives Result<Int, String> {
+    when valid { give ok(42) }
+    give err("invalid")
 }
-let checked: Result<Int, String> = checkedValue(true)
-let checkedNumber: Int = match (checked) {
+keep checked: Result<Int, String> = checkedValue(yes)
+keep checkedNumber: Int = choose checked {
     Ok(value) => value,
     Err(message) => 0
 }
-assert(checkedNumber == 42, "Result matching should bind the successful payload")
+assert(checkedNumber == 42, "Result choosing should bind the successful payload")

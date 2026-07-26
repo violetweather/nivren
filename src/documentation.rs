@@ -47,8 +47,8 @@ fn declaration_signature(statement: &Stmt) -> String {
         Stmt::Let {
             name, annotation, ..
         } => annotation.as_ref().map_or_else(
-            || format!("`let {name}`"),
-            |ty| format!("`let {name}: {}`", type_name(ty)),
+            || format!("`keep {name}`"),
+            |ty| format!("`keep {name}: {}`", type_name(ty)),
         ),
         Stmt::Function {
             name,
@@ -59,16 +59,16 @@ fn declaration_signature(statement: &Stmt) -> String {
             let parameters = params.iter().map(param_name).collect::<Vec<_>>().join(", ");
             let result = return_type
                 .as_ref()
-                .map(|ty| format!(" -> {}", type_name(ty)))
+                .map(|ty| format!(" gives {}", type_name(ty)))
                 .unwrap_or_default();
-            format!("`fun {name}({parameters}){result}`")
+            format!("`define {name}({parameters}){result}`")
         }
         Stmt::Record { name, fields, .. } => {
             let fields = fields.iter().map(field_name).collect::<Vec<_>>().join(", ");
-            format!("`record {name} {{ {fields} }}`")
+            format!("`shape {name} {{ {fields} }}`")
         }
         Stmt::Enum { name, variants, .. } => {
-            format!("`enum {name} {{ {} }}`", variants.join(", "))
+            format!("`choice {name} {{ {} }}`", variants.join(", "))
         }
         Stmt::Module { name, .. } => format!("`module {name}`"),
         _ => "`unknown declaration`".into(),

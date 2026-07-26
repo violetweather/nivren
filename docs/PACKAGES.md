@@ -6,7 +6,7 @@ Package builds are sandboxed by construction: Nivren has no lifecycle or compile
 
 ## Dependencies and locks
 
-`[dependencies]` maps Nivren identifiers to exact versions. `niv install <registry> [project]` resolves the complete transitive graph, verifies registry metadata and package archives, installs versioned packages below `.niv/deps`, and writes SHA-256 identities to `niv.lock`. Package imports use `import "@name"`. Builds reject stale locks, missing packages, altered archives, and installed source that differs from its archive.
+`[dependencies]` maps Nivren identifiers to exact versions. `niv install <registry> [project]` resolves the complete transitive graph, verifies registry metadata and package archives, installs versioned packages below `.niv/deps`, and writes SHA-256 identities to `niv.lock`. Packages are loaded with `use "@name"`. Builds reject stale locks, missing packages, altered archives, and installed source that differs from its archive.
 
 Use `niv install --trusted https://registry.example root.pub [project]` for a public registry. This mode requires verified HTTPS and a separately obtained root key, verifies signed publishing provenance/status/advisories for every package, and persists the highest registry generation to prevent rollback.
 

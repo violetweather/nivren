@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Nivren is currently an Edition 1 compatibility beta and is not yet approved for executing untrusted source, bytecode, package, or registry content.
+Nivren is currently an Edition 2 compatibility beta and is not yet approved for executing untrusted source, bytecode, package, or registry content.
 
 | Version | Security fixes |
 | --- | --- |
