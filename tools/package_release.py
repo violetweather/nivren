@@ -22,6 +22,9 @@ DOCUMENTS = (
     "THIRD_PARTY.md",
     "Cargo.lock",
     "docs/GETTING_STARTED.md",
+    "install/install.sh",
+    "install/install.ps1",
+    "install/README.md",
     "spec/LANGUAGE-2.md",
     "spec/BYTECODE-1.md",
     "spec/PACKAGE-1.md",
@@ -150,7 +153,8 @@ def package(binary: Path, label: str, platform: str, output: Path) -> None:
     ]
     for relative in DOCUMENTS:
         source = checked_file(REPOSITORY / relative, "release document")
-        members.append((f"{prefix}/{relative}", source.read_bytes(), 0o644))
+        mode = 0o755 if relative == "install/install.sh" else 0o644
+        members.append((f"{prefix}/{relative}", source.read_bytes(), mode))
     members.extend(dependency_licenses(prefix, binary))
     members.sort(key=lambda item: item[0].encode("utf-8"))
 

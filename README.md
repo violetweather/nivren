@@ -4,6 +4,8 @@ Nivren is a new application programming language focused on safety, clarity, and
 
 Start with `docs/GETTING_STARTED.md` for archive verification, installation, and a first project.
 
+The guided installers under `install/` detect the correct binary, verify it, retain its documentation, and can configure PATH and VS Code automatically. Manual archives remain available for fully controlled installs.
+
 ## Build and run
 
 ```sh
@@ -61,7 +63,7 @@ The normative Edition 2 drafts live in `spec/`. The hash-pinned, implementation-
 
 ## Editor support
 
-The first-party VS Code extension in `editors/vscode` provides syntax highlighting, live diagnostics, completion, and formatting through the built-in language server. Build an installable extension with:
+The first-party VS Code extension in `editors/vscode` provides syntax highlighting, live diagnostics, completion, and formatting through the built-in language server. The guided installer offers to install the release VSIX automatically when the `code` command is available. To build it yourself:
 
 ```text
 cd editors/vscode

@@ -2,7 +2,28 @@
 
 Nivren 0.10 is the Edition 2 beta. Use it to evaluate the new language and report problems, but do not run untrusted `.niv`, `.nivb`, or `.nivpkg` files yet.
 
-## Install a release archive
+## Guided installation
+
+The guided installers detect your operating system and CPU, verify the official download, install a stable `niv` command, and offer to update PATH and install the VS Code extension.
+
+On macOS or Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSLO https://raw.githubusercontent.com/violetweather/nivren/main/install/install.sh
+sh install.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/violetweather/nivren/main/install/install.ps1 -OutFile install.ps1
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
+```
+
+Both installers are interactive by default. Use `--yes` on macOS/Linux or `-Yes` on Windows for an unattended installation with recommended choices. The scripts retain the complete release documentation under the per-user Nivren data directory.
+
+## Manual release archive
 
 Download the ZIP for your operating system and architecture together with `SHA256SUMS`. Verify the checksum and the GitHub build attestation before extracting it; see `docs/RELEASES.md` for the verification command.
 

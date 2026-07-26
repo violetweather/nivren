@@ -49,6 +49,17 @@ jobs:
           tag = os.environ.get("GITHUB_REF_NAME", "")
           if os.environ.get("GITHUB_REF_TYPE") == "tag" and tag != f"v{version}":
               sys.exit(f"tag {tag!r} does not match package version v{version}")
+      - name: Validate Unix installer
+        if: runner.os != 'Windows'
+        run: sh -n install/install.sh
+      - name: Validate Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("install/install.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
       - name: Test release source
         run: cargo test --workspace --all-targets --locked
       - name: Enforce the 1.0 release policy
@@ -97,6 +108,7 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -107,9 +119,20 @@ jobs:
           mkdir -p release
           find downloaded -type f -name 'nivren-*.zip' -exec cp {} release/ \;
           test "$(find release -maxdepth 1 -type f -name 'nivren-*.zip' | wc -l)" -eq 6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Build VS Code extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run package
+          cp nivren-*.vsix ../../release/
       - name: Write checksums
         working-directory: release
-        run: sha256sum nivren-*.zip > SHA256SUMS
+        run: sha256sum nivren-* > SHA256SUMS
       - name: Sign release provenance
         uses: actions/attest@v4
         with:

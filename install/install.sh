@@ -1,0 +1,162 @@
+#!/bin/sh
+set -eu
+
+VERSION="0.10.0-beta.3"
+INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/nivren"
+BIN_DIR="$HOME/.local/bin"
+ADD_PATH=ask
+VSCODE=ask
+ASSUME_YES=0
+
+usage() {
+  cat <<'EOF'
+Nivren installer
+
+Usage: install.sh [options]
+  --version VERSION       Install a specific release (default: 0.10.0-beta.3)
+  --install-root PATH     Keep versions and documentation here
+  --bin-dir PATH          Put the stable niv command here
+  --yes                   Accept recommended choices without prompting
+  --no-path               Do not update shell PATH configuration
+  --vscode                Install the VS Code extension when `code` is available
+  --no-vscode             Skip the VS Code extension
+  --help                  Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --version) [ "$#" -ge 2 ] || { echo "missing value for --version" >&2; exit 64; }; VERSION=$2; shift 2 ;;
+    --install-root) [ "$#" -ge 2 ] || { echo "missing value for --install-root" >&2; exit 64; }; INSTALL_ROOT=$2; shift 2 ;;
+    --bin-dir) [ "$#" -ge 2 ] || { echo "missing value for --bin-dir" >&2; exit 64; }; BIN_DIR=$2; shift 2 ;;
+    --yes) ASSUME_YES=1; shift ;;
+    --no-path) ADD_PATH=no; shift ;;
+    --vscode) VSCODE=yes; shift ;;
+    --no-vscode) VSCODE=no; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
+  esac
+done
+
+case "$VERSION" in
+  ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) echo "invalid version: $VERSION" >&2; exit 64 ;;
+esac
+case "$INSTALL_ROOT$BIN_DIR" in *"
+"*|*"'"*) echo "install paths cannot contain newlines or single quotes" >&2; exit 64 ;; esac
+
+if [ "$ASSUME_YES" -eq 1 ]; then
+  [ "$ADD_PATH" = ask ] && ADD_PATH=yes
+  [ "$VSCODE" = ask ] && { command -v code >/dev/null 2>&1 && VSCODE=yes || VSCODE=no; }
+fi
+
+ask_yes_no() {
+  prompt=$1
+  default=$2
+  if [ ! -t 0 ]; then printf '%s' "$default"; return; fi
+  printf '%s ' "$prompt" >&2
+  IFS= read -r answer
+  case "$answer" in y|Y|yes|YES) printf yes ;; n|N|no|NO) printf no ;; *) printf '%s' "$default" ;; esac
+}
+
+os=$(uname -s)
+arch=$(uname -m)
+case "$os" in Darwin) platform=macos ;; Linux) platform=linux ;; *) echo "unsupported operating system: $os" >&2; exit 69 ;; esac
+case "$arch" in x86_64|amd64) machine=x64 ;; arm64|aarch64) machine=arm64 ;; *) echo "unsupported architecture: $arch" >&2; exit 69 ;; esac
+
+asset="nivren-v${VERSION}-${platform}-${machine}.zip"
+base="https://github.com/violetweather/nivren/releases/download/v${VERSION}"
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/nivren-install.XXXXXX")
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+
+echo "Nivren ${VERSION} installer"
+echo "Platform: ${platform}-${machine}"
+echo "Install:  ${INSTALL_ROOT}/versions/${VERSION}"
+echo "Command:  ${BIN_DIR}/niv"
+
+command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 69; }
+command -v unzip >/dev/null 2>&1 || { echo "unzip is required" >&2; exit 69; }
+
+curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary/$asset" "$base/$asset"
+curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary/SHA256SUMS" "$base/SHA256SUMS"
+expected=$(awk -v name="$asset" '$2 == name { print $1 }' "$temporary/SHA256SUMS")
+[ -n "$expected" ] || { echo "release checksum is missing for $asset" >&2; exit 65; }
+if command -v shasum >/dev/null 2>&1; then
+  actual=$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$temporary/$asset" | awk '{print $1}')
+else
+  echo "shasum or sha256sum is required" >&2
+  exit 69
+fi
+[ "$actual" = "$expected" ] || { echo "checksum verification failed" >&2; exit 65; }
+
+if command -v gh >/dev/null 2>&1; then
+  gh attestation verify --repo violetweather/nivren "$temporary/$asset" >/dev/null
+  echo "Verified checksum and GitHub build provenance."
+else
+  echo "Verified SHA-256 checksum. Install GitHub CLI to verify build provenance automatically."
+fi
+
+unzip -q "$temporary/$asset" -d "$temporary/unpacked"
+source_root="$temporary/unpacked/nivren-v${VERSION}-${platform}-${machine}"
+[ -x "$source_root/bin/niv" ] || { echo "release archive has an unexpected layout" >&2; exit 65; }
+
+version_root="$INSTALL_ROOT/versions/$VERSION"
+mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR"
+staging="$INSTALL_ROOT/versions/.${VERSION}.new.$$"
+rm -rf "$staging"
+cp -R "$source_root" "$staging"
+rm -rf "$version_root"
+mv "$staging" "$version_root"
+ln -sfn "$version_root/bin/niv" "$BIN_DIR/niv"
+printf '%s\n' "$VERSION" > "$INSTALL_ROOT/current-version"
+
+if [ "$ADD_PATH" = ask ]; then
+  case ":$PATH:" in *":$BIN_DIR:"*) ADD_PATH=no ;; *) ADD_PATH=$(ask_yes_no "Add $BIN_DIR to your PATH? [Y/n]" yes) ;; esac
+fi
+if [ "$ADD_PATH" = yes ]; then
+  shell_name=$(basename "${SHELL:-sh}")
+  case "$shell_name" in
+    zsh) profile="$HOME/.zprofile" ;;
+    bash) profile="$HOME/.bash_profile"; [ -e "$profile" ] || profile="$HOME/.bashrc" ;;
+    fish) profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"; mkdir -p "$(dirname "$profile")" ;;
+    *) profile="$HOME/.profile" ;;
+  esac
+  marker="# Nivren"
+  if ! grep -F "$marker" "$profile" >/dev/null 2>&1; then
+    if [ "$shell_name" = fish ]; then
+      printf '\n%s\nfish_add_path '\''%s'\''\n' "$marker" "$BIN_DIR" >> "$profile"
+    else
+      printf '\n%s\nexport PATH='\''%s'\'':"$PATH"\n' "$marker" "$BIN_DIR" >> "$profile"
+    fi
+  fi
+  PATH="$BIN_DIR:$PATH"
+  export PATH
+  echo "Updated PATH in $profile"
+fi
+
+if [ "$VSCODE" = ask ] && command -v code >/dev/null 2>&1; then
+  VSCODE=$(ask_yes_no "Install the Nivren VS Code extension? [Y/n]" yes)
+fi
+if [ "$VSCODE" = yes ]; then
+  command -v code >/dev/null 2>&1 || { echo "VS Code's 'code' command is unavailable; skipping extension." >&2; VSCODE=no; }
+fi
+if [ "$VSCODE" = yes ]; then
+  extension="nivren-${VERSION}.vsix"
+  curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary/$extension" "$base/$extension"
+  extension_expected=$(awk -v name="$extension" '$2 == name { print $1 }' "$temporary/SHA256SUMS")
+  [ -n "$extension_expected" ] || { echo "release checksum is missing for $extension" >&2; exit 65; }
+  if command -v shasum >/dev/null 2>&1; then
+    extension_actual=$(shasum -a 256 "$temporary/$extension" | awk '{print $1}')
+  else
+    extension_actual=$(sha256sum "$temporary/$extension" | awk '{print $1}')
+  fi
+  [ "$extension_actual" = "$extension_expected" ] || { echo "VS Code extension checksum verification failed" >&2; exit 65; }
+  if command -v gh >/dev/null 2>&1; then
+    gh attestation verify --repo violetweather/nivren "$temporary/$extension" >/dev/null
+  fi
+  code --install-extension "$temporary/$extension" --force
+fi
+
+"$BIN_DIR/niv" version
+echo "Nivren is installed. Open a new terminal, then run: niv help"

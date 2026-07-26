@@ -2,12 +2,13 @@
 
 ## Unreleased
 
-## 0.10.0-beta.2 — 2026-07-26
+## 0.10.0-beta.3 — 2026-07-26
 
 - Established Nivren Edition 2 with the distinctive `keep`, `change`, `define`, `gives`, `give`, `when`, `otherwise`, `repeat`, `each`, `within`, `shape`, `choice`, `choose`, `use`, `expose`, `yes`, `no`, `none`, and `show` vocabulary.
 - Removed the earlier TypeScript-like prototype spellings and the migration command; Nivren had no users requiring source compatibility.
 - Updated the compiler, formatter, language server, conformance baseline, examples, editor grammar, specifications, guides, and website to use one canonical syntax.
 - Corrected release artifact collection so all six independently downloaded `nivren-*.zip` archives are checksummed, attested, and published.
+- Added guided macOS, Linux, and Windows installers with architecture detection, checksum/provenance verification, versioned installs, optional PATH setup, unattended mode, and optional VS Code integration.
 
 ## 0.9.0-beta.3 — 2026-07-26
 
