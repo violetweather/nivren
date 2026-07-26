@@ -73,6 +73,7 @@ jobs:
         run: |
           $env:SOURCE_DATE_EPOCH = git log -1 --pretty=%ct
           $env:CARGO_TARGET_DIR = "target-repro"
+          $env:RUSTFLAGS = "-C link-arg=/Brepro"
           cargo build --release --locked
           Copy-Item "target-repro/release/${{ matrix.binary }}" "reproducible-first"
           cargo clean

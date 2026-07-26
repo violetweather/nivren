@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.0-beta.2 — 2026-07-26
+
+- Made Windows release executables reproducible by enabling the MSVC linker's deterministic output mode.
+
 ## 0.9.0-beta.1 — 2026-07-26
 
 - Added normative Edition 1 language, bytecode, package, registry, and compatibility specifications.
