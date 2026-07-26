@@ -105,11 +105,11 @@ jobs:
       - name: Collect release archives
         run: |
           mkdir -p release
-          find downloaded -type f -name 'niv-*.zip' -exec cp {} release/ \;
-          test "$(find release -maxdepth 1 -type f -name 'niv-*.zip' | wc -l)" -eq 6
+          find downloaded -type f -name 'nivren-*.zip' -exec cp {} release/ \;
+          test "$(find release -maxdepth 1 -type f -name 'nivren-*.zip' | wc -l)" -eq 6
       - name: Write checksums
         working-directory: release
-        run: sha256sum niv-* > SHA256SUMS
+        run: sha256sum nivren-*.zip > SHA256SUMS
       - name: Sign release provenance
         uses: actions/attest@v4
         with:
