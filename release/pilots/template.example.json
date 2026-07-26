@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "pilot_id": "anonymous-design-partner-id",
+  "workload": "Describe the production workload without confidential data.",
+  "toolchain": "0.9.x",
+  "started_at": "YYYY-MM-DD",
+  "completed_at": "YYYY-MM-DD",
+  "duration_days": 30,
+  "outcome": "pass",
+  "critical_blockers": [],
+  "evidence": "Issue, report, or other independently reviewable reference",
+  "approved_by": "Named release reviewer"
+}

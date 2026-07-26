@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Nivren",
+  "scopeName": "source.nivren",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    {
+      "name": "constant.numeric.nivren",
+      "match": "\\b(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?\\b"
+    },
+    {
+      "name": "constant.language.nivren",
+      "match": "\\b(?:true|false|null)\\b"
+    },
+    {
+      "name": "keyword.control.nivren",
+      "match": "\\b(?:if|else|while|for|in|return|match)\\b"
+    },
+    {
+      "name": "keyword.declaration.nivren",
+      "match": "\\b(?:let|var|fun|record|enum|import|export)\\b"
+    },
+    {
+      "name": "storage.type.nivren",
+      "match": "\\b(?:Int|Float|String|Bool|Null|Result)\\b"
+    },
+    {
+      "name": "entity.name.function.nivren",
+      "match": "(?<=\\bfun\\s)[A-Za-z_][A-Za-z0-9_]*"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.nivren",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.nivren",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [{ "include": "#comments" }]
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.nivren",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.nivren",
+          "match": "\\\\(?:[\\\"nrt]|u\\{[0-9A-Fa-f]+\\})"
+        }
+      ]
+    }
+  }
+}

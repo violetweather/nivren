@@ -1,0 +1,13 @@
+let language: String = "Nivren"
+let values: [Int] = [2, 3, 5, 7]
+
+fun sum(items: [Int]) -> Int {
+    var total: Int = 0
+    for (value in items) {
+        total = total + value
+    }
+    return total
+}
+
+print("Hello, " + language + "!")
+print(sum(values))

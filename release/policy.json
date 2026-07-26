@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "edition": "1",
+  "freeze_started": "2026-07-26",
+  "freeze_ends": "2027-01-26",
+  "freeze_ends_unix": 1800921600,
+  "minimum_pilots": 3,
+  "minimum_pilot_days": 30,
+  "minimum_conformance_cases": 27,
+  "edition1_baseline_sha256": "6162066817fbe2e338ae570529dce4f211aa5d15d60b10e0082ee4c542fd9ffb",
+  "required_files": [
+    "spec/LANGUAGE-1.md",
+    "spec/BYTECODE-1.md",
+    "spec/PACKAGE-1.md",
+    "spec/STANDARD-LIBRARY-1.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "docs/GETTING_STARTED.md",
+    "docs/RELEASE_AUDIT.md",
+    "tools/package_release.py"
+  ],
+  "tier_one_platforms": [
+    "ubuntu-24.04",
+    "ubuntu-24.04-arm",
+    "macos-15-intel",
+    "macos-15",
+    "windows-2025",
+    "windows-11-arm"
+  ]
+}

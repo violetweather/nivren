@@ -1,0 +1,15 @@
+fun greet(name: String) -> String {
+    return "Hello, " + name + "!"
+}
+
+let language: String = "Nivren"
+print(greet(language))
+
+var sum = 0
+var number = 1
+while (number <= 10) {
+    sum = sum + number
+    number = number + 1
+}
+print("The sum from 1 through 10 is:")
+print(sum)

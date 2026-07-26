@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_LABEL: ${{ github.ref_type == 'tag' && github.ref_name || format('build-{0}', github.run_number) }}
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-24.04
+            binary: niv
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            binary: niv
+          - platform: macos-x64
+            os: macos-15-intel
+            binary: niv
+          - platform: macos-arm64
+            os: macos-15
+            binary: niv
+          - platform: windows-x64
+            os: windows-2025
+            binary: niv.exe
+          - platform: windows-arm64
+            os: windows-11-arm
+            binary: niv.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Verify release version
+        shell: python
+        run: |
+          import os, pathlib, re, sys
+          manifest = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
+          version = re.search(r'^version = "([^"]+)"', manifest, re.MULTILINE).group(1)
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          if os.environ.get("GITHUB_REF_TYPE") == "tag" and tag != f"v{version}":
+              sys.exit(f"tag {tag!r} does not match package version v{version}")
+      - name: Test release source
+        run: cargo test --workspace --all-targets --locked
+      - name: Enforce the 1.0 release policy
+        if: startsWith(github.ref_name, 'v1.')
+        run: cargo run --locked -- release check .
+      - name: Build twice
+        shell: bash
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export CARGO_TARGET_DIR=target-repro
+          cargo build --release --locked
+          cp "target-repro/release/${{ matrix.binary }}" reproducible-first
+          cargo clean
+          cargo build --release --locked
+          cmp reproducible-first "target-repro/release/${{ matrix.binary }}"
+          python tools/package_release.py reproducible-first "${RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${RELEASE_LABEL}-${{ matrix.platform }}.zip"
+      - name: Build twice
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          $env:SOURCE_DATE_EPOCH = git log -1 --pretty=%ct
+          $env:CARGO_TARGET_DIR = "target-repro"
+          cargo build --release --locked
+          Copy-Item "target-repro/release/${{ matrix.binary }}" "reproducible-first"
+          cargo clean
+          cargo build --release --locked
+          $first = (Get-FileHash "reproducible-first" -Algorithm SHA256).Hash
+          $second = (Get-FileHash "target-repro/release/${{ matrix.binary }}" -Algorithm SHA256).Hash
+          if ($first -ne $second) { throw "release build is not reproducible" }
+          python tools/package_release.py reproducible-first "${env:RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${env:RELEASE_LABEL}-${{ matrix.platform }}.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum niv-* > SHA256SUMS
+      - name: Sign release provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes

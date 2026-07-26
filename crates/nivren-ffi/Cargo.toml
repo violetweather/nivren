@@ -1,0 +1,20 @@
+[package]
+name = "nivren-ffi"
+version = "0.9.0-beta.1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Audited C ABI boundary for embedding Nivren"
+repository = "https://github.com/violetweather/nivren"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+nivren = { path = "../.." }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"

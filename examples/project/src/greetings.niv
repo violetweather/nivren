@@ -1,0 +1,7 @@
+fun message(name: String) -> String {
+    return "Hello, " + name + "!"
+}
+
+let internalPrefix = "private"
+
+export { message }

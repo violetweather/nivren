@@ -1,0 +1,3 @@
+import "greetings.niv"
+
+print(greetings.message("Nivren"))

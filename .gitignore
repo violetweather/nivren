@@ -1,0 +1,8 @@
+target/
+target-*/
+dist/
+/site/
+node_modules/
+*.vsix
+*.swp
+.DS_Store

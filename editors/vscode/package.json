@@ -1,0 +1,64 @@
+{
+  "name": "nivren",
+  "displayName": "Nivren",
+  "description": "Language support for Nivren",
+  "version": "0.9.0-beta.1",
+  "publisher": "nivren-lang",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:nivren"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "nivren",
+        "aliases": [
+          "Nivren",
+          "nivren"
+        ],
+        "extensions": [
+          ".niv"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nivren",
+        "scopeName": "source.nivren",
+        "path": "./syntaxes/nivren.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Nivren",
+      "properties": {
+        "nivren.server.path": {
+          "type": "string",
+          "default": "niv",
+          "description": "Path to the Nivren command-line tool used for editor features."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "compile": "tsc",
+    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository"
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/vscode": "1.90.0",
+    "@vscode/vsce": "3.9.2",
+    "typescript": "5.8.3"
+  }
+}
