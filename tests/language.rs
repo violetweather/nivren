@@ -18,6 +18,15 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
+fn nivren_string_contents(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
 fn eval_vm(source: &str) -> Value {
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -1462,7 +1471,8 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
         scoped.capability_scopes
     );
 
-    let source = format!("std.files.exists(\"{}\")", allowed_file.display());
+    let allowed_path = nivren_string_contents(allowed_file.to_string_lossy());
+    let source = format!("std.files.exists(\"{allowed_path}\")");
     let program = nivren::parser::parse(nivren::lexer::scan(&source).unwrap()).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
     let inside = nivren::runtime::Interpreter::new()
@@ -4257,7 +4267,7 @@ define save(path: String) gives Result<Int, String> needs FileWrite {{
 }}
 save("{}")
 "#,
-            path.display()
+            nivren_string_contents(path.to_string_lossy())
         );
         let value = if bytecode {
             eval_vm(&source)
@@ -4280,7 +4290,7 @@ define load(path: String) gives Result<String, String> needs FileRead {{
 }}
 load("{}")
 "#,
-        readable.display()
+        nivren_string_contents(readable.to_string_lossy())
     );
     assert_eq!(
         eval_vm(&source),
@@ -4329,7 +4339,7 @@ define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
 }}
 stress("{}")
 "#,
-            path.display()
+            nivren_string_contents(path.to_string_lossy())
         );
         let value = if bytecode {
             eval_vm(&source)
