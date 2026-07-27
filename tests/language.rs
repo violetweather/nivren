@@ -3646,7 +3646,8 @@ fn tcp_reactor_selects_many_streams_and_drives_bounded_adapters() {
         let second_port = second_listener.local_addr().unwrap().port();
         let first_server = std::thread::spawn(move || {
             let (mut stream, _) = first_listener.accept().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(80));
+            // Keep the readiness order deterministic even on slower CI hosts.
+            std::thread::sleep(std::time::Duration::from_millis(500));
             stream.write_all(b"late").unwrap();
         });
         let second_server = std::thread::spawn(move || {
