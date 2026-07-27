@@ -386,7 +386,14 @@ fn file_uri_path(uri: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    String::from_utf8(output).ok().map(PathBuf::from)
+    let path = String::from_utf8(output).ok()?;
+    #[cfg(windows)]
+    let path = if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') {
+        path[1..].to_string()
+    } else {
+        path
+    };
+    Some(PathBuf::from(path))
 }
 
 fn uri_nibble(byte: u8) -> Option<u8> {
@@ -400,8 +407,11 @@ fn uri_nibble(byte: u8) -> Option<u8> {
 
 fn path_file_uri(path: &Path) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let value = path.to_string_lossy();
+    let value = path.to_string_lossy().replace('\\', "/");
     let mut output = String::from("file://");
+    if value.as_bytes().get(1) == Some(&b':') {
+        output.push('/');
+    }
     for byte in value.as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~' | b':') {
             output.push(char::from(*byte));
@@ -663,6 +673,18 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::serve;
+
+    #[test]
+    fn file_uris_are_canonical_across_windows_and_unix_paths() {
+        assert_eq!(
+            super::path_file_uri(std::path::Path::new(r"C:\Users\Nivren\hello world.niv")),
+            "file:///C:/Users/Nivren/hello%20world.niv"
+        );
+        assert_eq!(
+            super::path_file_uri(std::path::Path::new("/tmp/hello world.niv")),
+            "file:///tmp/hello%20world.niv"
+        );
+    }
 
     #[test]
     fn language_server_publishes_diagnostics_formats_and_completes() {
