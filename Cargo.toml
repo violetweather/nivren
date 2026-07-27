@@ -1,23 +1,43 @@
 [package]
 name = "nivren"
-version = "0.10.0-beta.5"
+version = "0.10.0-beta.6"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "The Nivren programming language"
 repository = "https://github.com/violetweather/nivren"
 
+[features]
+default = ["host-runtime"]
+portable-runtime = []
+host-runtime = ["dep:getrandom", "dep:mio", "dep:nivren-jit", "dep:nivren-native", "dep:ring", "dep:rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
+
 [dependencies]
-rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-webpki-roots = "1.0.9"
-nivren-jit = { path = "crates/nivren-jit" }
+flate2 = "1.1"
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+zeroize = "1.8"
+csv = "1.4"
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+getrandom = { version = "0.3", optional = true }
+webpki-roots = { version = "1.0.9", optional = true }
+nivren-jit = { path = "crates/nivren-jit", optional = true }
+nivren-native = { path = "crates/nivren-native", optional = true }
 ed25519-dalek = "=3.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
+ring = { version = "0.17.14", optional = true }
+jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-fat", "tzdb-bundle-always"] }
+num-bigint = "0.5.1"
+rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
+rustls-pemfile = { version = "2.2.0", optional = true }
+mio = { version = "1.2.2", features = ["os-poll", "net"], optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
+rcgen = "=0.13.2"
 
 [lib]
 name = "nivren"
@@ -26,6 +46,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "niv"
 path = "src/main.rs"
+required-features = ["host-runtime"]
 
 [[bench]]
 name = "performance"
@@ -44,6 +65,6 @@ unsafe_code = "forbid"
 all = "warn"
 
 [workspace]
-members = ["crates/nivren-ffi", "crates/nivren-jit"]
+members = ["crates/nivren-ffi", "crates/nivren-jit", "crates/nivren-native", "crates/nivren-wasm"]
 exclude = ["fuzz"]
 resolver = "3"

@@ -1,6 +1,6 @@
 # Nivren guided installers
 
-The installers detect the operating system and CPU, download the matching official archive, verify its SHA-256 checksum, optionally verify its GitHub build attestation when GitHub CLI is available, retain the bundled documentation, install a stable `niv` command, and optionally configure PATH and VS Code.
+The installers detect the operating system and CPU, download the matching official archive, verify its SHA-256 checksum, optionally verify its GitHub build attestation when GitHub CLI is available, retain the bundled documentation, install a stable `niv` command, and optionally configure PATH and VS Code. Each archive also contains shared/static embedding libraries, `nivren.h`, an SPDX SBOM, and dependency notices for native application developers.
 
 Interactive macOS/Linux install:
 
@@ -28,5 +28,17 @@ Unattended Windows install with recommended choices:
 ```powershell
 .\install.ps1 -Yes
 ```
+
+Remove an installer-managed copy safely:
+
+```sh
+sh install.sh --uninstall
+```
+
+```powershell
+.\install.ps1 -Uninstall
+```
+
+Uninstall only removes a directory carrying Nivren's ownership marker. It also removes the stable command and the exact PATH entry created by the installer, while refusing home directories, filesystem roots, symbolic links, and Windows reparse points.
 
 Use `--help` on macOS/Linux or `Get-Help .\install.ps1 -Detailed` on Windows for automation controls. The manual archives remain available for users who do not want an installer to update their profile or user PATH.

@@ -1,0 +1,66 @@
+shape Matrix {
+    rows: Int,
+    columns: Int,
+    values: [Float],
+}
+
+define matrix(rows: Int, columns: Int, values: [Float]) gives Result<Matrix, String> {
+    when rows <= 0 or columns <= 0 { give err("matrix dimensions must be positive") }
+    when rows > 4096 or columns > 4096 { give err("matrix dimensions exceed 4096") }
+    when rows * columns != len(values) { give err("matrix value count does not match its dimensions") }
+    give ok(Matrix(rows, columns, values))
+}
+
+define at(value: Matrix, row: Int, column: Int) gives Result<Float, String> {
+    when row < 0 or row >= value.rows or column < 0 or column >= value.columns { give err("matrix index is out of bounds") }
+    give ok(value.values[row * value.columns + column])
+}
+
+define add(left: Matrix, right: Matrix) gives Result<Matrix, String> {
+    when left.rows != right.rows or left.columns != right.columns { give err("matrix dimensions must match for addition") }
+    change values: [Float] = []
+    change index = 0
+    repeat index < len(left.values) {
+        values = append(values, left.values[index] + right.values[index])
+        index = index + 1
+    }
+    give ok(Matrix(left.rows, left.columns, values))
+}
+
+define multiply(left: Matrix, right: Matrix) gives Result<Matrix, String> {
+    when left.columns != right.rows { give err("inner matrix dimensions must match") }
+    when left.rows * right.columns > 1000000 { give err("matrix result exceeds one million values") }
+    change values: [Float] = []
+    change row = 0
+    repeat row < left.rows {
+        change column = 0
+        repeat column < right.columns {
+            change total: Float = 0.0
+            change inner = 0
+            repeat inner < left.columns {
+                total = total + left.values[row * left.columns + inner] * right.values[inner * right.columns + column]
+                inner = inner + 1
+            }
+            values = append(values, total)
+            column = column + 1
+        }
+        row = row + 1
+    }
+    give ok(Matrix(left.rows, right.columns, values))
+}
+
+define transpose(value: Matrix) gives Matrix {
+    change values: [Float] = []
+    change column = 0
+    repeat column < value.columns {
+        change row = 0
+        repeat row < value.rows {
+            values = append(values, value.values[row * value.columns + column])
+            row = row + 1
+        }
+        column = column + 1
+    }
+    give Matrix(value.columns, value.rows, values)
+}
+
+expose { Matrix, matrix, at, add, multiply, transpose }

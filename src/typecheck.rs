@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, Literal, Span, Stmt, TypeRef};
 use crate::error::NivError;
+use crate::fixed::FixedKind;
 use crate::lexer::TokenKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -9,17 +10,45 @@ enum Type {
     Int,
     Float,
     String,
+    Bytes,
+    SecretKey,
     Bool,
     Null,
-    Function(Vec<Type>, Box<Type>),
+    Generic(String),
+    Function(
+        Vec<String>,
+        Vec<(String, String)>,
+        Vec<Type>,
+        Box<Type>,
+        Vec<String>,
+    ),
     Array(Box<Type>),
+    Iterator(Box<Type>),
+    Map(Box<Type>, Box<Type>),
+    Set(Box<Type>),
     Nullable(Box<Type>),
-    Record(String),
-    Enum(String),
+    Record(String, Vec<Type>),
+    Enum(String, Vec<Type>),
     EnumNamespace(String),
+    ProtocolNamespace(String),
     Result(Box<Type>, Box<Type>),
     Module(HashMap<String, Type>),
+    File,
+    TcpListener,
     TcpStream,
+    TlsStream,
+    WebSocket,
+    TlsListener,
+    Lock,
+    LockGuard,
+    AtomicInt,
+    NativeHandle,
+    NativeLibrary,
+    Transaction(Box<Type>, Box<Type>),
+    DateTime,
+    BigInt,
+    Decimal,
+    Fixed(FixedKind),
     Task,
     Channel,
     Unknown,
@@ -31,16 +60,53 @@ impl Type {
             Self::Int => "Int".into(),
             Self::Float => "Float".into(),
             Self::String => "String".into(),
+            Self::Bytes => "Bytes".into(),
+            Self::SecretKey => "SecretKey".into(),
             Self::Bool => "Bool".into(),
             Self::Null => "Null".into(),
-            Self::Function(_, _) => "Function".into(),
+            Self::Generic(name) => name.clone(),
+            Self::Function(_, _, _, _, _) => "Function".into(),
             Self::Array(element) => format!("[{}]", element.name()),
+            Self::Iterator(element) => format!("Iterator<{}>", element.name()),
+            Self::Map(key, value) => format!("Map<{}, {}>", key.name(), value.name()),
+            Self::Set(element) => format!("Set<{}>", element.name()),
             Self::Nullable(inner) => format!("{}?", inner.name()),
-            Self::Record(name) => name.clone(),
-            Self::Enum(name) | Self::EnumNamespace(name) => name.clone(),
+            Self::Record(name, arguments) | Self::Enum(name, arguments) => {
+                if arguments.is_empty() {
+                    name.clone()
+                } else {
+                    format!(
+                        "{name}<{}>",
+                        arguments
+                            .iter()
+                            .map(Type::name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            Self::EnumNamespace(name) => name.clone(),
+            Self::ProtocolNamespace(name) => name.clone(),
             Self::Result(ok, error) => format!("Result<{}, {}>", ok.name(), error.name()),
             Self::Module(_) => "Module".into(),
+            Self::File => "File".into(),
+            Self::TcpListener => "TcpListener".into(),
             Self::TcpStream => "TcpStream".into(),
+            Self::TlsStream => "TlsStream".into(),
+            Self::WebSocket => "WebSocket".into(),
+            Self::TlsListener => "TlsListener".into(),
+            Self::Lock => "Lock".into(),
+            Self::LockGuard => "LockGuard".into(),
+            Self::AtomicInt => "AtomicInt".into(),
+            Self::NativeHandle => "NativeHandle".into(),
+            Self::NativeLibrary => "NativeLibrary".into(),
+            Self::Transaction(key, value) => {
+                format!("Transaction<{}, {}>", key.name(), value.name())
+            }
+            Self::DateTime => "DateTime".into(),
+            Self::BigInt => "BigInt".into(),
+            Self::Decimal => "Decimal".into(),
+            Self::Fixed(kind) => kind.name().into(),
             Self::Task => "Task".into(),
             Self::Channel => "Channel".into(),
             Self::Unknown => "unknown".into(),
@@ -52,6 +118,13 @@ impl Type {
 struct Binding {
     ty: Type,
     mutable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ProtocolMemberType {
+    params: Vec<Type>,
+    result: Type,
+    needs: Vec<String>,
 }
 
 pub fn check(program: &[Stmt]) -> Result<(), Vec<NivError>> {
@@ -68,9 +141,18 @@ struct Checker {
     scopes: Vec<HashMap<String, Binding>>,
     errors: Vec<NivError>,
     returns: Vec<Type>,
+    needs: Vec<Vec<String>>,
+    generics: Vec<Vec<String>>,
+    constraints: Vec<HashMap<String, String>>,
     records: HashMap<String, HashMap<String, Type>>,
-    enums: HashMap<String, Vec<String>>,
+    enums: HashMap<String, Vec<(String, Option<Type>)>>,
+    type_parameters: HashMap<String, Vec<String>>,
+    type_constraints: HashMap<String, Vec<(String, String)>>,
     type_names: HashMap<String, String>,
+    protocols: HashSet<String>,
+    protocol_members: HashMap<String, HashMap<String, ProtocolMemberType>>,
+    adoptions: HashSet<(String, String)>,
+    dispatch_adoptions: HashSet<(String, String)>,
     namespace: String,
 }
 
@@ -86,7 +168,7 @@ impl Checker {
             global.insert(
                 name.into(),
                 Binding {
-                    ty: Type::Function(params, Box::new(result)),
+                    ty: Type::Function(vec![], vec![], params, Box::new(result), vec![]),
                     mutable: false,
                 },
             );
@@ -100,7 +182,24 @@ impl Checker {
         native("err", vec![Type::Unknown], Type::Unknown);
         let string_result = Type::Result(Box::new(Type::String), Box::new(Type::String));
         let null_result = Type::Result(Box::new(Type::Null), Box::new(Type::String));
-        let function = |params: Vec<Type>, result: Type| Type::Function(params, Box::new(result));
+        let function = |params: Vec<Type>, result: Type| {
+            Type::Function(vec![], vec![], params, Box::new(result), vec![])
+        };
+        let binary_reader = |result: Type| {
+            function(
+                vec![Type::Bytes, Type::Int],
+                Type::Result(Box::new(result), Box::new(Type::String)),
+            )
+        };
+        let effect = |params: Vec<Type>, result: Type, capability: &str| {
+            Type::Function(
+                vec![],
+                vec![],
+                params,
+                Box::new(result),
+                vec![capability.to_string()],
+            )
+        };
         let module = |members: Vec<(&str, Type)>| {
             Type::Module(
                 members
@@ -116,12 +215,127 @@ impl Checker {
                     (
                         "fs",
                         module(vec![
-                            ("read", function(vec![Type::String], string_result.clone())),
+                            (
+                                "read",
+                                effect(vec![Type::String], string_result.clone(), "FileRead"),
+                            ),
                             (
                                 "write",
-                                function(vec![Type::String, Type::String], null_result),
+                                effect(vec![Type::String, Type::String], null_result, "FileWrite"),
                             ),
-                            ("exists", function(vec![Type::String], Type::Bool)),
+                            ("exists", effect(vec![Type::String], Type::Bool, "FileRead")),
+                            (
+                                "open_read",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
+                                    "FileRead",
+                                ),
+                            ),
+                            (
+                                "open_write",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
+                                    "FileWrite",
+                                ),
+                            ),
+                            (
+                                "read_open",
+                                effect(
+                                    vec![Type::File, Type::Int],
+                                    string_result.clone(),
+                                    "FileRead",
+                                ),
+                            ),
+                            (
+                                "write_open",
+                                effect(
+                                    vec![Type::File, Type::String],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "FileWrite",
+                                ),
+                            ),
+                            (
+                                "close",
+                                function(
+                                    vec![Type::File],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "files",
+                        module(vec![
+                            (
+                                "read",
+                                effect(vec![Type::String], string_result.clone(), "FileRead"),
+                            ),
+                            (
+                                "write",
+                                effect(
+                                    vec![Type::String, Type::String],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "FileWrite",
+                                ),
+                            ),
+                            ("exists", effect(vec![Type::String], Type::Bool, "FileRead")),
+                            (
+                                "open_read",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
+                                    "FileRead",
+                                ),
+                            ),
+                            (
+                                "open_write",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
+                                    "FileWrite",
+                                ),
+                            ),
+                            (
+                                "read_open",
+                                effect(
+                                    vec![Type::File, Type::Int],
+                                    string_result.clone(),
+                                    "FileRead",
+                                ),
+                            ),
+                            (
+                                "write_open",
+                                effect(
+                                    vec![Type::File, Type::String],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "FileWrite",
+                                ),
+                            ),
+                            (
+                                "read_async",
+                                effect(
+                                    vec![Type::String, Type::Int],
+                                    Type::Result(Box::new(Type::Task), Box::new(Type::String)),
+                                    "FileRead",
+                                ),
+                            ),
+                            (
+                                "write_async",
+                                effect(
+                                    vec![Type::String, Type::String],
+                                    Type::Result(Box::new(Type::Task), Box::new(Type::String)),
+                                    "FileWrite",
+                                ),
+                            ),
+                            (
+                                "close",
+                                function(
+                                    vec![Type::File],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (
@@ -151,23 +365,66 @@ impl Checker {
                         "env",
                         module(vec![(
                             "get",
-                            function(vec![Type::String], Type::Nullable(Box::new(Type::String))),
+                            effect(
+                                vec![Type::String],
+                                Type::Nullable(Box::new(Type::String)),
+                                "Environment",
+                            ),
                         )]),
                     ),
                     (
                         "time",
                         module(vec![
-                            ("now", function(vec![], Type::Float)),
-                            ("sleep", function(vec![Type::Float], Type::Null)),
+                            ("now", effect(vec![], Type::Float, "Time")),
+                            ("sleep", effect(vec![Type::Float], Type::Null, "Time")),
+                            (
+                                "from_unix",
+                                function(
+                                    vec![Type::Int, Type::String],
+                                    Type::Result(Box::new(Type::DateTime), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::DateTime), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("format", function(vec![Type::DateTime], Type::String)),
+                            (
+                                "in_zone",
+                                function(
+                                    vec![Type::DateTime, Type::String],
+                                    Type::Result(Box::new(Type::DateTime), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("unix", function(vec![Type::DateTime], Type::Int)),
+                            (
+                                "add_seconds",
+                                function(
+                                    vec![Type::DateTime, Type::Int],
+                                    Type::Result(Box::new(Type::DateTime), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "now_zoned",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::DateTime), Box::new(Type::String)),
+                                    "Time",
+                                ),
+                            ),
                         ]),
                     ),
                     (
                         "process",
                         module(vec![(
                             "run",
-                            function(
+                            effect(
                                 vec![Type::String, Type::Array(Box::new(Type::String))],
                                 string_result.clone(),
+                                "Process",
                             ),
                         )]),
                     ),
@@ -183,34 +440,542 @@ impl Checker {
                                 "pretty",
                                 function(vec![Type::String], string_result.clone()),
                             ),
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "stringify",
+                                function(
+                                    vec![Type::Unknown],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "decode",
+                                function(
+                                    vec![Type::Unknown, Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "read_next",
+                                effect(
+                                    vec![Type::File, Type::Int],
+                                    Type::Result(
+                                        Box::new(Type::Nullable(Box::new(Type::Unknown))),
+                                        Box::new(Type::String),
+                                    ),
+                                    "FileRead",
+                                ),
+                            ),
+                            (
+                                "read_next_as",
+                                effect(
+                                    vec![Type::Unknown, Type::File, Type::Int],
+                                    Type::Result(
+                                        Box::new(Type::Nullable(Box::new(Type::Unknown))),
+                                        Box::new(Type::String),
+                                    ),
+                                    "FileRead",
+                                ),
+                            ),
                         ]),
                     ),
+                    (
+                        "bytes",
+                        module(vec![
+                            ("from_string", function(vec![Type::String], Type::Bytes)),
+                            (
+                                "from_values",
+                                function(
+                                    vec![Type::Array(Box::new(Type::Int))],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_string",
+                                function(
+                                    vec![Type::Bytes],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("length", function(vec![Type::Bytes], Type::Int)),
+                            (
+                                "get",
+                                function(
+                                    vec![Type::Bytes, Type::Int],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "slice",
+                                function(
+                                    vec![Type::Bytes, Type::Int, Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "text",
+                        module(vec![
+                            (
+                                "concat",
+                                function(
+                                    vec![Type::String, Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "split",
+                                function(
+                                    vec![Type::String, Type::String, Type::Int],
+                                    Type::Result(
+                                        Box::new(Type::Array(Box::new(Type::String))),
+                                        Box::new(Type::String),
+                                    ),
+                                ),
+                            ),
+                            (
+                                "starts_with",
+                                function(vec![Type::String, Type::String], Type::Bool),
+                            ),
+                            (
+                                "split_last",
+                                function(
+                                    vec![Type::String, Type::String],
+                                    Type::Result(
+                                        Box::new(Type::Array(Box::new(Type::String))),
+                                        Box::new(Type::String),
+                                    ),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "int",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("format", function(vec![Type::Int], Type::String)),
+                        ]),
+                    ),
+                    (
+                        "float",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Float), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "format",
+                                function(
+                                    vec![Type::Float],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "binary",
+                        module(vec![
+                            (
+                                "u16_be",
+                                function(vec![Type::Fixed(FixedKind::U16)], Type::Bytes),
+                            ),
+                            (
+                                "u16_le",
+                                function(vec![Type::Fixed(FixedKind::U16)], Type::Bytes),
+                            ),
+                            (
+                                "u32_be",
+                                function(vec![Type::Fixed(FixedKind::U32)], Type::Bytes),
+                            ),
+                            (
+                                "u32_le",
+                                function(vec![Type::Fixed(FixedKind::U32)], Type::Bytes),
+                            ),
+                            (
+                                "u64_be",
+                                function(vec![Type::Fixed(FixedKind::U64)], Type::Bytes),
+                            ),
+                            (
+                                "u64_le",
+                                function(vec![Type::Fixed(FixedKind::U64)], Type::Bytes),
+                            ),
+                            (
+                                "i16_be",
+                                function(vec![Type::Fixed(FixedKind::I16)], Type::Bytes),
+                            ),
+                            (
+                                "i16_le",
+                                function(vec![Type::Fixed(FixedKind::I16)], Type::Bytes),
+                            ),
+                            (
+                                "i32_be",
+                                function(vec![Type::Fixed(FixedKind::I32)], Type::Bytes),
+                            ),
+                            (
+                                "i32_le",
+                                function(vec![Type::Fixed(FixedKind::I32)], Type::Bytes),
+                            ),
+                            ("int_be", function(vec![Type::Int], Type::Bytes)),
+                            ("int_le", function(vec![Type::Int], Type::Bytes)),
+                            ("float_be", function(vec![Type::Float], Type::Bytes)),
+                            ("float_le", function(vec![Type::Float], Type::Bytes)),
+                            ("read_u16_be", binary_reader(Type::Fixed(FixedKind::U16))),
+                            ("read_u16_le", binary_reader(Type::Fixed(FixedKind::U16))),
+                            ("read_u32_be", binary_reader(Type::Fixed(FixedKind::U32))),
+                            ("read_u32_le", binary_reader(Type::Fixed(FixedKind::U32))),
+                            ("read_u64_be", binary_reader(Type::Fixed(FixedKind::U64))),
+                            ("read_u64_le", binary_reader(Type::Fixed(FixedKind::U64))),
+                            ("read_i16_be", binary_reader(Type::Fixed(FixedKind::I16))),
+                            ("read_i16_le", binary_reader(Type::Fixed(FixedKind::I16))),
+                            ("read_i32_be", binary_reader(Type::Fixed(FixedKind::I32))),
+                            ("read_i32_le", binary_reader(Type::Fixed(FixedKind::I32))),
+                            ("read_int_be", binary_reader(Type::Int)),
+                            ("read_int_le", binary_reader(Type::Int)),
+                            ("read_float_be", binary_reader(Type::Float)),
+                            ("read_float_le", binary_reader(Type::Float)),
+                            (
+                                "concat",
+                                function(
+                                    vec![Type::Bytes, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "crypto",
+                        module(vec![
+                            (
+                                "sha256",
+                                function(
+                                    vec![Type::Bytes],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "hmac_sha256",
+                                function(
+                                    vec![Type::Bytes, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "verify_hmac_sha256",
+                                function(
+                                    vec![Type::Bytes, Type::Bytes, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "random_bytes",
+                                effect(
+                                    vec![Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                    "Random",
+                                ),
+                            ),
+                            (
+                                "password_hash",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Bytes,
+                                        Type::Int,
+                                        Type::Int,
+                                        Type::Int,
+                                    ],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "password_verify",
+                                function(
+                                    vec![Type::String, Type::String],
+                                    Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "key_import",
+                                function(
+                                    vec![Type::Bytes],
+                                    Type::Result(Box::new(Type::SecretKey), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "key_generate",
+                                effect(
+                                    vec![],
+                                    Type::Result(Box::new(Type::SecretKey), Box::new(Type::String)),
+                                    "Random",
+                                ),
+                            ),
+                            (
+                                "encrypt",
+                                function(
+                                    vec![Type::SecretKey, Type::Bytes, Type::Bytes, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "decrypt",
+                                function(
+                                    vec![Type::SecretKey, Type::Bytes, Type::Bytes, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "ed25519_public",
+                                function(
+                                    vec![Type::SecretKey],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "ed25519_sign",
+                                function(
+                                    vec![Type::SecretKey, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "ed25519_verify",
+                                function(
+                                    vec![Type::Bytes, Type::Bytes, Type::Bytes],
+                                    Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    ("iter", iterator_type_module()),
+                    ("transactions", transaction_type_module()),
+                    (
+                        "bigint",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::BigInt), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("from_int", function(vec![Type::Int], Type::BigInt)),
+                            ("format", function(vec![Type::BigInt], Type::String)),
+                            (
+                                "to_int",
+                                function(
+                                    vec![Type::BigInt],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "decimal",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Decimal), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("from_int", function(vec![Type::Int], Type::Decimal)),
+                            ("format", function(vec![Type::Decimal], Type::String)),
+                            (
+                                "to_int",
+                                function(
+                                    vec![Type::Decimal],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    ("i8", fixed_type_module(FixedKind::I8)),
+                    ("i16", fixed_type_module(FixedKind::I16)),
+                    ("i32", fixed_type_module(FixedKind::I32)),
+                    ("u8", fixed_type_module(FixedKind::U8)),
+                    ("u16", fixed_type_module(FixedKind::U16)),
+                    ("u32", fixed_type_module(FixedKind::U32)),
+                    ("u64", fixed_type_module(FixedKind::U64)),
+                    ("map", module(map_functions())),
+                    ("set", module(set_functions())),
+                    ("list", module(list_functions())),
                     (
                         "net",
                         module(vec![
                             (
+                                "listen",
+                                effect(
+                                    vec![Type::String, Type::Int],
+                                    Type::Result(
+                                        Box::new(Type::TcpListener),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "accept",
+                                effect(
+                                    vec![Type::TcpListener, Type::Float],
+                                    Type::Result(Box::new(Type::TcpStream), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
                                 "connect",
-                                function(
+                                effect(
                                     vec![Type::String, Type::Int, Type::Float],
                                     Type::Result(Box::new(Type::TcpStream), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_connect",
+                                effect(
+                                    vec![
+                                        Type::String,
+                                        Type::Int,
+                                        Type::Float,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::TlsStream), Box::new(Type::String)),
+                                    "Network",
                                 ),
                             ),
                             (
                                 "read",
-                                function(vec![Type::TcpStream, Type::Int], string_result.clone()),
+                                effect(
+                                    vec![Type::TcpStream, Type::Int],
+                                    string_result.clone(),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "read_exact_bytes",
+                                effect(
+                                    vec![Type::TcpStream, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "read_line",
+                                effect(
+                                    vec![Type::TcpStream, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                    "Network",
+                                ),
                             ),
                             (
                                 "write",
-                                function(
+                                effect(
                                     vec![Type::TcpStream, Type::String],
                                     Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "write_some",
+                                effect(
+                                    vec![Type::TcpStream, Type::String, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "ready",
+                                effect(
+                                    vec![Type::TcpStream, Type::String, Type::Float],
+                                    Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "ready_any",
+                                effect(
+                                    vec![
+                                        Type::Array(Box::new(Type::TcpStream)),
+                                        Type::String,
+                                        Type::Float,
+                                    ],
+                                    Type::Result(
+                                        Box::new(Type::Nullable(Box::new(Type::Int))),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "read_ready",
+                                effect(
+                                    vec![Type::TcpStream, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "write_ready",
+                                effect(
+                                    vec![Type::TcpStream, Type::String, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_read_exact_bytes",
+                                effect(
+                                    vec![Type::TlsStream, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_read_line",
+                                effect(
+                                    vec![Type::TlsStream, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_write_ready",
+                                effect(
+                                    vec![Type::TlsStream, Type::String, Type::Int, Type::Float],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_close",
+                                effect(
+                                    vec![Type::TlsStream],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
                                 ),
                             ),
                             (
                                 "close",
-                                function(
+                                effect(
                                     vec![Type::TcpStream],
                                     Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
                                 ),
                             ),
                         ]),
@@ -219,52 +984,305 @@ impl Checker {
                         "http",
                         module(vec![(
                             "get",
-                            function(vec![Type::String, Type::Float], string_result.clone()),
+                            effect(
+                                vec![Type::String, Type::Float],
+                                string_result.clone(),
+                                "Network",
+                            ),
                         )]),
+                    ),
+                    (
+                        "web",
+                        module(vec![
+                            (
+                                "get",
+                                effect(
+                                    vec![Type::String, Type::Float],
+                                    string_result.clone(),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "headers",
+                                function(
+                                    vec![],
+                                    Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "encode_component",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "decode_component",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "request",
+                                effect(
+                                    vec![
+                                        Type::String,
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                        Type::String,
+                                        Type::Float,
+                                        Type::Int,
+                                    ],
+                                    Type::Result(
+                                        Box::new(Type::Map(
+                                            Box::new(Type::String),
+                                            Box::new(Type::String),
+                                        )),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "read_request",
+                                effect(
+                                    vec![Type::TcpStream, Type::Int],
+                                    Type::Result(
+                                        Box::new(Type::Map(
+                                            Box::new(Type::String),
+                                            Box::new(Type::String),
+                                        )),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "respond",
+                                effect(
+                                    vec![
+                                        Type::TcpStream,
+                                        Type::Int,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                        Type::String,
+                                    ],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_connect",
+                                effect(
+                                    vec![Type::String, Type::Int, Type::String, Type::Float],
+                                    Type::Result(Box::new(Type::WebSocket), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_secure_connect",
+                                effect(
+                                    vec![
+                                        Type::String,
+                                        Type::Int,
+                                        Type::String,
+                                        Type::Float,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::WebSocket), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_secure_listen",
+                                effect(
+                                    vec![
+                                        Type::String,
+                                        Type::Int,
+                                        Type::String,
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Result(
+                                        Box::new(Type::TlsListener),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_secure_accept",
+                                effect(
+                                    vec![Type::TlsListener, Type::Float],
+                                    Type::Result(Box::new(Type::WebSocket), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_close",
+                                effect(
+                                    vec![Type::TlsListener],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "tls_options",
+                                function(
+                                    vec![],
+                                    Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "websocket_accept",
+                                effect(
+                                    vec![
+                                        Type::TcpStream,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::WebSocket), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_send",
+                                effect(
+                                    vec![Type::WebSocket, Type::String],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_receive",
+                                effect(
+                                    vec![Type::WebSocket, Type::Int],
+                                    string_result.clone(),
+                                    "Network",
+                                ),
+                            ),
+                            (
+                                "websocket_close",
+                                effect(
+                                    vec![Type::WebSocket],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Network",
+                                ),
+                            ),
+                        ]),
                     ),
                     (
                         "task",
                         module(vec![
                             (
                                 "spawn",
-                                function(
-                                    vec![Type::Function(vec![], Box::new(Type::Unknown))],
+                                effect(
+                                    vec![Type::Function(
+                                        vec![],
+                                        vec![],
+                                        vec![],
+                                        Box::new(Type::Unknown),
+                                        vec!["$effects".into()],
+                                    )],
                                     Type::Task,
+                                    "Task",
                                 ),
                             ),
                             (
                                 "await",
-                                function(
+                                effect(
                                     vec![Type::Task],
                                     Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Task",
                                 ),
                             ),
                             (
                                 "await_for",
-                                function(
+                                effect(
                                     vec![Type::Task, Type::Float],
                                     Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Task",
                                 ),
                             ),
-                            ("cancel", function(vec![Type::Task], Type::Null)),
+                            ("cancel", effect(vec![Type::Task], Type::Null, "Task")),
+                            (
+                                "all",
+                                effect(
+                                    vec![Type::Array(Box::new(Type::Task))],
+                                    Type::Result(
+                                        Box::new(Type::Array(Box::new(Type::Unknown))),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Task",
+                                ),
+                            ),
+                            (
+                                "race",
+                                effect(
+                                    vec![Type::Array(Box::new(Type::Task))],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Task",
+                                ),
+                            ),
                         ]),
                     ),
+                    ("tasks", task_module(&effect)),
                     (
                         "channel",
                         module(vec![
-                            ("create", function(vec![Type::Int], Type::Channel)),
+                            ("create", effect(vec![Type::Int], Type::Channel, "Channel")),
                             (
                                 "send",
-                                function(
+                                effect(
                                     vec![Type::Channel, Type::Unknown, Type::Float],
                                     Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Channel",
                                 ),
                             ),
                             (
                                 "receive",
-                                function(
+                                effect(
                                     vec![Type::Channel, Type::Float],
                                     Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Channel",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    ("channels", channel_module(&effect)),
+                    (
+                        "locks",
+                        module(vec![
+                            ("create", function(vec![Type::Unknown], Type::Lock)),
+                            (
+                                "acquire",
+                                effect(
+                                    vec![Type::Lock, Type::Float],
+                                    Type::Result(Box::new(Type::LockGuard), Box::new(Type::String)),
+                                    "Task",
+                                ),
+                            ),
+                            (
+                                "read",
+                                effect(
+                                    vec![Type::LockGuard],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Task",
+                                ),
+                            ),
+                            (
+                                "write",
+                                effect(
+                                    vec![Type::LockGuard, Type::Unknown],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Task",
+                                ),
+                            ),
+                            (
+                                "close",
+                                effect(
+                                    vec![Type::LockGuard],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Task",
                                 ),
                             ),
                         ]),
@@ -272,9 +1290,308 @@ impl Checker {
                     (
                         "log",
                         module(vec![
-                            ("info", function(vec![Type::String], Type::Null)),
-                            ("warn", function(vec![Type::String], Type::Null)),
-                            ("error", function(vec![Type::String], Type::Null)),
+                            ("info", effect(vec![Type::String], Type::Null, "Log")),
+                            ("warn", effect(vec![Type::String], Type::Null, "Log")),
+                            ("error", effect(vec![Type::String], Type::Null, "Log")),
+                            (
+                                "event",
+                                effect(
+                                    vec![
+                                        Type::String,
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Null,
+                                    "Log",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "host",
+                        module(vec![
+                            (
+                                "invoke",
+                                effect(
+                                    vec![Type::String, Type::String],
+                                    string_result.clone(),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "invoke_async",
+                                Type::Function(
+                                    vec![],
+                                    vec![],
+                                    vec![Type::String, Type::String],
+                                    Box::new(Type::Result(
+                                        Box::new(Type::Task),
+                                        Box::new(Type::String),
+                                    )),
+                                    vec!["Native".into(), "Task".into()],
+                                ),
+                            ),
+                            (
+                                "open",
+                                effect(
+                                    vec![Type::String, Type::String],
+                                    Type::Result(
+                                        Box::new(Type::NativeHandle),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "call",
+                                effect(
+                                    vec![Type::NativeHandle, Type::String, Type::String],
+                                    string_result.clone(),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "close",
+                                effect(
+                                    vec![Type::NativeHandle],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Native",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "atomics",
+                        module(vec![
+                            ("create", function(vec![Type::Int], Type::AtomicInt)),
+                            ("load", function(vec![Type::AtomicInt], Type::Int)),
+                            (
+                                "store",
+                                function(vec![Type::AtomicInt, Type::Int], Type::Null),
+                            ),
+                            (
+                                "swap",
+                                function(vec![Type::AtomicInt, Type::Int], Type::Int),
+                            ),
+                            (
+                                "add",
+                                function(
+                                    vec![Type::AtomicInt, Type::Int],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "compare_exchange",
+                                function(
+                                    vec![Type::AtomicInt, Type::Int, Type::Int],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::Int)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "native",
+                        module(vec![
+                            (
+                                "open",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(
+                                        Box::new(Type::NativeLibrary),
+                                        Box::new(Type::String),
+                                    ),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "call_int",
+                                effect(
+                                    vec![
+                                        Type::NativeLibrary,
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Int)),
+                                    ],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "call_float",
+                                effect(
+                                    vec![
+                                        Type::NativeLibrary,
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Float)),
+                                    ],
+                                    Type::Result(Box::new(Type::Float), Box::new(Type::String)),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "call_buffer",
+                                effect(
+                                    vec![Type::NativeLibrary, Type::String, Type::Bytes, Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                    "Native",
+                                ),
+                            ),
+                            (
+                                "close",
+                                effect(
+                                    vec![Type::NativeLibrary],
+                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                                    "Native",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "reflect",
+                        module(vec![
+                            ("kind", function(vec![Type::Unknown], Type::String)),
+                            (
+                                "fields",
+                                function(
+                                    vec![Type::Unknown],
+                                    Type::Result(
+                                        Box::new(Type::Map(
+                                            Box::new(Type::String),
+                                            Box::new(Type::String),
+                                        )),
+                                        Box::new(Type::String),
+                                    ),
+                                ),
+                            ),
+                            (
+                                "schema",
+                                function(
+                                    vec![Type::Unknown],
+                                    Type::Result(
+                                        Box::new(Type::Map(
+                                            Box::new(Type::String),
+                                            Box::new(Type::String),
+                                        )),
+                                        Box::new(Type::String),
+                                    ),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "compression",
+                        module(vec![
+                            (
+                                "gzip",
+                                function(
+                                    vec![Type::Bytes, Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "gunzip",
+                                function(
+                                    vec![Type::Bytes, Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "zlib",
+                                function(
+                                    vec![Type::Bytes, Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "unzlib",
+                                function(
+                                    vec![Type::Bytes, Type::Int],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "csv",
+                        module(vec![
+                            (
+                                "decode",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Array(Box::new(Type::String)),
+                                        Type::String,
+                                        Type::Int,
+                                    ],
+                                    Type::Result(
+                                        Box::new(Type::Array(Box::new(Type::Map(
+                                            Box::new(Type::String),
+                                            Box::new(Type::String),
+                                        )))),
+                                        Box::new(Type::String),
+                                    ),
+                                ),
+                            ),
+                            (
+                                "encode",
+                                function(
+                                    vec![
+                                        Type::Array(Box::new(Type::Map(
+                                            Box::new(Type::String),
+                                            Box::new(Type::String),
+                                        ))),
+                                        Type::Array(Box::new(Type::String)),
+                                        Type::String,
+                                    ],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "encoding",
+                        module(vec![
+                            (
+                                "hex",
+                                function(
+                                    vec![Type::Bytes],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "unhex",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "base64",
+                                function(
+                                    vec![Type::Bytes],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "unbase64",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "base64url",
+                                function(
+                                    vec![Type::Bytes],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "unbase64url",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                 ]),
@@ -285,14 +1602,41 @@ impl Checker {
             scopes: vec![global],
             errors: vec![],
             returns: vec![],
+            needs: vec![],
+            generics: vec![],
+            constraints: vec![],
             records: HashMap::new(),
             enums: HashMap::new(),
+            type_parameters: HashMap::new(),
+            type_constraints: HashMap::new(),
             type_names: HashMap::new(),
+            protocols: HashSet::new(),
+            protocol_members: HashMap::new(),
+            adoptions: HashSet::new(),
+            dispatch_adoptions: HashSet::new(),
             namespace,
         }
     }
 
     fn statements(&mut self, statements: &[Stmt]) {
+        for statement in statements {
+            if let Stmt::Protocol { name, span, .. } = statement {
+                let qualified = self.qualified(name);
+                if self.scopes.len() != 1 {
+                    self.errors.push(NivError::new(
+                        "protocol declarations are only allowed at module scope",
+                        span.line,
+                        span.column,
+                    ));
+                } else if known_builtin_protocol(name) || !self.protocols.insert(qualified) {
+                    self.errors.push(NivError::new(
+                        format!("protocol '{name}' is already declared"),
+                        span.line,
+                        span.column,
+                    ));
+                }
+            }
+        }
         for statement in statements {
             self.statement(statement);
         }
@@ -354,6 +1698,7 @@ impl Checker {
             } => {
                 let element = match self.expression(iterable) {
                     Type::Array(element) => *element,
+                    Type::Iterator(element) => *element,
                     Type::String => Type::String,
                     Type::Unknown => Type::Unknown,
                     other => {
@@ -377,13 +1722,121 @@ impl Checker {
                     checker.statement(body);
                 });
             }
-            Stmt::Function {
+            Stmt::Using {
                 name,
-                params,
-                return_type,
+                resource,
                 body,
                 span,
             } => {
+                let resource_type = self.expression(resource);
+                if !matches!(
+                    resource_type,
+                    Type::File
+                        | Type::TcpListener
+                        | Type::TcpStream
+                        | Type::WebSocket
+                        | Type::TlsListener
+                        | Type::LockGuard
+                        | Type::NativeHandle
+                        | Type::NativeLibrary
+                        | Type::Transaction(_, _)
+                        | Type::Unknown
+                ) {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "using needs a closable resource, found {}",
+                            resource_type.name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if matches!(
+                    resource_type,
+                    Type::TcpListener | Type::TcpStream | Type::WebSocket | Type::TlsListener
+                ) {
+                    if let Some(available) = self.needs.last() {
+                        if !available.iter().any(|need| need == "Network") {
+                            self.errors.push(NivError::new(
+                                "closing this resource needs Network; add it to the function's needs list",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                if matches!(resource_type, Type::LockGuard) {
+                    if let Some(available) = self.needs.last() {
+                        if !available.iter().any(|need| need == "Task") {
+                            self.errors.push(NivError::new(
+                                "closing this lock guard needs Task; add it to the function's needs list",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                if matches!(resource_type, Type::NativeHandle | Type::NativeLibrary) {
+                    if let Some(available) = self.needs.last() {
+                        if !available.iter().any(|need| need == "Native") {
+                            self.errors.push(NivError::new(
+                                "closing this native handle needs Native; add it to the function's needs list",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                self.in_scope(|checker| {
+                    checker.declare(
+                        name,
+                        Binding {
+                            ty: resource_type,
+                            mutable: false,
+                        },
+                        *span,
+                    );
+                    checker.statement(body);
+                });
+            }
+            Stmt::Function {
+                name,
+                type_params,
+                params,
+                return_type,
+                needs,
+                body,
+                span,
+            } => {
+                let generic_names = type_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>();
+                let generic_constraints = type_params
+                    .iter()
+                    .filter_map(|parameter| {
+                        parameter.constraint.as_ref().map(|constraint| {
+                            (
+                                parameter.name.clone(),
+                                self.protocol_name(constraint)
+                                    .unwrap_or_else(|| constraint.clone()),
+                            )
+                        })
+                    })
+                    .collect::<HashMap<_, _>>();
+                for parameter in type_params {
+                    if let Some(constraint) = &parameter.constraint {
+                        if !self.known_protocol(constraint) {
+                            self.errors.push(NivError::new(
+                                format!("unknown protocol '{constraint}'"),
+                                parameter.span.line,
+                                parameter.span.column,
+                            ));
+                        }
+                    }
+                }
+                self.generics.push(generic_names.clone());
+                self.constraints.push(generic_constraints.clone());
                 let param_types: Vec<Type> = params
                     .iter()
                     .map(|param| {
@@ -401,19 +1854,29 @@ impl Checker {
                 self.declare(
                     name,
                     Binding {
-                        ty: Type::Function(param_types.clone(), Box::new(result.clone())),
+                        ty: Type::Function(
+                            generic_names,
+                            generic_constraints.into_iter().collect(),
+                            param_types.clone(),
+                            Box::new(result.clone()),
+                            needs.clone(),
+                        ),
                         mutable: false,
                     },
                     *span,
                 );
                 self.returns.push(result);
+                self.needs.push(needs.clone());
                 self.in_scope(|checker| {
                     for (param, ty) in params.iter().zip(param_types) {
                         checker.declare(&param.name, Binding { ty, mutable: false }, param.span);
                     }
                     checker.statements(body);
                 });
+                self.needs.pop();
                 self.returns.pop();
+                self.generics.pop();
+                self.constraints.pop();
             }
             Stmt::Return(value, span) => {
                 let found = value
@@ -430,7 +1893,12 @@ impl Checker {
                     ));
                 }
             }
-            Stmt::Record { name, fields, span } => {
+            Stmt::Record {
+                name,
+                type_params,
+                fields,
+                span,
+            } => {
                 if self.type_names.contains_key(name) {
                     self.errors.push(NivError::new(
                         format!("shape '{name}' is already declared"),
@@ -441,6 +1909,40 @@ impl Checker {
                 }
                 let qualified = self.qualified(name);
                 self.type_names.insert(name.clone(), qualified.clone());
+                let generic_names = type_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>();
+                let generic_constraints = type_params
+                    .iter()
+                    .filter_map(|parameter| {
+                        parameter.constraint.as_ref().map(|constraint| {
+                            if !self.known_protocol(constraint) {
+                                self.errors.push(NivError::new(
+                                    format!("unknown protocol '{constraint}'"),
+                                    parameter.span.line,
+                                    parameter.span.column,
+                                ));
+                            }
+                            (
+                                parameter.name.clone(),
+                                self.protocol_name(constraint)
+                                    .unwrap_or_else(|| constraint.clone()),
+                            )
+                        })
+                    })
+                    .collect::<HashMap<_, _>>();
+                self.type_parameters
+                    .insert(qualified.clone(), generic_names.clone());
+                self.type_constraints.insert(
+                    qualified.clone(),
+                    generic_constraints
+                        .iter()
+                        .map(|(name, constraint)| (name.clone(), constraint.clone()))
+                        .collect(),
+                );
+                self.generics.push(generic_names.clone());
+                self.constraints.push(generic_constraints.clone());
                 let mut schema = HashMap::new();
                 let mut params = vec![];
                 for field in fields {
@@ -454,11 +1956,23 @@ impl Checker {
                     }
                     params.push(ty);
                 }
+                self.generics.pop();
+                self.constraints.pop();
                 self.records.insert(qualified.clone(), schema);
+                let arguments = generic_names
+                    .iter()
+                    .map(|name| Type::Generic(name.clone()))
+                    .collect();
                 self.declare(
                     name,
                     Binding {
-                        ty: Type::Function(params, Box::new(Type::Record(qualified))),
+                        ty: Type::Function(
+                            generic_names,
+                            generic_constraints.into_iter().collect(),
+                            params,
+                            Box::new(Type::Record(qualified, arguments)),
+                            vec![],
+                        ),
                         mutable: false,
                     },
                     *span,
@@ -466,6 +1980,7 @@ impl Checker {
             }
             Stmt::Enum {
                 name,
+                type_params,
                 variants,
                 span,
             } => {
@@ -479,17 +1994,65 @@ impl Checker {
                 }
                 let qualified = self.qualified(name);
                 self.type_names.insert(name.clone(), qualified.clone());
+                let generic_names = type_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>();
+                let generic_constraints = type_params
+                    .iter()
+                    .filter_map(|parameter| {
+                        parameter.constraint.as_ref().map(|constraint| {
+                            if !self.known_protocol(constraint) {
+                                self.errors.push(NivError::new(
+                                    format!("unknown protocol '{constraint}'"),
+                                    parameter.span.line,
+                                    parameter.span.column,
+                                ));
+                            }
+                            (
+                                parameter.name.clone(),
+                                self.protocol_name(constraint)
+                                    .unwrap_or_else(|| constraint.clone()),
+                            )
+                        })
+                    })
+                    .collect::<HashMap<_, _>>();
+                self.type_parameters
+                    .insert(qualified.clone(), generic_names.clone());
+                self.type_constraints.insert(
+                    qualified.clone(),
+                    generic_constraints
+                        .iter()
+                        .map(|(name, constraint)| (name.clone(), constraint.clone()))
+                        .collect(),
+                );
+                self.generics.push(generic_names);
+                self.constraints.push(generic_constraints);
                 let mut unique = std::collections::HashSet::new();
                 for variant in variants {
-                    if !unique.insert(variant) {
+                    if !unique.insert(&variant.name) {
                         self.errors.push(NivError::new(
-                            format!("duplicate variant '{variant}'"),
-                            span.line,
-                            span.column,
+                            format!("duplicate variant '{}'", variant.name),
+                            variant.span.line,
+                            variant.span.column,
                         ));
                     }
                 }
-                self.enums.insert(qualified.clone(), variants.clone());
+                let variants = variants
+                    .iter()
+                    .map(|variant| {
+                        (
+                            variant.name.clone(),
+                            variant
+                                .payload
+                                .as_ref()
+                                .map(|payload| self.type_ref(payload)),
+                        )
+                    })
+                    .collect();
+                self.generics.pop();
+                self.constraints.pop();
+                self.enums.insert(qualified.clone(), variants);
                 self.declare(
                     name,
                     Binding {
@@ -498,6 +2061,221 @@ impl Checker {
                     },
                     *span,
                 );
+            }
+            Stmt::Protocol {
+                name,
+                members,
+                span,
+            } => {
+                let qualified = self.qualified(name);
+                self.generics.push(vec!["Self".into()]);
+                self.constraints.push(HashMap::new());
+                let mut signatures = HashMap::new();
+                for member in members {
+                    let params = member
+                        .params
+                        .iter()
+                        .map(|parameter| {
+                            self.type_ref(
+                                parameter
+                                    .ty
+                                    .as_ref()
+                                    .expect("protocol parameters are always typed"),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let result = self.type_ref(&member.return_type);
+                    if params.first() != Some(&Type::Generic("Self".into())) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "protocol member '{}' must take Self as its first parameter",
+                                member.name
+                            ),
+                            member.span.line,
+                            member.span.column,
+                        ));
+                    }
+                    if signatures
+                        .insert(
+                            member.name.clone(),
+                            ProtocolMemberType {
+                                params,
+                                result,
+                                needs: member.needs.clone(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        self.errors.push(NivError::new(
+                            format!("duplicate protocol member '{}'", member.name),
+                            member.span.line,
+                            member.span.column,
+                        ));
+                    }
+                }
+                self.generics.pop();
+                self.constraints.pop();
+                self.protocol_members.insert(qualified.clone(), signatures);
+                self.declare(
+                    name,
+                    Binding {
+                        ty: Type::ProtocolNamespace(qualified),
+                        mutable: false,
+                    },
+                    *span,
+                );
+            }
+            Stmt::Adoption {
+                protocol,
+                ty,
+                members,
+                span,
+            } => {
+                if self.scopes.len() != 1 {
+                    self.errors.push(NivError::new(
+                        "protocol adoptions are only allowed at module scope",
+                        span.line,
+                        span.column,
+                    ));
+                    return;
+                }
+                if known_builtin_protocol(protocol) {
+                    self.errors.push(NivError::new(
+                        format!("sealed protocol '{protocol}' cannot be adopted explicitly"),
+                        span.line,
+                        span.column,
+                    ));
+                    return;
+                }
+                let Some(protocol_name) = self.protocol_name(protocol) else {
+                    self.errors.push(NivError::new(
+                        format!("unknown protocol '{protocol}'"),
+                        span.line,
+                        span.column,
+                    ));
+                    return;
+                };
+                let adopted = self.type_ref(ty);
+                if matches!(adopted, Type::Unknown | Type::Generic(_)) {
+                    return;
+                }
+                let protocol_owned = self.owns_qualified_name(&protocol_name);
+                let type_owned = match &adopted {
+                    Type::Record(name, _) | Type::Enum(name, _) => self.owns_qualified_name(name),
+                    _ => false,
+                };
+                if !protocol_owned && !type_owned {
+                    self.errors.push(NivError::new(
+                        "an adoption must be declared by the package that owns the protocol or nominal type",
+                        span.line,
+                        span.column,
+                    ));
+                    return;
+                }
+                let signatures = self
+                    .protocol_members
+                    .get(&protocol_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut mapped = HashSet::new();
+                for mapping in members {
+                    if !mapped.insert(mapping.member.clone()) {
+                        self.errors.push(NivError::new(
+                            format!("duplicate protocol mapping '{}'", mapping.member),
+                            mapping.span.line,
+                            mapping.span.column,
+                        ));
+                        continue;
+                    }
+                    let Some(signature) = signatures.get(&mapping.member) else {
+                        self.errors.push(NivError::new(
+                            format!("protocol '{protocol}' has no member '{}'", mapping.member),
+                            mapping.span.line,
+                            mapping.span.column,
+                        ));
+                        continue;
+                    };
+                    let Some(implementation) = self.resolve(&mapping.implementation) else {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "unknown protocol implementation '{}'",
+                                mapping.implementation
+                            ),
+                            mapping.span.line,
+                            mapping.span.column,
+                        ));
+                        continue;
+                    };
+                    let substitutions = HashMap::from([("Self".into(), adopted.clone())]);
+                    let expected = Type::Function(
+                        vec![],
+                        vec![],
+                        signature
+                            .params
+                            .iter()
+                            .map(|parameter| substitute(parameter, &substitutions))
+                            .collect(),
+                        Box::new(substitute(&signature.result, &substitutions)),
+                        signature.needs.clone(),
+                    );
+                    if !compatible(&implementation.ty, &expected) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "implementation '{}' does not match {}.{}",
+                                mapping.implementation, protocol, mapping.member
+                            ),
+                            mapping.span.line,
+                            mapping.span.column,
+                        ));
+                    }
+                }
+                let missing = signatures
+                    .keys()
+                    .filter(|member| !mapped.contains(*member))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "adoption of '{protocol}' is missing mappings for {}",
+                            missing.join(", ")
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
+                let adopted_name = adopted.name();
+                let key = (protocol_name.clone(), adopted_name.clone());
+                if self.adoptions.contains(&key) {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "protocol '{protocol}' is already adopted for {}",
+                            adopted.name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                    return;
+                }
+                let dispatch_name = adopted_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&adopted_name)
+                    .to_string();
+                if !self
+                    .dispatch_adoptions
+                    .insert((protocol_name.clone(), dispatch_name))
+                {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "protocol '{protocol}' already has a runtime-coherent adoption for this nominal type"
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                    return;
+                }
+                self.adoptions.insert(key);
             }
             Stmt::Import { .. } | Stmt::Export { .. } => {}
             Stmt::Module {
@@ -541,6 +2319,19 @@ impl Checker {
                 for (enumeration, variants) in module_checker.enums {
                     self.enums.entry(enumeration).or_insert(variants);
                 }
+                for (ty, parameters) in module_checker.type_parameters {
+                    self.type_parameters.entry(ty).or_insert(parameters);
+                }
+                for (ty, constraints) in module_checker.type_constraints {
+                    self.type_constraints.entry(ty).or_insert(constraints);
+                }
+                self.protocols.extend(module_checker.protocols);
+                for (protocol, members) in module_checker.protocol_members {
+                    self.protocol_members.entry(protocol).or_insert(members);
+                }
+                self.adoptions.extend(module_checker.adoptions);
+                self.dispatch_adoptions
+                    .extend(module_checker.dispatch_adoptions);
                 self.declare(
                     name,
                     Binding {
@@ -606,11 +2397,16 @@ impl Checker {
                 if matches!(operator, TokenKind::Bang) {
                     self.require(&found, &Type::Bool, *span);
                     Type::Bool
-                } else if matches!(found, Type::Int | Type::Float | Type::Unknown) {
+                } else if matches!(&found, Type::Fixed(kind) if kind.signed())
+                    || matches!(
+                        found,
+                        Type::Int | Type::Float | Type::BigInt | Type::Decimal | Type::Unknown
+                    )
+                {
                     found
                 } else {
                     self.errors.push(NivError::new(
-                        format!("expected Int or Float, found {}", found.name()),
+                        format!("expected a numeric value, found {}", found.name()),
                         span.line,
                         span.column,
                     ));
@@ -621,7 +2417,16 @@ impl Checker {
                 let left = self.expression(left);
                 let right = self.expression(right);
                 match operator {
-                    TokenKind::EqualEqual | TokenKind::BangEqual => Type::Bool,
+                    TokenKind::EqualEqual | TokenKind::BangEqual => {
+                        if matches!(left, Type::SecretKey) || matches!(right, Type::SecretKey) {
+                            self.errors.push(NivError::new(
+                                "SecretKey values cannot be compared",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        Type::Bool
+                    }
                     TokenKind::Plus
                         if matches!(left, Type::String) || matches!(right, Type::String) =>
                     {
@@ -638,7 +2443,12 @@ impl Checker {
                     | TokenKind::GreaterEqual
                     | TokenKind::Less
                     | TokenKind::LessEqual => {
-                        self.numeric_pair(&left, &right, *span);
+                        if matches!(left, Type::DateTime) || matches!(right, Type::DateTime) {
+                            self.require(&left, &Type::DateTime, *span);
+                            self.require(&right, &Type::DateTime, *span);
+                        } else {
+                            self.numeric_pair(&left, &right, *span);
+                        }
                         Type::Bool
                     }
                     _ => Type::Unknown,
@@ -657,6 +2467,33 @@ impl Checker {
                     .iter()
                     .map(|argument| self.expression(argument))
                     .collect();
+                let schema_decode_result = if (member_path(callee, &["std", "json", "decode"])
+                    && argument_types.len() == 2)
+                    || (member_path(callee, &["std", "json", "read_next_as"])
+                        && argument_types.len() == 3)
+                {
+                    match &argument_types[0] {
+                        Type::Function(_, _, _, result, _) => match result.as_ref() {
+                            Type::Record(name, arguments) => {
+                                let record = Type::Record(name.clone(), arguments.clone());
+                                Some(Type::Result(
+                                    Box::new(
+                                        if member_path(callee, &["std", "json", "read_next_as"]) {
+                                            Type::Nullable(Box::new(record))
+                                        } else {
+                                            record
+                                        },
+                                    ),
+                                    Box::new(Type::String),
+                                ))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 if let Expr::Variable(name, _) = callee.as_ref() {
                     if name == "ok" && argument_types.len() == 1 {
                         return Type::Result(
@@ -672,7 +2509,9 @@ impl Checker {
                     }
                 }
                 match callee_type {
-                    Type::Function(params, result) => {
+                    Type::Function(type_params, constraints, params, result, required) => {
+                        let mut effective_required = required.clone();
+                        let mut substitutions = HashMap::new();
                         if params.len() != arguments.len() {
                             self.errors.push(NivError::new(
                                 format!(
@@ -685,10 +2524,62 @@ impl Checker {
                             ));
                         } else {
                             for (found, expected) in argument_types.iter().zip(&params) {
-                                self.require(found, expected, *span);
+                                if type_params.is_empty() {
+                                    self.require(found, expected, *span);
+                                } else if !unify(expected, found, &mut substitutions) {
+                                    self.errors.push(NivError::new(
+                                        format!(
+                                            "generic argument expected {}, found {}",
+                                            substitute(expected, &substitutions).name(),
+                                            found.name()
+                                        ),
+                                        span.line,
+                                        span.column,
+                                    ));
+                                }
+                                if let (
+                                    Type::Function(_, _, _, _, found_needs),
+                                    Type::Function(_, _, _, _, expected_needs),
+                                ) = (found, expected)
+                                {
+                                    if expected_needs.iter().any(|need| need == "$effects") {
+                                        for need in found_needs {
+                                            if !effective_required.contains(need) {
+                                                effective_required.push(need.clone());
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        *result
+                        for (parameter, constraint) in &constraints {
+                            if let Some(found) = substitutions.get(parameter) {
+                                if !self.satisfies(found, constraint) {
+                                    self.errors.push(NivError::new(
+                                        format!(
+                                            "{} does not satisfy {constraint} for {parameter}",
+                                            found.name()
+                                        ),
+                                        span.line,
+                                        span.column,
+                                    ));
+                                }
+                            }
+                        }
+                        if let Some(available) = self.needs.last() {
+                            for capability in &effective_required {
+                                if !available.contains(capability) {
+                                    self.errors.push(NivError::new(
+                                        format!(
+                                            "this call needs {capability}; add it to the function's needs list"
+                                        ),
+                                        span.line,
+                                        span.column,
+                                    ));
+                                }
+                            }
+                        }
+                        schema_decode_result.unwrap_or_else(|| substitute(&result, &substitutions))
                     }
                     Type::Unknown => Type::Unknown,
                     other => {
@@ -761,12 +2652,59 @@ impl Checker {
                     }
                 }
             }
+            Expr::Propagate(value, span) => match self.expression(value) {
+                Type::Result(ok, error) => match self.returns.last().cloned() {
+                    Some(Type::Result(_, return_error)) => {
+                        self.require(&error, &return_error, *span);
+                        *ok
+                    }
+                    Some(other) => {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "or give needs a function returning Result, but this function gives {}",
+                                other.name()
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                    None => {
+                        self.errors.push(NivError::new(
+                            "or give may only appear inside a function returning Result",
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                },
+                Type::Unknown => Type::Unknown,
+                other => {
+                    self.errors.push(NivError::new(
+                        format!("or give needs a Result, found {}", other.name()),
+                        span.line,
+                        span.column,
+                    ));
+                    Type::Unknown
+                }
+            },
             Expr::Get(object, name, span) => match self.expression(object) {
-                Type::Record(record) => self
+                Type::Record(record, arguments) => self
                     .records
                     .get(&record)
                     .and_then(|fields| fields.get(name))
                     .cloned()
+                    .map(|field| {
+                        let substitutions = self
+                            .type_parameters
+                            .get(&record)
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                            .zip(arguments)
+                            .collect();
+                        substitute(&field, &substitutions)
+                    })
                     .unwrap_or_else(|| {
                         self.errors.push(NivError::new(
                             format!("{record} has no field '{name}'"),
@@ -777,12 +2715,39 @@ impl Checker {
                     }),
                 Type::Unknown => Type::Unknown,
                 Type::EnumNamespace(enum_name) => {
-                    if self
+                    if let Some((_, payload)) = self
                         .enums
                         .get(&enum_name)
-                        .is_some_and(|variants| variants.contains(name))
+                        .and_then(|variants| variants.iter().find(|(variant, _)| variant == name))
                     {
-                        Type::Enum(enum_name)
+                        let type_params = self
+                            .type_parameters
+                            .get(&enum_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let constraints = self
+                            .type_constraints
+                            .get(&enum_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let generic_arguments = type_params
+                            .iter()
+                            .map(|parameter| Type::Generic(parameter.clone()))
+                            .collect::<Vec<_>>();
+                        if let Some(payload) = payload.clone() {
+                            Type::Function(
+                                type_params,
+                                constraints,
+                                vec![payload],
+                                Box::new(Type::Enum(enum_name.clone(), generic_arguments)),
+                                vec![],
+                            )
+                        } else {
+                            Type::Enum(
+                                enum_name.clone(),
+                                type_params.iter().map(|_| Type::Unknown).collect(),
+                            )
+                        }
                     } else {
                         self.errors.push(NivError::new(
                             format!("{enum_name} has no variant '{name}'"),
@@ -792,6 +2757,27 @@ impl Checker {
                         Type::Unknown
                     }
                 }
+                Type::ProtocolNamespace(protocol_name) => self
+                    .protocol_members
+                    .get(&protocol_name)
+                    .and_then(|members| members.get(name))
+                    .map(|member| {
+                        Type::Function(
+                            vec!["Self".into()],
+                            vec![("Self".into(), protocol_name.clone())],
+                            member.params.clone(),
+                            Box::new(member.result.clone()),
+                            member.needs.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        self.errors.push(NivError::new(
+                            format!("{protocol_name} has no member '{name}'"),
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }),
                 Type::Module(members) => members.get(name).cloned().unwrap_or_else(|| {
                     self.errors.push(NivError::new(
                         format!("module has no exposed member '{name}'"),
@@ -811,9 +2797,29 @@ impl Checker {
             },
             Expr::Match(subject, arms, span) => {
                 let (type_name, variants, payloads) = match self.expression(subject) {
-                    Type::Enum(name) => {
-                        let variants = self.enums.get(&name).cloned().unwrap_or_default();
-                        (name, variants, HashMap::<String, Type>::new())
+                    Type::Enum(name, arguments) => {
+                        let definitions = self.enums.get(&name).cloned().unwrap_or_default();
+                        let variants = definitions
+                            .iter()
+                            .map(|(variant, _)| variant.clone())
+                            .collect();
+                        let payloads = definitions
+                            .into_iter()
+                            .filter_map(|(variant, payload)| {
+                                payload.map(|payload| {
+                                    let substitutions = self
+                                        .type_parameters
+                                        .get(&name)
+                                        .into_iter()
+                                        .flatten()
+                                        .cloned()
+                                        .zip(arguments.clone())
+                                        .collect();
+                                    (variant, substitute(&payload, &substitutions))
+                                })
+                            })
+                            .collect();
+                        (name, variants, payloads)
                     }
                     Type::Result(ok, error) => {
                         let mut payloads = HashMap::<String, Type>::new();
@@ -911,6 +2917,107 @@ impl Checker {
     fn type_ref(&mut self, reference: &TypeRef) -> Type {
         match reference {
             TypeRef::Array(element, _) => Type::Array(Box::new(self.type_ref(element))),
+            TypeRef::Applied(name, arguments, span) => {
+                match (name.as_str(), arguments.as_slice()) {
+                    ("Map", [key, value]) => {
+                        Type::Map(Box::new(self.type_ref(key)), Box::new(self.type_ref(value)))
+                    }
+                    ("Set", [element]) => Type::Set(Box::new(self.type_ref(element))),
+                    ("Iterator", [element]) => Type::Iterator(Box::new(self.type_ref(element))),
+                    ("Transaction", [key, value]) => Type::Transaction(
+                        Box::new(self.type_ref(key)),
+                        Box::new(self.type_ref(value)),
+                    ),
+                    ("Map", _) => {
+                        self.errors.push(NivError::new(
+                            "Map needs exactly two type arguments",
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                    ("Set", _) => {
+                        self.errors.push(NivError::new(
+                            "Set needs exactly one type argument",
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                    ("Iterator", _) => {
+                        self.errors.push(NivError::new(
+                            "Iterator needs exactly one type argument",
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                    ("Transaction", _) => {
+                        self.errors.push(NivError::new(
+                            "Transaction needs exactly two type arguments",
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                    _ => {
+                        if let Some(qualified) = self.type_names.get(name).cloned() {
+                            let expected = self.type_parameters.get(&qualified).map_or(0, Vec::len);
+                            if expected != arguments.len() {
+                                self.errors.push(NivError::new(
+                                    format!("{name} needs exactly {expected} type arguments"),
+                                    span.line,
+                                    span.column,
+                                ));
+                                Type::Unknown
+                            } else {
+                                let arguments = arguments
+                                    .iter()
+                                    .map(|argument| self.type_ref(argument))
+                                    .collect::<Vec<_>>();
+                                let parameters = self
+                                    .type_parameters
+                                    .get(&qualified)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                for (parameter, constraint) in self
+                                    .type_constraints
+                                    .get(&qualified)
+                                    .cloned()
+                                    .unwrap_or_default()
+                                {
+                                    if let Some(index) =
+                                        parameters.iter().position(|name| name == &parameter)
+                                    {
+                                        if !self.satisfies(&arguments[index], &constraint) {
+                                            self.errors.push(NivError::new(
+                                                format!(
+                                                    "{} does not satisfy {constraint} for {parameter}",
+                                                    arguments[index].name()
+                                                ),
+                                                span.line,
+                                                span.column,
+                                            ));
+                                        }
+                                    }
+                                }
+                                if self.records.contains_key(&qualified) {
+                                    Type::Record(qualified, arguments)
+                                } else {
+                                    Type::Enum(qualified, arguments)
+                                }
+                            }
+                        } else {
+                            self.errors.push(NivError::new(
+                                format!("unknown generic type '{name}'"),
+                                span.line,
+                                span.column,
+                            ));
+                            Type::Unknown
+                        }
+                    }
+                }
+            }
             TypeRef::Result(ok, error, _) => {
                 Type::Result(Box::new(self.type_ref(ok)), Box::new(self.type_ref(error)))
             }
@@ -929,14 +3036,55 @@ impl Checker {
                 "Int" | "Number" => Type::Int,
                 "Float" => Type::Float,
                 "String" => Type::String,
+                "Bytes" => Type::Bytes,
+                "SecretKey" => Type::SecretKey,
                 "Bool" => Type::Bool,
                 "Null" => Type::Null,
+                "File" => Type::File,
+                "TcpListener" => Type::TcpListener,
+                "TcpStream" => Type::TcpStream,
+                "TlsStream" => Type::TlsStream,
+                "WebSocket" => Type::WebSocket,
+                "TlsListener" => Type::TlsListener,
+                "Lock" => Type::Lock,
+                "LockGuard" => Type::LockGuard,
+                "NativeHandle" => Type::NativeHandle,
+                "NativeLibrary" => Type::NativeLibrary,
+                "AtomicInt" => Type::AtomicInt,
+                "DateTime" => Type::DateTime,
+                "BigInt" => Type::BigInt,
+                "Decimal" => Type::Decimal,
+                "I8" => Type::Fixed(FixedKind::I8),
+                "I16" => Type::Fixed(FixedKind::I16),
+                "I32" => Type::Fixed(FixedKind::I32),
+                "U8" => Type::Fixed(FixedKind::U8),
+                "U16" => Type::Fixed(FixedKind::U16),
+                "U32" => Type::Fixed(FixedKind::U32),
+                "U64" => Type::Fixed(FixedKind::U64),
+                "Task" => Type::Task,
+                "Channel" => Type::Channel,
                 _ => {
+                    if self
+                        .generics
+                        .iter()
+                        .rev()
+                        .any(|parameters| parameters.contains(name))
+                    {
+                        return Type::Generic(name.clone());
+                    }
                     if let Some(qualified) = self.type_names.get(name) {
-                        if self.records.contains_key(qualified) {
-                            Type::Record(qualified.clone())
+                        let expected = self.type_parameters.get(qualified).map_or(0, Vec::len);
+                        if expected > 0 {
+                            self.errors.push(NivError::new(
+                                format!("{name} needs exactly {expected} type arguments"),
+                                span.line,
+                                span.column,
+                            ));
+                            Type::Unknown
+                        } else if self.records.contains_key(qualified) {
+                            Type::Record(qualified.clone(), vec![])
                         } else {
-                            Type::Enum(qualified.clone())
+                            Type::Enum(qualified.clone(), vec![])
                         }
                     } else {
                         self.errors.push(NivError::new(
@@ -954,6 +3102,14 @@ impl Checker {
         match (left, right) {
             (Type::Int, Type::Int) => Type::Int,
             (Type::Float, Type::Float) => Type::Float,
+            (Type::BigInt, Type::BigInt) => Type::BigInt,
+            (Type::Decimal, Type::Decimal) => Type::Decimal,
+            (Type::Fixed(left), Type::Fixed(right)) if left == right => Type::Fixed(*left),
+            (Type::Generic(left), Type::Generic(right))
+                if left == right && self.generic_has(left, "Number") =>
+            {
+                Type::Generic(left.clone())
+            }
             (Type::Unknown, _) | (_, Type::Unknown) => Type::Unknown,
             _ => {
                 self.errors.push(NivError::new(
@@ -969,11 +3125,103 @@ impl Checker {
             }
         }
     }
+    fn generic_has(&self, name: &str, protocol: &str) -> bool {
+        self.constraints
+            .iter()
+            .rev()
+            .find_map(|constraints| constraints.get(name))
+            .is_some_and(|constraint| constraint == protocol)
+    }
+    fn satisfies(&self, ty: &Type, protocol: &str) -> bool {
+        if let Type::Generic(name) = ty {
+            return self.generic_has(name, protocol);
+        }
+        if !known_builtin_protocol(protocol) {
+            return self.adoptions.contains(&(protocol.to_string(), ty.name()));
+        }
+        match ty {
+            Type::Generic(_) => unreachable!("generic constraints are handled above"),
+            Type::Unknown => true,
+            Type::Int | Type::Float | Type::BigInt | Type::Decimal | Type::Fixed(_) => {
+                matches!(protocol, "Comparable" | "Number" | "Ordered" | "Sendable")
+            }
+            Type::String | Type::Bytes => {
+                matches!(protocol, "Comparable" | "Ordered" | "Iterable" | "Sendable")
+            }
+            Type::DateTime => {
+                matches!(protocol, "Comparable" | "Ordered" | "Sendable")
+            }
+            Type::Bool | Type::Null => {
+                matches!(protocol, "Comparable" | "Sendable")
+            }
+            Type::Array(element) | Type::Set(element) => match protocol {
+                "Comparable" => self.satisfies(element, "Comparable"),
+                "Iterable" => true,
+                "Sendable" => self.satisfies(element, "Sendable"),
+                _ => false,
+            },
+            Type::Iterator(_) => protocol == "Iterable",
+            Type::Map(key, value) => match protocol {
+                "Comparable" => {
+                    self.satisfies(key, "Comparable") && self.satisfies(value, "Comparable")
+                }
+                "Iterable" => true,
+                "Sendable" => self.satisfies(key, "Sendable") && self.satisfies(value, "Sendable"),
+                _ => false,
+            },
+            Type::Nullable(inner) => self.satisfies(inner, protocol),
+            Type::Result(ok, error) => {
+                matches!(protocol, "Comparable" | "Sendable")
+                    && self.satisfies(ok, protocol)
+                    && self.satisfies(error, protocol)
+            }
+            Type::Record(_, arguments) | Type::Enum(_, arguments) => {
+                matches!(protocol, "Comparable" | "Sendable")
+                    && arguments
+                        .iter()
+                        .all(|argument| self.satisfies(argument, protocol))
+            }
+            Type::File
+            | Type::TcpListener
+            | Type::TcpStream
+            | Type::TlsStream
+            | Type::WebSocket
+            | Type::TlsListener => protocol == "Closable",
+            Type::LockGuard => protocol == "Closable",
+            Type::NativeHandle => protocol == "Closable",
+            Type::NativeLibrary => protocol == "Closable",
+            Type::Transaction(_, _) => protocol == "Closable",
+            Type::Task | Type::Channel | Type::Lock | Type::AtomicInt => protocol == "Sendable",
+            Type::SecretKey => false,
+            Type::Function(_, _, _, _, _)
+            | Type::Module(_)
+            | Type::EnumNamespace(_)
+            | Type::ProtocolNamespace(_) => false,
+        }
+    }
+    fn known_protocol(&self, name: &str) -> bool {
+        known_builtin_protocol(name) || self.protocol_name(name).is_some()
+    }
+    fn protocol_name(&self, name: &str) -> Option<String> {
+        if self.protocols.contains(name) {
+            return Some(name.to_string());
+        }
+        let qualified = self.qualified(name);
+        self.protocols.contains(&qualified).then_some(qualified)
+    }
     fn qualified(&self, name: &str) -> String {
         if self.namespace.is_empty() {
             name.to_string()
         } else {
             format!("{}.{}", self.namespace, name)
+        }
+    }
+    fn owns_qualified_name(&self, name: &str) -> bool {
+        if self.namespace.is_empty() {
+            !name.contains('.')
+        } else {
+            name.strip_prefix(&self.namespace)
+                .is_some_and(|suffix| suffix.starts_with('.'))
         }
     }
     fn require_bool(&mut self, expression: &Expr) {
@@ -1018,9 +3266,550 @@ fn declared_name(statement: &Stmt) -> Option<&str> {
         | Stmt::Function { name, .. }
         | Stmt::Record { name, .. }
         | Stmt::Enum { name, .. }
+        | Stmt::Protocol { name, .. }
         | Stmt::Module { name, .. } => Some(name),
         _ => None,
     }
+}
+
+fn known_builtin_protocol(name: &str) -> bool {
+    matches!(
+        name,
+        "Comparable" | "Number" | "Ordered" | "Iterable" | "Closable" | "Sendable"
+    )
+}
+
+fn fixed_type_module(kind: FixedKind) -> Type {
+    let function =
+        |parameters, result| Type::Function(vec![], vec![], parameters, Box::new(result), vec![]);
+    Type::Module(HashMap::from([
+        (
+            "from_int".into(),
+            function(
+                vec![Type::Int],
+                Type::Result(Box::new(Type::Fixed(kind)), Box::new(Type::String)),
+            ),
+        ),
+        (
+            "parse".into(),
+            function(
+                vec![Type::String],
+                Type::Result(Box::new(Type::Fixed(kind)), Box::new(Type::String)),
+            ),
+        ),
+        (
+            "format".into(),
+            function(vec![Type::Fixed(kind)], Type::String),
+        ),
+        (
+            "to_int".into(),
+            function(
+                vec![Type::Fixed(kind)],
+                Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+            ),
+        ),
+    ]))
+}
+
+fn iterator_type_module() -> Type {
+    let element = Type::Generic("Element".into());
+    let output = Type::Generic("Output".into());
+    let iterator = Type::Iterator(Box::new(element.clone()));
+    let callback = |parameter: Type, result: Type| {
+        Type::Function(
+            vec![],
+            vec![],
+            vec![parameter],
+            Box::new(result),
+            vec!["$effects".into()],
+        )
+    };
+    let binary_callback = |left: Type, right: Type, result: Type| {
+        Type::Function(
+            vec![],
+            vec![],
+            vec![left, right],
+            Box::new(result),
+            vec!["$effects".into()],
+        )
+    };
+    let generic = |names: &[&str], parameters: Vec<Type>, result: Type| {
+        Type::Function(
+            names.iter().map(ToString::to_string).collect(),
+            vec![],
+            parameters,
+            Box::new(result),
+            vec![],
+        )
+    };
+    Type::Module(HashMap::from([
+        (
+            "from".into(),
+            generic(
+                &["Element"],
+                vec![Type::Array(Box::new(element.clone()))],
+                iterator.clone(),
+            ),
+        ),
+        (
+            "range".into(),
+            generic(
+                &[],
+                vec![Type::Int, Type::Int, Type::Int],
+                Type::Result(
+                    Box::new(Type::Iterator(Box::new(Type::Int))),
+                    Box::new(Type::String),
+                ),
+            ),
+        ),
+        (
+            "lines".into(),
+            Type::Function(
+                vec![],
+                vec![],
+                vec![Type::File, Type::Int],
+                Box::new(Type::Result(
+                    Box::new(Type::Iterator(Box::new(Type::Result(
+                        Box::new(Type::String),
+                        Box::new(Type::String),
+                    )))),
+                    Box::new(Type::String),
+                )),
+                vec!["FileRead".into()],
+            ),
+        ),
+        (
+            "tcp_lines".into(),
+            Type::Function(
+                vec![],
+                vec![],
+                vec![Type::TcpStream, Type::Int, Type::Float],
+                Box::new(Type::Result(
+                    Box::new(Type::Iterator(Box::new(Type::Result(
+                        Box::new(Type::String),
+                        Box::new(Type::String),
+                    )))),
+                    Box::new(Type::String),
+                )),
+                vec!["Network".into()],
+            ),
+        ),
+        (
+            "next".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone()],
+                Type::Nullable(Box::new(element.clone())),
+            ),
+        ),
+        (
+            "take".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone(), Type::Int],
+                iterator.clone(),
+            ),
+        ),
+        (
+            "skip".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone(), Type::Int],
+                iterator.clone(),
+            ),
+        ),
+        (
+            "transform".into(),
+            generic(
+                &["Element", "Output"],
+                vec![iterator.clone(), callback(element.clone(), output.clone())],
+                Type::Iterator(Box::new(output.clone())),
+            ),
+        ),
+        (
+            "select".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone(), callback(element.clone(), Type::Bool)],
+                iterator.clone(),
+            ),
+        ),
+        (
+            "collect".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone()],
+                Type::Array(Box::new(element.clone())),
+            ),
+        ),
+        (
+            "chain".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone(), iterator.clone()],
+                iterator.clone(),
+            ),
+        ),
+        (
+            "count".into(),
+            generic(&["Element"], vec![iterator.clone()], Type::Int),
+        ),
+        (
+            "fold".into(),
+            generic(
+                &["Element", "Output"],
+                vec![
+                    iterator.clone(),
+                    output.clone(),
+                    binary_callback(output.clone(), element.clone(), output.clone()),
+                ],
+                output.clone(),
+            ),
+        ),
+        (
+            "any".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone(), callback(element.clone(), Type::Bool)],
+                Type::Bool,
+            ),
+        ),
+        (
+            "every".into(),
+            generic(
+                &["Element"],
+                vec![iterator.clone(), callback(element.clone(), Type::Bool)],
+                Type::Bool,
+            ),
+        ),
+        (
+            "find".into(),
+            generic(
+                &["Element"],
+                vec![iterator, callback(element.clone(), Type::Bool)],
+                Type::Nullable(Box::new(element)),
+            ),
+        ),
+    ]))
+}
+
+fn transaction_type_module() -> Type {
+    let key = Type::Generic("Key".into());
+    let value = Type::Generic("Value".into());
+    let map = Type::Map(Box::new(key.clone()), Box::new(value.clone()));
+    let transaction = Type::Transaction(Box::new(key.clone()), Box::new(value.clone()));
+    let generic = |parameters: Vec<Type>, result: Type| {
+        Type::Function(
+            vec!["Key".into(), "Value".into()],
+            vec![("Key".into(), "Comparable".into())],
+            parameters,
+            Box::new(result),
+            vec![],
+        )
+    };
+    let result = |ok: Type| Type::Result(Box::new(ok), Box::new(Type::String));
+    Type::Module(HashMap::from([
+        (
+            "begin".into(),
+            generic(vec![map.clone()], transaction.clone()),
+        ),
+        (
+            "get".into(),
+            generic(
+                vec![transaction.clone(), key.clone()],
+                result(Type::Nullable(Box::new(value.clone()))),
+            ),
+        ),
+        (
+            "set".into(),
+            generic(
+                vec![transaction.clone(), key.clone(), value],
+                result(Type::Null),
+            ),
+        ),
+        (
+            "remove".into(),
+            generic(vec![transaction.clone(), key], result(Type::Null)),
+        ),
+        (
+            "commit".into(),
+            generic(vec![transaction.clone()], result(map.clone())),
+        ),
+        (
+            "rollback".into(),
+            generic(vec![transaction.clone()], result(map)),
+        ),
+        (
+            "close".into(),
+            generic(vec![transaction], result(Type::Null)),
+        ),
+    ]))
+}
+
+fn map_functions() -> Vec<(&'static str, Type)> {
+    let key = Type::Generic("Key".into());
+    let value = Type::Generic("Value".into());
+    let map = Type::Map(Box::new(key.clone()), Box::new(value.clone()));
+    let generic = |params: Vec<Type>, result: Type| {
+        Type::Function(
+            vec!["Key".into(), "Value".into()],
+            vec![("Key".into(), "Comparable".into())],
+            params,
+            Box::new(result),
+            vec![],
+        )
+    };
+    vec![
+        (
+            "single",
+            generic(vec![key.clone(), value.clone()], map.clone()),
+        ),
+        (
+            "set",
+            generic(vec![map.clone(), key.clone(), value.clone()], map.clone()),
+        ),
+        (
+            "get",
+            generic(
+                vec![map.clone(), key.clone()],
+                Type::Nullable(Box::new(value.clone())),
+            ),
+        ),
+        (
+            "contains",
+            generic(vec![map.clone(), key.clone()], Type::Bool),
+        ),
+        ("remove", generic(vec![map.clone(), key], map.clone())),
+        ("length", generic(vec![map.clone()], Type::Int)),
+        (
+            "keys",
+            generic(
+                vec![map.clone()],
+                Type::Array(Box::new(Type::Generic("Key".into()))),
+            ),
+        ),
+        ("values", generic(vec![map], Type::Array(Box::new(value)))),
+    ]
+}
+
+fn task_module(effect: &impl Fn(Vec<Type>, Type, &str) -> Type) -> Type {
+    Type::Module(HashMap::from([
+        (
+            "spawn".into(),
+            effect(
+                vec![Type::Function(
+                    vec![],
+                    vec![],
+                    vec![],
+                    Box::new(Type::Unknown),
+                    vec!["$effects".into()],
+                )],
+                Type::Task,
+                "Task",
+            ),
+        ),
+        (
+            "await".into(),
+            effect(
+                vec![Type::Task],
+                Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                "Task",
+            ),
+        ),
+        (
+            "await_for".into(),
+            effect(
+                vec![Type::Task, Type::Float],
+                Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                "Task",
+            ),
+        ),
+        (
+            "cancel".into(),
+            effect(vec![Type::Task], Type::Null, "Task"),
+        ),
+        (
+            "all".into(),
+            effect(
+                vec![Type::Array(Box::new(Type::Task))],
+                Type::Result(
+                    Box::new(Type::Array(Box::new(Type::Unknown))),
+                    Box::new(Type::String),
+                ),
+                "Task",
+            ),
+        ),
+        (
+            "race".into(),
+            effect(
+                vec![Type::Array(Box::new(Type::Task))],
+                Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                "Task",
+            ),
+        ),
+    ]))
+}
+
+fn channel_module(effect: &impl Fn(Vec<Type>, Type, &str) -> Type) -> Type {
+    Type::Module(HashMap::from([
+        (
+            "create".into(),
+            effect(vec![Type::Int], Type::Channel, "Channel"),
+        ),
+        (
+            "send".into(),
+            effect(
+                vec![Type::Channel, Type::Unknown, Type::Float],
+                Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                "Channel",
+            ),
+        ),
+        (
+            "receive".into(),
+            effect(
+                vec![Type::Channel, Type::Float],
+                Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                "Channel",
+            ),
+        ),
+    ]))
+}
+
+fn set_functions() -> Vec<(&'static str, Type)> {
+    let element = Type::Generic("Element".into());
+    let set = Type::Set(Box::new(element.clone()));
+    let generic = |params: Vec<Type>, result: Type| {
+        Type::Function(
+            vec!["Element".into()],
+            vec![("Element".into(), "Comparable".into())],
+            params,
+            Box::new(result),
+            vec![],
+        )
+    };
+    vec![
+        ("single", generic(vec![element.clone()], set.clone())),
+        (
+            "add",
+            generic(vec![set.clone(), element.clone()], set.clone()),
+        ),
+        (
+            "contains",
+            generic(vec![set.clone(), element.clone()], Type::Bool),
+        ),
+        ("remove", generic(vec![set.clone(), element], set.clone())),
+        ("length", generic(vec![set.clone()], Type::Int)),
+        (
+            "values",
+            generic(
+                vec![set],
+                Type::Array(Box::new(Type::Generic("Element".into()))),
+            ),
+        ),
+    ]
+}
+
+fn list_functions() -> Vec<(&'static str, Type)> {
+    let element = Type::Generic("Element".into());
+    let output = Type::Generic("Output".into());
+    let accumulator = Type::Generic("Accumulator".into());
+    let callback = |params: Vec<Type>, result: Type| {
+        Type::Function(
+            vec![],
+            vec![],
+            params,
+            Box::new(result),
+            vec!["$effects".into()],
+        )
+    };
+    let generic = |names: Vec<&str>, params: Vec<Type>, result: Type| {
+        Type::Function(
+            names.into_iter().map(str::to_string).collect(),
+            vec![],
+            params,
+            Box::new(result),
+            vec![],
+        )
+    };
+    vec![
+        (
+            "transform",
+            generic(
+                vec!["Element", "Output"],
+                vec![
+                    Type::Array(Box::new(element.clone())),
+                    callback(vec![element.clone()], output.clone()),
+                ],
+                Type::Array(Box::new(output)),
+            ),
+        ),
+        (
+            "select",
+            generic(
+                vec!["Element"],
+                vec![
+                    Type::Array(Box::new(element.clone())),
+                    callback(vec![element.clone()], Type::Bool),
+                ],
+                Type::Array(Box::new(element.clone())),
+            ),
+        ),
+        (
+            "fold",
+            generic(
+                vec!["Element", "Accumulator"],
+                vec![
+                    Type::Array(Box::new(element.clone())),
+                    accumulator.clone(),
+                    callback(
+                        vec![accumulator.clone(), element.clone()],
+                        accumulator.clone(),
+                    ),
+                ],
+                accumulator,
+            ),
+        ),
+        (
+            "any",
+            generic(
+                vec!["Element"],
+                vec![
+                    Type::Array(Box::new(element.clone())),
+                    callback(vec![element.clone()], Type::Bool),
+                ],
+                Type::Bool,
+            ),
+        ),
+        (
+            "every",
+            generic(
+                vec!["Element"],
+                vec![
+                    Type::Array(Box::new(element.clone())),
+                    callback(vec![element], Type::Bool),
+                ],
+                Type::Bool,
+            ),
+        ),
+    ]
+}
+
+fn member_path(expression: &Expr, expected: &[&str]) -> bool {
+    fn collect<'a>(expression: &'a Expr, parts: &mut Vec<&'a str>) -> bool {
+        match expression {
+            Expr::Variable(name, _) => {
+                parts.push(name);
+                true
+            }
+            Expr::Get(object, name, _) if collect(object, parts) => {
+                parts.push(name);
+                true
+            }
+            _ => false,
+        }
+    }
+    let mut actual = Vec::new();
+    collect(expression, &mut actual) && actual == expected
 }
 
 fn compatible(left: &Type, right: &Type) -> bool {
@@ -1035,5 +3824,133 @@ fn compatible(left: &Type, right: &Type) -> bool {
         || matches!((left, right), (other, Type::Nullable(inner)) if compatible(other, inner))
         || matches!((left, right), (Type::Result(left_ok, left_err), Type::Result(right_ok, right_err)) if compatible(left_ok, right_ok) && compatible(left_err, right_err))
         || matches!((left, right), (Type::Array(left_element), Type::Array(right_element)) if compatible(left_element, right_element))
-        || matches!((left, right), (Type::Function(left_params, left_result), Type::Function(right_params, right_result)) if left_params.len() == right_params.len() && left_params.iter().zip(right_params).all(|(left, right)| compatible(left, right)) && compatible(left_result, right_result))
+        || matches!((left, right), (Type::Iterator(left_element), Type::Iterator(right_element)) if compatible(left_element, right_element))
+        || matches!((left, right), (Type::Transaction(left_key, left_value), Type::Transaction(right_key, right_value)) if compatible(left_key, right_key) && compatible(left_value, right_value))
+        || matches!((left, right), (Type::Map(left_key, left_value), Type::Map(right_key, right_value)) if compatible(left_key, right_key) && compatible(left_value, right_value))
+        || matches!((left, right), (Type::Set(left_element), Type::Set(right_element)) if compatible(left_element, right_element))
+        || matches!((left, right), (Type::Record(left_name, left_arguments), Type::Record(right_name, right_arguments)) | (Type::Enum(left_name, left_arguments), Type::Enum(right_name, right_arguments)) if left_name == right_name && left_arguments.len() == right_arguments.len() && left_arguments.iter().zip(right_arguments).all(|(left, right)| compatible(left, right)))
+        || matches!((left, right), (Type::Function(_, _, left_params, left_result, left_needs), Type::Function(_, _, right_params, right_result, right_needs)) if left_params.len() == right_params.len() && left_params.iter().zip(right_params).all(|(left, right)| compatible(left, right)) && compatible(left_result, right_result) && (left_needs == right_needs || left_needs.iter().any(|need| need == "$effects") || right_needs.iter().any(|need| need == "$effects")))
+}
+
+fn unify(expected: &Type, found: &Type, substitutions: &mut HashMap<String, Type>) -> bool {
+    match expected {
+        Type::Generic(name) => match substitutions.get(name) {
+            Some(previous) => compatible(previous, found),
+            None => {
+                substitutions.insert(name.clone(), found.clone());
+                true
+            }
+        },
+        Type::Array(expected) => {
+            matches!(found, Type::Array(found) if unify(expected, found, substitutions))
+        }
+        Type::Iterator(expected) => {
+            matches!(found, Type::Iterator(found) if unify(expected, found, substitutions))
+        }
+        Type::Transaction(expected_key, expected_value) => matches!(
+            found,
+            Type::Transaction(found_key, found_value)
+                if unify(expected_key, found_key, substitutions)
+                    && unify(expected_value, found_value, substitutions)
+        ),
+        Type::Map(expected_key, expected_value) => matches!(
+            found,
+            Type::Map(found_key, found_value)
+                if unify(expected_key, found_key, substitutions)
+                    && unify(expected_value, found_value, substitutions)
+        ),
+        Type::Set(expected) => {
+            matches!(found, Type::Set(found) if unify(expected, found, substitutions))
+        }
+        Type::Nullable(expected) => {
+            matches!(found, Type::Nullable(found) if unify(expected, found, substitutions))
+                || matches!(found, Type::Null)
+        }
+        Type::Result(expected_ok, expected_error) => matches!(
+            found,
+            Type::Result(found_ok, found_error)
+                if unify(expected_ok, found_ok, substitutions)
+                    && unify(expected_error, found_error, substitutions)
+        ),
+        Type::Record(expected_name, expected_arguments) => matches!(
+            found,
+            Type::Record(found_name, found_arguments)
+                if expected_name == found_name
+                    && expected_arguments.len() == found_arguments.len()
+                    && expected_arguments
+                        .iter()
+                        .zip(found_arguments)
+                        .all(|(expected, found)| unify(expected, found, substitutions))
+        ),
+        Type::Enum(expected_name, expected_arguments) => matches!(
+            found,
+            Type::Enum(found_name, found_arguments)
+                if expected_name == found_name
+                    && expected_arguments.len() == found_arguments.len()
+                    && expected_arguments
+                        .iter()
+                        .zip(found_arguments)
+                        .all(|(expected, found)| unify(expected, found, substitutions))
+        ),
+        Type::Function(_, _, expected_params, expected_result, expected_needs) => matches!(
+            found,
+            Type::Function(_, _, found_params, found_result, found_needs)
+                if expected_params.len() == found_params.len()
+                    && expected_params
+                        .iter()
+                        .zip(found_params)
+                        .all(|(expected, found)| unify(expected, found, substitutions))
+                    && unify(expected_result, found_result, substitutions)
+                    && (expected_needs == found_needs
+                        || expected_needs.iter().any(|need| need == "$effects"))
+        ),
+        _ => compatible(expected, found),
+    }
+}
+
+fn substitute(ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::Generic(name) => substitutions.get(name).cloned().unwrap_or(Type::Unknown),
+        Type::Array(element) => Type::Array(Box::new(substitute(element, substitutions))),
+        Type::Iterator(element) => Type::Iterator(Box::new(substitute(element, substitutions))),
+        Type::Transaction(key, value) => Type::Transaction(
+            Box::new(substitute(key, substitutions)),
+            Box::new(substitute(value, substitutions)),
+        ),
+        Type::Map(key, value) => Type::Map(
+            Box::new(substitute(key, substitutions)),
+            Box::new(substitute(value, substitutions)),
+        ),
+        Type::Set(element) => Type::Set(Box::new(substitute(element, substitutions))),
+        Type::Nullable(inner) => Type::Nullable(Box::new(substitute(inner, substitutions))),
+        Type::Result(ok, error) => Type::Result(
+            Box::new(substitute(ok, substitutions)),
+            Box::new(substitute(error, substitutions)),
+        ),
+        Type::Record(name, arguments) => Type::Record(
+            name.clone(),
+            arguments
+                .iter()
+                .map(|argument| substitute(argument, substitutions))
+                .collect(),
+        ),
+        Type::Enum(name, arguments) => Type::Enum(
+            name.clone(),
+            arguments
+                .iter()
+                .map(|argument| substitute(argument, substitutions))
+                .collect(),
+        ),
+        Type::Function(type_params, constraints, params, result, needs) => Type::Function(
+            type_params.clone(),
+            constraints.clone(),
+            params
+                .iter()
+                .map(|param| substitute(param, substitutions))
+                .collect(),
+            Box::new(substitute(result, substitutions)),
+            needs.clone(),
+        ),
+        other => other.clone(),
+    }
 }

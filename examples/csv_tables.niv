@@ -1,0 +1,13 @@
+define summarize(source: String) gives Result<String, String> {
+    keep headers = ["name", "score"]
+    keep rows = std.csv.decode(source, headers, ",", 10000) or give
+    when len(rows) == 0 { give ok("no rows") }
+    give ok(std.map.get(rows[0], "name") ?? "missing name")
+}
+
+keep result = summarize("Nivren,100\r\n")
+keep message = choose result {
+    Ok(name) => name,
+    Err(problem) => problem,
+}
+show(message)

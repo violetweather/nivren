@@ -1,0 +1,5 @@
+use "../src/main.niv"
+
+keep health = main.route("GET", "/health", "health")
+keep chosen = main.first_match([health], "GET", "/health")
+assert(chosen != none, "route should be selected")

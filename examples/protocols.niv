@@ -1,0 +1,13 @@
+protocol Named {
+    define name(value: Self) gives String
+}
+
+shape User { name: String }
+define user_name(value: User) gives String { give value.name }
+adopt Named for User { name = user_name }
+
+define present<Value: Named>(value: Value) gives String {
+    give Named.name(value)
+}
+
+show present(User("Mira"))

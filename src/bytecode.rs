@@ -1,10 +1,15 @@
+#[cfg(feature = "host-runtime")]
+use std::collections::BTreeMap;
 use std::collections::{HashMap, VecDeque};
 
-use crate::ast::{Expr, Literal, MatchArm, Span, Stmt};
+#[cfg(feature = "host-runtime")]
+use nivren_jit::IntOp;
+
+use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
-pub const BYTECODE_VERSION: u16 = 1;
+pub const BYTECODE_VERSION: u16 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chunk {
@@ -36,6 +41,7 @@ pub enum Op {
     MakeArray(usize),
     Index,
     Coalesce(usize),
+    Propagate,
     Get(String),
     Print,
     EnterScope,
@@ -48,11 +54,12 @@ pub enum Op {
     Return,
     DefineRecord {
         name: String,
-        fields: Vec<String>,
+        fields: Vec<(String, String)>,
     },
     DefineEnum {
         name: String,
         variants: Vec<String>,
+        payload_variants: Vec<String>,
     },
     Match(Vec<BytecodeArm>),
     DefineModule {
@@ -63,6 +70,19 @@ pub enum Op {
     Iterate {
         name: String,
         body: Chunk,
+    },
+    Using {
+        name: String,
+        body: Chunk,
+    },
+    DefineProtocol {
+        name: String,
+        members: Vec<String>,
+    },
+    AdoptProtocol {
+        protocol: String,
+        type_name: String,
+        mappings: Vec<(String, String)>,
     },
 }
 
@@ -83,6 +103,44 @@ pub fn compile(program: &[Stmt]) -> Result<Chunk, Vec<NivError>> {
     };
     verify(&chunk).map_err(|error| vec![error])?;
     Ok(chunk)
+}
+
+#[cfg(feature = "host-runtime")]
+pub fn integer_native_plan(parameters: &[String], body: &Chunk) -> Option<(usize, Vec<IntOp>)> {
+    let mut slots = BTreeMap::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        slots.insert(parameter.clone(), u32::try_from(index).ok()?);
+    }
+    let mut operations = Vec::new();
+    let mut returned = false;
+    for instruction in &body.code {
+        let operation = match &instruction.op {
+            Op::Constant(Literal::Int(value)) => IntOp::Constant(*value),
+            Op::Load(name) => IntOp::Load(*slots.get(name)?),
+            Op::Define { name, .. } => {
+                if slots.contains_key(name) {
+                    return None;
+                }
+                let slot = u32::try_from(slots.len()).ok()?;
+                slots.insert(name.clone(), slot);
+                IntOp::Define(slot)
+            }
+            Op::Store(name) => IntOp::Store(*slots.get(name)?),
+            Op::Pop => IntOp::Pop,
+            Op::Unary(TokenKind::Minus) => IntOp::Negate,
+            Op::Binary(TokenKind::Plus) => IntOp::Add,
+            Op::Binary(TokenKind::Minus) => IntOp::Subtract,
+            Op::Binary(TokenKind::Star) => IntOp::Multiply,
+            Op::Return => {
+                returned = true;
+                operations.push(IntOp::Return);
+                break;
+            }
+            _ => return None,
+        };
+        operations.push(operation);
+    }
+    returned.then_some((slots.len(), operations))
 }
 
 struct Compiler {
@@ -182,6 +240,21 @@ impl Compiler {
                     *span,
                 );
             }
+            Stmt::Using {
+                name,
+                resource,
+                body,
+                span,
+            } => {
+                self.expression(resource);
+                self.emit(
+                    Op::Using {
+                        name: name.clone(),
+                        body: compile_statement(body),
+                    },
+                    *span,
+                );
+            }
             Stmt::Function {
                 name,
                 params,
@@ -222,11 +295,16 @@ impl Compiler {
                 }
                 self.emit(Op::Return, *span);
             }
-            Stmt::Record { name, fields, span } => {
+            Stmt::Record {
+                name, fields, span, ..
+            } => {
                 self.emit(
                     Op::DefineRecord {
                         name: name.clone(),
-                        fields: fields.iter().map(|field| field.name.clone()).collect(),
+                        fields: fields
+                            .iter()
+                            .map(|field| (field.name.clone(), schema_name(&field.ty)))
+                            .collect(),
                     },
                     *span,
                 );
@@ -235,11 +313,51 @@ impl Compiler {
                 name,
                 variants,
                 span,
+                ..
             } => {
                 self.emit(
                     Op::DefineEnum {
                         name: name.clone(),
-                        variants: variants.clone(),
+                        variants: variants
+                            .iter()
+                            .map(|variant| variant.name.clone())
+                            .collect(),
+                        payload_variants: variants
+                            .iter()
+                            .filter(|variant| variant.payload.is_some())
+                            .map(|variant| variant.name.clone())
+                            .collect(),
+                    },
+                    *span,
+                );
+            }
+            Stmt::Protocol {
+                name,
+                members,
+                span,
+            } => {
+                self.emit(
+                    Op::DefineProtocol {
+                        name: name.clone(),
+                        members: members.iter().map(|member| member.name.clone()).collect(),
+                    },
+                    *span,
+                );
+            }
+            Stmt::Adoption {
+                protocol,
+                ty,
+                members,
+                span,
+            } => {
+                self.emit(
+                    Op::AdoptProtocol {
+                        protocol: protocol.clone(),
+                        type_name: schema_name(ty),
+                        mappings: members
+                            .iter()
+                            .map(|mapping| (mapping.member.clone(), mapping.implementation.clone()))
+                            .collect(),
                     },
                     *span,
                 );
@@ -329,6 +447,10 @@ impl Compiler {
                 self.expression(right);
                 self.patch(instruction, self.code.len());
             }
+            Expr::Propagate(value, span) => {
+                self.expression(value);
+                self.emit(Op::Propagate, *span);
+            }
             Expr::Get(object, name, span) => {
                 self.expression(object);
                 self.emit(Op::Get(name.clone()), *span);
@@ -350,6 +472,25 @@ impl Compiler {
         match &mut self.code[instruction].op {
             Op::Jump(found) | Op::JumpIfFalse(found) | Op::Coalesce(found) => *found = target,
             _ => unreachable!(),
+        }
+    }
+}
+
+fn schema_name(reference: &TypeRef) -> String {
+    match reference {
+        TypeRef::Named(name, _) => name.clone(),
+        TypeRef::Applied(name, arguments, _) => format!(
+            "{name}<{}>",
+            arguments
+                .iter()
+                .map(schema_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        TypeRef::Array(item, _) => format!("[{}]", schema_name(item)),
+        TypeRef::Nullable(item, _) => format!("{}?", schema_name(item)),
+        TypeRef::Result(ok, error, _) => {
+            format!("Result<{},{}>", schema_name(ok), schema_name(error))
         }
     }
 }
@@ -394,7 +535,8 @@ pub fn verify(chunk: &Chunk) -> Result<(), NivError> {
         match &instruction.op {
             Op::MakeFunction { body, .. }
             | Op::DefineModule { body, .. }
-            | Op::Iterate { body, .. } => verify(body)?,
+            | Op::Iterate { body, .. }
+            | Op::Using { body, .. } => verify(body)?,
             Op::Match(arms) => {
                 for arm in arms {
                     verify(&arm.body)?;
@@ -509,6 +651,8 @@ fn stack_effect(op: &Op) -> isize {
         | Op::MakeFunction { .. }
         | Op::DefineRecord { .. }
         | Op::DefineEnum { .. }
+        | Op::DefineProtocol { .. }
+        | Op::AdoptProtocol { .. }
         | Op::DefineModule { .. } => 1,
         Op::Pop => -1,
         Op::Binary(_) | Op::Index => -1,
@@ -520,13 +664,15 @@ fn stack_effect(op: &Op) -> isize {
         | Op::Jump(_)
         | Op::JumpIfFalse(_)
         | Op::Coalesce(_)
+        | Op::Propagate
         | Op::Get(_)
         | Op::Print
         | Op::EnterScope
         | Op::ExitScope
         | Op::Return
         | Op::Match(_)
-        | Op::Iterate { .. } => 0,
+        | Op::Iterate { .. }
+        | Op::Using { .. } => 0,
     }
 }
 
@@ -534,6 +680,79 @@ pub fn disassemble(chunk: &Chunk) -> String {
     let mut output = format!("NIVB {}\n", chunk.version);
     disassemble_chunk(chunk, 0, &mut output);
     output
+}
+
+/// Exports stable nested instruction mappings for external developer tools.
+pub fn source_map(chunk: &Chunk, source: &str) -> String {
+    fn operation(op: &Op) -> &'static str {
+        match op {
+            Op::Constant(_) => "constant",
+            Op::Load(_) => "load",
+            Op::Store(_) => "store",
+            Op::Define { .. } => "define",
+            Op::Pop => "pop",
+            Op::Unary(_) => "unary",
+            Op::Binary(_) => "binary",
+            Op::Jump(_) => "jump",
+            Op::JumpIfFalse(_) => "jump_if_false",
+            Op::Call(_) => "call",
+            Op::MakeArray(_) => "make_array",
+            Op::Index => "index",
+            Op::Coalesce(_) => "coalesce",
+            Op::Propagate => "propagate",
+            Op::Get(_) => "get",
+            Op::Print => "print",
+            Op::EnterScope => "enter_scope",
+            Op::ExitScope => "exit_scope",
+            Op::MakeFunction { .. } => "make_function",
+            Op::Return => "return",
+            Op::DefineRecord { .. } => "define_shape",
+            Op::DefineEnum { .. } => "define_choice",
+            Op::Match(_) => "choose",
+            Op::DefineModule { .. } => "define_module",
+            Op::Iterate { .. } => "iterate",
+            Op::Using { .. } => "using",
+            Op::DefineProtocol { .. } => "define_protocol",
+            Op::AdoptProtocol { .. } => "adopt_protocol",
+        }
+    }
+    fn walk(chunk: &Chunk, prefix: &str, mappings: &mut Vec<serde_json::Value>) {
+        for (index, instruction) in chunk.code.iter().enumerate() {
+            let path = if prefix.is_empty() {
+                index.to_string()
+            } else {
+                format!("{prefix}.{index}")
+            };
+            mappings.push(serde_json::json!({
+                "path": path,
+                "line": instruction.span.line,
+                "column": instruction.span.column,
+                "operation": operation(&instruction.op),
+            }));
+            match &instruction.op {
+                Op::MakeFunction { body, .. }
+                | Op::DefineModule { body, .. }
+                | Op::Iterate { body, .. }
+                | Op::Using { body, .. } => walk(body, &path, mappings),
+                Op::Match(arms) => {
+                    for (arm, value) in arms.iter().enumerate() {
+                        walk(&value.body, &format!("{path}.arm{arm}"), mappings);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut mappings = vec![];
+    walk(chunk, "", &mut mappings);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema": "org.nivren.sourcemap.v1",
+        "bytecodeVersion": chunk.version,
+        "source": source,
+        "mappings": mappings,
+    }))
+    .expect("source-map values are serializable")
+        + "\n"
 }
 
 fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
@@ -597,10 +816,13 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
         | Stmt::For { span, .. }
+        | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }
         | Stmt::Return(_, span)
         | Stmt::Record { span, .. }
         | Stmt::Enum { span, .. }
+        | Stmt::Protocol { span, .. }
+        | Stmt::Adoption { span, .. }
         | Stmt::Import { span, .. }
         | Stmt::Export { span, .. }
         | Stmt::Module { span, .. } => *span,

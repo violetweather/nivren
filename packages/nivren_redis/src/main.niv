@@ -1,0 +1,446 @@
+choice Response {
+    Text(String),
+    Error(String),
+    Integer(Int),
+    Boolean(Bool),
+    Double(Float),
+    BigNumber(BigInt),
+    Bulk(Bytes),
+    BlobError(Bytes),
+    Verbatim(Bytes),
+    Array([Response]),
+    Map([[Response]]),
+    Set([Response]),
+    Push([Response]),
+    Null
+}
+
+choice Connection {
+    Plain(TcpStream),
+    Secure(TlsStream)
+}
+
+shape Pool {
+    idle: [Connection],
+    maximum: Int
+}
+
+shape Lease {
+    connection: Connection,
+    pool: Pool
+}
+
+shape Redirect {
+    kind: String,
+    slot: Int,
+    host: String,
+    port: Int
+}
+
+shape Client {
+    connection: Connection,
+    username: String,
+    password: String,
+    secure: Bool,
+    tls_options: Map<String, String>,
+    timeout: Float,
+    maximum: Int,
+    redirects: Int
+}
+
+shape Outcome {
+    response: Response,
+    client: Client
+}
+
+define tail(value: String) gives Result<String, String> {
+    keep bytes = std.bytes.from_string(value)
+    keep sliced = std.bytes.slice(bytes, 1, std.bytes.length(bytes)) or give
+    give std.bytes.to_string(sliced)
+}
+
+define bulk(value: String) gives Result<String, String> {
+    keep length = std.bytes.length(std.bytes.from_string(value))
+    keep prefix = std.text.concat("$", std.int.format(length)) or give
+    keep header = std.text.concat(prefix, "\r\n") or give
+    keep body = std.text.concat(header, value) or give
+    give std.text.concat(body, "\r\n")
+}
+
+define command(parts: [String]) gives Result<String, String> {
+    when len(parts) == 0 { give err("Redis command requires at least one part") }
+    when len(parts) > 1024 { give err("Redis command exceeds 1024 parts") }
+    keep count = std.text.concat("*", std.int.format(len(parts))) or give
+    change encoded = std.text.concat(count, "\r\n") or give
+    each part within parts {
+        keep item = bulk(part) or give
+        encoded = std.text.concat(encoded, item) or give
+    }
+    give ok(encoded)
+}
+
+define connect(host: String, port: Int, timeout: Float) gives Result<TcpStream, String> needs Network {
+    give std.net.connect(host, port, timeout)
+}
+
+define open(host: String, port: Int, timeout: Float) gives Result<Connection, String> needs Network {
+    keep stream = std.net.connect(host, port, timeout) or give
+    give ok(Connection.Plain(stream))
+}
+
+define open_secure(host: String, port: Int, timeout: Float, options: Map<String, String>) gives Result<Connection, String> needs Network {
+    keep stream = std.net.tls_connect(host, port, timeout, options) or give
+    give ok(Connection.Secure(stream))
+}
+
+define write_connection(connection: Connection, encoded: String, timeout: Float) gives Result<Null, String> needs Network {
+    give choose connection {
+        Plain(stream) => std.net.write_ready(stream, encoded, 65536, timeout),
+        Secure(stream) => std.net.tls_write_ready(stream, encoded, 65536, timeout)
+    }
+}
+
+define read_line_connection(connection: Connection, maximum: Int, timeout: Float) gives Result<String, String> needs Network {
+    give choose connection {
+        Plain(stream) => std.net.read_line(stream, maximum, timeout),
+        Secure(stream) => std.net.tls_read_line(stream, maximum, timeout)
+    }
+}
+
+define read_exact_connection(connection: Connection, length: Int, timeout: Float) gives Result<Bytes, String> needs Network {
+    give choose connection {
+        Plain(stream) => std.net.read_exact_bytes(stream, length, timeout),
+        Secure(stream) => std.net.tls_read_exact_bytes(stream, length, timeout)
+    }
+}
+
+define close(connection: Connection) gives Result<Null, String> needs Network {
+    give choose connection {
+        Plain(stream) => std.net.close(stream),
+        Secure(stream) => std.net.tls_close(stream)
+    }
+}
+
+define send_chunk(stream: TcpStream, parts: [String], timeout: Float, maximum: Int) gives Result<String, String> needs Network {
+    keep encoded = command(parts) or give
+    std.net.write_ready(stream, encoded, 65536, timeout) or give
+    give std.net.read_ready(stream, maximum, timeout)
+}
+
+define receive_nested(stream: TcpStream, timeout: Float, maximum: Int, depth: Int) gives Result<Response, String> needs Network {
+    when depth > 128 { give err("RESP nesting exceeds 128 levels") }
+    keep line = std.net.read_line(stream, 65536, timeout) or give
+    when len(line) == 0 { give err("empty RESP header") }
+    keep marker = line[0]
+    keep content = tail(line) or give
+    when marker == "+" { give ok(Response.Text(content)) }
+    when marker == "-" { give ok(Response.Error(content)) }
+    when marker == ":" {
+        keep number = std.int.parse(content) or give
+        give ok(Response.Integer(number))
+    }
+    when marker == "$" {
+        keep length = std.int.parse(content) or give
+        when length == -1 { give ok(Response.Null) }
+        when length < 0 or length > maximum { give err("RESP bulk length exceeds configured limit") }
+        keep data = std.net.read_exact_bytes(stream, length, timeout) or give
+        keep ending = std.net.read_exact_bytes(stream, 2, timeout) or give
+        when ending != std.bytes.from_string("\r\n") { give err("RESP bulk value is missing its terminator") }
+        give ok(Response.Bulk(data))
+    }
+    when marker == "*" {
+        keep length = std.int.parse(content) or give
+        when length == -1 { give ok(Response.Null) }
+        when length < 0 or length > maximum or length > 1000000 {
+            give err("RESP array length exceeds configured limit")
+        }
+        change values: [Response] = []
+        change index = 0
+        repeat index < length {
+            keep value = receive_nested(stream, timeout, maximum, depth + 1) or give
+            values = append(values, value)
+            index = index + 1
+        }
+        give ok(Response.Array(values))
+    }
+    give err("unknown RESP response marker")
+}
+
+define receive(stream: TcpStream, timeout: Float, maximum: Int) gives Result<Response, String> needs Network {
+    when maximum < 0 or maximum > 16777216 {
+        give err("RESP maximum must be between 0 and 16777216")
+    }
+    give receive_nested(stream, timeout, maximum, 0)
+}
+
+define receive_connection_nested(connection: Connection, timeout: Float, maximum: Int, depth: Int) gives Result<Response, String> needs Network {
+    when depth > 128 { give err("RESP nesting exceeds 128 levels") }
+    keep line = read_line_connection(connection, 65536, timeout) or give
+    when len(line) == 0 { give err("empty RESP header") }
+    keep marker = line[0]
+    keep content = tail(line) or give
+    when marker == "+" { give ok(Response.Text(content)) }
+    when marker == "-" { give ok(Response.Error(content)) }
+    when marker == ":" {
+        keep number = std.int.parse(content) or give
+        give ok(Response.Integer(number))
+    }
+    when marker == "_" {
+        when content != "" { give err("RESP3 null must not contain a value") }
+        give ok(Response.Null)
+    }
+    when marker == "#" {
+        when content == "t" { give ok(Response.Boolean(yes)) }
+        when content == "f" { give ok(Response.Boolean(no)) }
+        give err("invalid RESP3 boolean")
+    }
+    when marker == "," {
+        keep number = std.float.parse(content) or give
+        give ok(Response.Double(number))
+    }
+    when marker == "(" {
+        keep number = std.bigint.parse(content) or give
+        give ok(Response.BigNumber(number))
+    }
+    when marker == "$" {
+        keep length = std.int.parse(content) or give
+        when length == -1 { give ok(Response.Null) }
+        when length < 0 or length > maximum { give err("RESP bulk length exceeds configured limit") }
+        keep data = read_exact_connection(connection, length, timeout) or give
+        keep ending = read_exact_connection(connection, 2, timeout) or give
+        when ending != std.bytes.from_string("\r\n") { give err("RESP bulk value is missing its terminator") }
+        give ok(Response.Bulk(data))
+    }
+    when marker == "!" or marker == "=" {
+        keep length = std.int.parse(content) or give
+        when length < 0 or length > maximum { give err("RESP3 blob length exceeds configured limit") }
+        keep data = read_exact_connection(connection, length, timeout) or give
+        keep ending = read_exact_connection(connection, 2, timeout) or give
+        when ending != std.bytes.from_string("\r\n") { give err("RESP3 blob value is missing its terminator") }
+        when marker == "!" { give ok(Response.BlobError(data)) }
+        give ok(Response.Verbatim(data))
+    }
+    when marker == "*" {
+        keep length = std.int.parse(content) or give
+        when length == -1 { give ok(Response.Null) }
+        when length < 0 or length > maximum or length > 1000000 {
+            give err("RESP array length exceeds configured limit")
+        }
+        change values: [Response] = []
+        change index = 0
+        repeat index < length {
+            keep value = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
+            values = append(values, value)
+            index = index + 1
+        }
+        give ok(Response.Array(values))
+    }
+    when marker == "~" or marker == ">" {
+        keep length = std.int.parse(content) or give
+        when length < 0 or length > maximum or length > 1000000 {
+            give err("RESP3 collection length exceeds configured limit")
+        }
+        change values: [Response] = []
+        change index = 0
+        repeat index < length {
+            keep value = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
+            values = append(values, value)
+            index = index + 1
+        }
+        when marker == "~" { give ok(Response.Set(values)) }
+        give ok(Response.Push(values))
+    }
+    when marker == "%" {
+        keep length = std.int.parse(content) or give
+        when length < 0 or length > maximum or length > 1000000 {
+            give err("RESP3 map length exceeds configured limit")
+        }
+        change entries: [[Response]] = []
+        change index = 0
+        repeat index < length {
+            keep key = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
+            keep value = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
+            entries = append(entries, [key, value])
+            index = index + 1
+        }
+        give ok(Response.Map(entries))
+    }
+    give err("unknown RESP response marker")
+}
+
+define receive_connection(connection: Connection, timeout: Float, maximum: Int) gives Result<Response, String> needs Network {
+    when maximum < 0 or maximum > 16777216 {
+        give err("RESP maximum must be between 0 and 16777216")
+    }
+    give receive_connection_nested(connection, timeout, maximum, 0)
+}
+
+define auth_status(message: String) gives Result<Null, String> {
+    when message == "OK" { give ok(none) }
+    give err("Redis AUTH returned an unexpected status")
+}
+
+define authenticate(connection: Connection, username: String, password: String, timeout: Float, maximum: Int) gives Result<Null, String> needs Network {
+    change parts = ["AUTH", password]
+    when username != "" { parts = ["AUTH", username, password] }
+    keep encoded = command(parts) or give
+    write_connection(connection, encoded, timeout) or give
+    keep response = receive_connection(connection, timeout, maximum) or give
+    give choose response {
+        Text(message) => auth_status(message),
+        Error(problem) => err(problem),
+        Integer(number) => err("Redis AUTH returned an unexpected integer"),
+        Boolean(value) => err("Redis AUTH returned an unexpected boolean"),
+        Double(number) => err("Redis AUTH returned an unexpected double"),
+        BigNumber(number) => err("Redis AUTH returned an unexpected big number"),
+        Bulk(data) => err("Redis AUTH returned an unexpected bulk value"),
+        BlobError(data) => err("Redis AUTH returned a blob error"),
+        Verbatim(data) => err("Redis AUTH returned an unexpected verbatim value"),
+        Array(values) => err("Redis AUTH returned an unexpected array"),
+        Map(entries) => err("Redis AUTH returned an unexpected map"),
+        Set(values) => err("Redis AUTH returned an unexpected set"),
+        Push(values) => err("Redis AUTH returned an unexpected push"),
+        Null => err("Redis AUTH returned null")
+    }
+}
+
+define pipeline(connection: Connection, commands: [[String]], timeout: Float, maximum: Int) gives Result<[Response], String> needs Network {
+    when len(commands) == 0 { give ok([]) }
+    when len(commands) > 4096 { give err("Redis pipeline exceeds 4096 commands") }
+    change encoded = ""
+    each parts within commands {
+        keep frame = command(parts) or give
+        encoded = std.text.concat(encoded, frame) or give
+    }
+    write_connection(connection, encoded, timeout) or give
+    change responses: [Response] = []
+    change index = 0
+    repeat index < len(commands) {
+        keep response = receive_connection(connection, timeout, maximum) or give
+        responses = append(responses, response)
+        index = index + 1
+    }
+    give ok(responses)
+}
+
+define pool(maximum: Int) gives Result<Pool, String> {
+    when maximum < 1 or maximum > 1024 { give err("Redis pool size must be from 1 through 1024") }
+    give ok(Pool([], maximum))
+}
+
+define pool_add(pool_value: Pool, connection: Connection) gives Result<Pool, String> {
+    when len(pool_value.idle) >= pool_value.maximum { give err("Redis pool is full") }
+    give ok(Pool(append(pool_value.idle, connection), pool_value.maximum))
+}
+
+define pool_take(pool_value: Pool) gives Result<Lease, String> {
+    when len(pool_value.idle) == 0 { give err("Redis pool is empty") }
+    keep connection = pool_value.idle[0]
+    change remaining: [Connection] = []
+    change index = 1
+    repeat index < len(pool_value.idle) {
+        remaining = append(remaining, pool_value.idle[index])
+        index = index + 1
+    }
+    give ok(Lease(connection, Pool(remaining, pool_value.maximum)))
+}
+
+define redirect(message: String) gives Result<Redirect, String> {
+    keep words = std.text.split(message, " ", 4) or give
+    when len(words) != 3 { give err("invalid Redis cluster redirect") }
+    keep kind = words[0]
+    when kind != "MOVED" and kind != "ASK" { give err("response is not a Redis cluster redirect") }
+    keep slot = std.int.parse(words[1]) or give
+    when slot < 0 or slot > 16383 { give err("Redis cluster slot must be from 0 through 16383") }
+    keep target = std.text.split_last(words[2], ":") or give
+    change host = target[0]
+    when len(host) >= 2 and host[0] == "[" and host[len(host) - 1] == "]" {
+        keep bytes = std.bytes.from_string(host)
+        keep inner = std.bytes.slice(bytes, 1, std.bytes.length(bytes) - 1) or give
+        host = std.bytes.to_string(inner) or give
+    }
+    when host == "" { give err("Redis cluster redirect host cannot be empty") }
+    keep port = std.int.parse(target[1]) or give
+    when port < 1 or port > 65535 { give err("Redis cluster redirect port must be from 1 through 65535") }
+    give ok(Redirect(kind, slot, host, port))
+}
+
+define open_configured(host: String, port: Int, username: String, password: String, secure: Bool, options: Map<String, String>, timeout: Float, maximum: Int) gives Result<Connection, String> needs Network {
+    change connection = open(host, port, timeout) or give
+    when secure { connection = open_secure(host, port, timeout, options) or give }
+    when password != "" { authenticate(connection, username, password, timeout, maximum) or give }
+    give ok(connection)
+}
+
+define client(host: String, port: Int, username: String, password: String, secure: Bool, options: Map<String, String>, timeout: Float, maximum: Int, redirects: Int) gives Result<Client, String> needs Network {
+    when redirects < 0 or redirects > 32 { give err("Redis redirect limit must be from 0 through 32") }
+    when maximum < 1 or maximum > 16777216 { give err("RESP maximum must be from 1 through 16777216") }
+    keep connection = open_configured(host, port, username, password, secure, options, timeout, maximum) or give
+    give ok(Client(connection, username, password, secure, options, timeout, maximum, redirects))
+}
+
+define execute(client_value: Client, parts: [String]) gives Result<Outcome, String> needs Network {
+    change connection = client_value.connection
+    change attempts = 0
+    change asking = no
+    repeat attempts <= client_value.redirects {
+        when asking {
+            keep acknowledged = pipeline(connection, [["ASKING"]], client_value.timeout, client_value.maximum) or give
+            keep accepted = choose acknowledged[0] {
+                Text(message) => message == "OK",
+                Error(problem) => no,
+                Integer(number) => no,
+                Boolean(value) => no,
+                Double(number) => no,
+                BigNumber(number) => no,
+                Bulk(data) => no,
+                BlobError(data) => no,
+                Verbatim(data) => no,
+                Array(values) => no,
+                Map(entries) => no,
+                Set(values) => no,
+                Push(values) => no,
+                Null => no
+            }
+            when !accepted { give err("Redis cluster ASKING was rejected") }
+        }
+        keep responses = pipeline(connection, [parts], client_value.timeout, client_value.maximum) or give
+        keep response = responses[0]
+        keep problem = choose response {
+            Error(message) => message,
+            Text(message) => "",
+            Integer(number) => "",
+            Boolean(value) => "",
+            Double(number) => "",
+            BigNumber(number) => "",
+            Bulk(data) => "",
+            BlobError(data) => "",
+            Verbatim(data) => "",
+            Array(values) => "",
+            Map(entries) => "",
+            Set(values) => "",
+            Push(values) => "",
+            Null => ""
+        }
+        keep moved = std.text.starts_with(problem, "MOVED ")
+        keep asked = std.text.starts_with(problem, "ASK ")
+        when !moved and !asked {
+            keep next = Client(connection, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum, client_value.redirects)
+            give ok(Outcome(response, next))
+        }
+        when attempts == client_value.redirects { give err("Redis cluster redirect limit exceeded") }
+        keep destination = redirect(problem) or give
+        close(connection)
+        connection = open_configured(destination.host, destination.port, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum) or give
+        asking = destination.kind == "ASK"
+        attempts = attempts + 1
+    }
+    give err("Redis cluster redirect limit exceeded")
+}
+
+expose {
+    Response, Connection, Pool, Lease, Redirect, Client, Outcome,
+    bulk, command, connect, open, open_secure, close,
+    send_chunk, receive, receive_connection, authenticate, pipeline,
+    pool, pool_add, pool_take, redirect, client, execute
+}

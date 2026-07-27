@@ -1,0 +1,4 @@
+[package]
+name = "nivren_validation"
+version = "1.0.0"
+entry = "src/main.niv"

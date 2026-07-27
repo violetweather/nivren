@@ -1,0 +1,21 @@
+use "../src/main.niv"
+
+define verify() gives Result<Bool, String> {
+    keep secret = std.bytes.from_string("a sufficiently long development secret")
+    keep token = main.sign_hs256("{\"sub\":\"42\",\"admin\":true}", secret) or give
+    keep payload = main.verify_hs256(token, secret) or give
+    assert(payload == "{\"sub\":\"42\",\"admin\":true}", "compact verified payload")
+    keep rejected = choose main.verify_hs256(token, std.bytes.from_string("wrong secret")) {
+        Ok(value) => no,
+        Err(problem) => yes,
+    }
+    keep seed = std.encoding.unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
+    keep key = std.crypto.key_import(seed) or give
+    keep public = std.crypto.ed25519_public(key) or give
+    keep signed = main.sign_eddsa("{\"sub\":\"42\"}", key) or give
+    keep asymmetric = main.verify_eddsa(signed, public) or give
+    keep confused = choose main.verify_hs256(signed, secret) { Ok(value) => no, Err(problem) => yes }
+    give ok(rejected and asymmetric == "{\"sub\":\"42\"}" and confused)
+}
+
+verify()

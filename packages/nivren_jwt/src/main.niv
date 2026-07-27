@@ -1,0 +1,63 @@
+define signing_input(header: String, payload: String) gives Result<String, String> {
+    keep first = std.text.concat(header, ".") or give
+    give std.text.concat(first, payload)
+}
+
+define require_header(encoded: String, expected: String) gives Result<Null, String> {
+    keep bytes = std.encoding.unbase64url(encoded) or give
+    keep text = std.bytes.to_string(bytes) or give
+    keep compact = std.json.compact(text) or give
+    when compact != expected { give err("JWT algorithm header does not match the verifier") }
+    give ok(none)
+}
+
+define sign_hs256(payload_json: String, secret: Bytes) gives Result<String, String> {
+    keep payload = std.json.compact(payload_json) or give
+    keep header_bytes = std.bytes.from_string("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
+    keep header = std.encoding.base64url(header_bytes) or give
+    keep encoded_payload = std.encoding.base64url(std.bytes.from_string(payload)) or give
+    keep message = signing_input(header, encoded_payload) or give
+    keep tag = std.crypto.hmac_sha256(secret, std.bytes.from_string(message)) or give
+    keep signature = std.encoding.base64url(tag) or give
+    keep prefix = std.text.concat(message, ".") or give
+    give std.text.concat(prefix, signature)
+}
+
+define verify_hs256(token: String, secret: Bytes) gives Result<String, String> {
+    keep parts = std.text.split(token, ".", 4) or give
+    when len(parts) != 3 { give err("JWT must contain exactly three segments") }
+    require_header(parts[0], "{\"alg\":\"HS256\",\"typ\":\"JWT\"}") or give
+    keep message = signing_input(parts[0], parts[1]) or give
+    keep tag = std.encoding.unbase64url(parts[2]) or give
+    keep valid = std.crypto.verify_hmac_sha256(secret, std.bytes.from_string(message), tag) or give
+    when !valid { give err("JWT signature is invalid") }
+    keep payload_bytes = std.encoding.unbase64url(parts[1]) or give
+    keep payload = std.bytes.to_string(payload_bytes) or give
+    give std.json.compact(payload)
+}
+
+define sign_eddsa(payload_json: String, key: SecretKey) gives Result<String, String> {
+    keep payload = std.json.compact(payload_json) or give
+    keep header = std.encoding.base64url(std.bytes.from_string("{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}")) or give
+    keep encoded_payload = std.encoding.base64url(std.bytes.from_string(payload)) or give
+    keep message = signing_input(header, encoded_payload) or give
+    keep tag = std.crypto.ed25519_sign(key, std.bytes.from_string(message)) or give
+    keep signature = std.encoding.base64url(tag) or give
+    keep prefix = std.text.concat(message, ".") or give
+    give std.text.concat(prefix, signature)
+}
+
+define verify_eddsa(token: String, public_key: Bytes) gives Result<String, String> {
+    keep parts = std.text.split(token, ".", 4) or give
+    when len(parts) != 3 { give err("JWT must contain exactly three segments") }
+    require_header(parts[0], "{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}") or give
+    keep message = signing_input(parts[0], parts[1]) or give
+    keep signature = std.encoding.unbase64url(parts[2]) or give
+    keep valid = std.crypto.ed25519_verify(public_key, std.bytes.from_string(message), signature) or give
+    when !valid { give err("JWT signature is invalid") }
+    keep payload_bytes = std.encoding.unbase64url(parts[1]) or give
+    keep payload = std.bytes.to_string(payload_bytes) or give
+    give std.json.compact(payload)
+}
+
+expose { sign_hs256, verify_hs256, sign_eddsa, verify_eddsa }

@@ -1,0 +1,9 @@
+define count_protocol_lines(stream: TcpStream) gives Result<Int, String> needs Network {
+    keep lines = std.iter.tcp_lines(stream, 65536, 5.0) or give
+    change count = 0
+    each line within lines {
+        keep text = line or give
+        count = count + 1
+    }
+    give ok(count)
+}

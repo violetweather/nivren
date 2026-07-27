@@ -1,0 +1,5 @@
+define double(value: Int) gives Int {
+    give value * 2
+}
+
+show(double(21))

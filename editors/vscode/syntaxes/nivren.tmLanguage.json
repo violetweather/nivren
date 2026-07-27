@@ -15,15 +15,15 @@
     },
     {
       "name": "keyword.control.nivren",
-      "match": "\\b(?:when|otherwise|repeat|each|within|give|choose)\\b"
+      "match": "\\b(?:when|otherwise|repeat|each|within|give|choose|through|start|wait|together|race|using)\\b"
     },
     {
       "name": "keyword.declaration.nivren",
-      "match": "\\b(?:keep|change|define|gives|shape|choice|use|expose)\\b"
+      "match": "\\b(?:keep|change|define|gives|needs|shape|choice|protocol|adopt|for|use|expose)\\b"
     },
     {
       "name": "storage.type.nivren",
-      "match": "\\b(?:Int|Float|String|Bool|Null|Result)\\b"
+      "match": "\\b(?:Int|Float|BigInt|Decimal|I8|I16|I32|U8|U16|U32|U64|String|Bool|Null|Result|Bytes|Map|Set|DateTime|Task|Channel|File|TcpListener|TcpStream|WebSocket|Lock|LockGuard|NativeHandle|NativeLibrary|Comparable|Number|Ordered|Iterable|Closable|Sendable)\\b"
     },
     {
       "name": "entity.name.function.nivren",

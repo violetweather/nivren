@@ -1,0 +1,18 @@
+define random_key(length: Int) gives Result<Bytes, String> needs Random {
+    give std.crypto.random_bytes(length)
+}
+
+define hash_password(password: String) gives Result<String, String> needs Random {
+    keep salt = random_key(16) or give
+    give std.crypto.password_hash(password, salt, 19456, 2, 1)
+}
+
+define hash_password_with_salt(password: String, salt: Bytes) gives Result<String, String> {
+    give std.crypto.password_hash(password, salt, 19456, 2, 1)
+}
+
+define verify_password(password: String, encoded: String) gives Result<Bool, String> {
+    give std.crypto.password_verify(password, encoded)
+}
+
+expose { random_key, hash_password, hash_password_with_salt, verify_password }

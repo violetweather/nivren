@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -21,17 +22,24 @@ jobs:
             os: macos-15
           - platform: windows-x64
             os: windows-2025
+            msvc_arch: x64
           - platform: windows-arm64
             os: windows-11-arm
+            msvc_arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.msvc_arch }}
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
+      - run: cargo build --workspace --release --locked
       - run: python tools/test_release_packager.py
       - run: cargo run --locked -- test
       - run: cargo run --locked -- check examples/getting_started.niv
@@ -65,7 +73,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo bench --bench performance --locked
         env:
           NIVREN_BENCH_GATE: "1"
+
+  wasm:
+    name: WebAssembly host and guest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: wasm32-wasip1, wasm32-unknown-unknown
+          components: clippy
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: cargo clippy -p nivren-wasm --target wasm32-wasip1 --locked -- -D warnings
+      - run: cargo build -p nivren-wasm --target wasm32-wasip1 --release --locked
+      - run: node tools/test_wasm_host.mjs
+      - run: cargo build -p nivren-wasm --target wasm32-unknown-unknown --release --locked
+      - run: node tools/test_wasm_browser.mjs
+
+  container:
+    name: OCI container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build --tag nivren-ci --file containers/Dockerfile .
+      - run: docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m nivren-ci version

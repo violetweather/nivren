@@ -8,6 +8,7 @@ import re
 import stat
 import sys
 import tempfile
+import json
 import zipfile
 from pathlib import Path
 from typing import NoReturn
@@ -22,6 +23,11 @@ DOCUMENTS = (
     "THIRD_PARTY.md",
     "Cargo.lock",
     "docs/GETTING_STARTED.md",
+    "docs/LANGUAGE.md",
+    "docs/STANDARD_LIBRARY.md",
+    "docs/BYTECODE.md",
+    "docs/CAPABILITY_AUDIT.md",
+    "docs/WASM.md",
     "install/install.sh",
     "install/install.ps1",
     "install/README.md",
@@ -29,6 +35,11 @@ DOCUMENTS = (
     "spec/BYTECODE-1.md",
     "spec/PACKAGE-1.md",
     "spec/STANDARD-LIBRARY-2.md",
+    "spec/LANGUAGE-3.md",
+    "spec/BYTECODE-2.md",
+    "spec/STANDARD-LIBRARY-3.md",
+    "spec/WASM-1.md",
+    "crates/nivren-ffi/include/nivren.h",
 )
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
@@ -140,7 +151,50 @@ def dependency_licenses(prefix: str, binary: Path) -> list[tuple[str, bytes, int
     return members
 
 
-def package(binary: Path, label: str, platform: str, output: Path) -> None:
+def spdx_sbom() -> bytes:
+    lock = (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
+    locked_packages = []
+    for block in lock.split("[[package]]")[1:]:
+        fields = {
+            match.group(1): match.group(2)
+            for match in re.finditer(r'^(name|version|checksum) = "([^"]+)"', block, re.MULTILINE)
+        }
+        if "name" in fields and "version" in fields:
+            locked_packages.append(fields)
+    packages = []
+    for item in sorted(locked_packages, key=lambda value: (value["name"], value["version"])):
+        package = {
+            "SPDXID": f"SPDXRef-Package-{item['name']}-{item['version']}".replace("+", "-"),
+            "name": item["name"],
+            "versionInfo": item["version"],
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+        }
+        if checksum := item.get("checksum"):
+            package["checksums"] = [{"algorithm": "SHA256", "checksumValue": checksum}]
+        packages.append(package)
+    document = {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": "Nivren release dependency SBOM",
+        "documentNamespace": "https://nivren.dev/sbom/release",
+        "creationInfo": {"created": "1980-01-01T00:00:00Z", "creators": ["Tool: Nivren-release-packager"]},
+        "packages": packages,
+    }
+    return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def package(
+    binary: Path,
+    label: str,
+    platform: str,
+    output: Path,
+    library_dir: Path | None = None,
+) -> None:
     for kind, value in (("release label", label), ("platform", platform)):
         if not SAFE_COMPONENT.fullmatch(value):
             fail(f"unsafe {kind}: {value!r}")
@@ -149,8 +203,26 @@ def package(binary: Path, label: str, platform: str, output: Path) -> None:
     prefix = f"nivren-{label}-{platform}"
     executable = "niv.exe" if platform.startswith("windows-") else "niv"
     members: list[tuple[str, bytes, int]] = [
-        (f"{prefix}/bin/{executable}", binary.read_bytes(), 0o755)
+        (f"{prefix}/bin/{executable}", binary.read_bytes(), 0o755),
+        (f"{prefix}/SBOM.spdx.json", spdx_sbom(), 0o644),
     ]
+    if library_dir is not None:
+        if not library_dir.is_dir() or library_dir.is_symlink():
+            fail(f"native library directory is invalid: {library_dir}")
+        libraries = sorted(
+            (
+                path
+                for path in library_dir.iterdir()
+                if "nivren_ffi" in path.name
+                and path.suffix.lower() in {".a", ".dll", ".dylib", ".lib", ".so"}
+            ),
+            key=lambda path: path.name.encode(),
+        )
+        if not libraries:
+            fail(f"native Nivren libraries are missing: {library_dir}")
+        for library in libraries:
+            checked_file(library, "native Nivren library")
+            members.append((f"{prefix}/lib/{library.name}", library.read_bytes(), 0o644))
     for relative in DOCUMENTS:
         source = checked_file(REPOSITORY / relative, "release document")
         mode = 0o755 if relative == "install/install.sh" else 0o644
@@ -180,10 +252,16 @@ def package(binary: Path, label: str, platform: str, output: Path) -> None:
 
 
 def main(arguments: list[str]) -> None:
-    if len(arguments) != 5:
-        fail("usage: package_release.py BINARY LABEL PLATFORM OUTPUT.zip")
-    _, binary, label, platform, output = arguments
-    package(Path(binary).resolve(), label, platform, Path(output).resolve())
+    if len(arguments) not in {5, 6}:
+        fail("usage: package_release.py BINARY LABEL PLATFORM OUTPUT.zip [LIBRARY_DIR]")
+    _, binary, label, platform, output, *library_dir = arguments
+    package(
+        Path(binary).resolve(),
+        label,
+        platform,
+        Path(output).resolve(),
+        Path(library_dir[0]).resolve() if library_dir else None,
+    )
 
 
 if __name__ == "__main__":

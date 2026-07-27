@@ -1,0 +1,4 @@
+[package]
+name = "nivren_image"
+version = "1.0.0"
+entry = "src/main.niv"

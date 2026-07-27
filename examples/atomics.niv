@@ -1,0 +1,20 @@
+define count() gives Result<Int, String> needs Task {
+    keep counter = std.atomics.create(0)
+
+    define increment() gives Result<Null, String> {
+        change index = 0
+        repeat index < 100 {
+            keep previous = std.atomics.add(counter, 1) or give
+            index = index + 1
+        }
+        give ok(none)
+    }
+
+    keep completed = together [start increment, start increment] or give
+    give ok(std.atomics.load(counter))
+}
+
+choose count() {
+    Ok(value) => value,
+    Err(problem) => -1,
+}

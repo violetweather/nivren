@@ -10,7 +10,7 @@ Set `NIVREN_JIT_THRESHOLD` to a positive call count when tuning workloads. `Inte
 
 `cargo bench --bench performance` runs a 200,000-iteration arithmetic workload through both the bytecode-only and tiered runtimes. It reports median VM time, tiered time, and speedup over seven measured runs after warmup. Setting `NIVREN_BENCH_GATE=1` requires at least a 1.05x speedup.
 
-The CI release gate runs on the pinned Rust 1.85 toolchain. The initial Apple Silicon result was:
+The CI release gate runs on the pinned Rust 1.88 toolchain. The initial Apple Silicon result was:
 
 ```text
 nivren_benchmark_vm_ms 129.642

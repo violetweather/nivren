@@ -1,4 +1,4 @@
-use crate::ast::{Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeRef};
+use crate::ast::{Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef};
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
 
@@ -56,6 +56,12 @@ impl Parser {
         if self.matches(&[TokenKind::Enum]) {
             return self.enum_declaration();
         }
+        if self.matches(&[TokenKind::Protocol]) {
+            return self.protocol_declaration();
+        }
+        if self.matches(&[TokenKind::Adopt]) {
+            return self.adoption_declaration();
+        }
         if self.matches(&[TokenKind::Import]) {
             return self.import_declaration();
         }
@@ -88,6 +94,7 @@ impl Parser {
     fn function(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected function name")?;
+        let type_params = self.type_parameters()?;
         self.consume(&TokenKind::LeftParen, "expected '(' after function name")?;
         let mut params = vec![];
         if !self.check(&TokenKind::RightParen) {
@@ -121,20 +128,78 @@ impl Parser {
         } else {
             None
         };
+        let mut needs = vec![];
+        if self.matches(&[TokenKind::Needs]) {
+            loop {
+                let capability = self.consume_identifier("expected capability after needs")?;
+                if needs.contains(&capability) {
+                    return Err(self.error_here("duplicate capability in needs list"));
+                }
+                needs.push(capability);
+                if !self.matches(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+        }
         self.consume(&TokenKind::LeftBrace, "expected '{' before function body")?;
         let body = self.block_contents()?;
         Ok(Stmt::Function {
             name,
+            type_params,
             params,
             return_type,
+            needs,
             body,
             span,
         })
     }
 
+    fn type_parameters(&mut self) -> Result<Vec<TypeParam>, NivError> {
+        let mut type_params = vec![];
+        if self.matches(&[TokenKind::Less]) {
+            loop {
+                if type_params.len() >= 255 {
+                    return Err(
+                        self.error_here("declarations may have at most 255 type parameters")
+                    );
+                }
+                let parameter_span = Span {
+                    line: self.peek().line,
+                    column: self.peek().column,
+                };
+                let parameter = self.consume_identifier("expected generic type parameter")?;
+                if type_params
+                    .iter()
+                    .any(|existing: &TypeParam| existing.name == parameter)
+                {
+                    return Err(self.error_here("duplicate generic type parameter"));
+                }
+                let constraint = if self.matches(&[TokenKind::Colon]) {
+                    Some(self.consume_identifier("expected protocol after ':'")?)
+                } else {
+                    None
+                };
+                type_params.push(TypeParam {
+                    name: parameter,
+                    constraint,
+                    span: parameter_span,
+                });
+                if !self.matches(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(
+                &TokenKind::Greater,
+                "expected '>' after generic type parameters",
+            )?;
+        }
+        Ok(type_params)
+    }
+
     fn record(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected shape name")?;
+        let type_params = self.type_parameters()?;
         self.consume(&TokenKind::LeftBrace, "expected '{' after shape name")?;
         let mut fields = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
@@ -157,16 +222,41 @@ impl Parser {
             }
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after shape")?;
-        Ok(Stmt::Record { name, fields, span })
+        Ok(Stmt::Record {
+            name,
+            type_params,
+            fields,
+            span,
+        })
     }
 
     fn enum_declaration(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected choice name")?;
+        let type_params = self.type_parameters()?;
         self.consume(&TokenKind::LeftBrace, "expected '{' after choice name")?;
         let mut variants = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
-            variants.push(self.consume_identifier("expected variant name")?);
+            let variant_span = Span {
+                line: self.peek().line,
+                column: self.peek().column,
+            };
+            let variant_name = self.consume_identifier("expected variant name")?;
+            let payload = if self.matches(&[TokenKind::LeftParen]) {
+                let payload = self.type_ref()?;
+                self.consume(
+                    &TokenKind::RightParen,
+                    "expected ')' after choice variant payload type",
+                )?;
+                Some(payload)
+            } else {
+                None
+            };
+            variants.push(crate::ast::VariantDef {
+                name: variant_name,
+                payload,
+                span: variant_span,
+            });
             if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
@@ -183,7 +273,127 @@ impl Parser {
         }
         Ok(Stmt::Enum {
             name,
+            type_params,
             variants,
+            span,
+        })
+    }
+
+    fn protocol_declaration(&mut self) -> Result<Stmt, NivError> {
+        let span = self.previous_span();
+        let name = self.consume_identifier("expected protocol name")?;
+        let mut members = vec![];
+        if self.matches(&[TokenKind::LeftBrace]) {
+            while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+                self.consume(&TokenKind::Fun, "expected 'define' before protocol member")?;
+                let member_span = self.previous_span();
+                let member_name = self.consume_identifier("expected protocol member name")?;
+                self.consume(
+                    &TokenKind::LeftParen,
+                    "expected '(' after protocol member name",
+                )?;
+                let mut params = vec![];
+                if !self.check(&TokenKind::RightParen) {
+                    loop {
+                        let parameter_span = Span {
+                            line: self.peek().line,
+                            column: self.peek().column,
+                        };
+                        let parameter_name =
+                            self.consume_identifier("expected protocol parameter name")?;
+                        self.consume(
+                            &TokenKind::Colon,
+                            "protocol parameters require an explicit type",
+                        )?;
+                        params.push(Param {
+                            name: parameter_name,
+                            ty: Some(self.type_ref()?),
+                            span: parameter_span,
+                        });
+                        if !self.matches(&[TokenKind::Comma]) {
+                            break;
+                        }
+                    }
+                }
+                self.consume(
+                    &TokenKind::RightParen,
+                    "expected ')' after protocol parameters",
+                )?;
+                self.consume(&TokenKind::Arrow, "protocol members require a 'gives' type")?;
+                let return_type = self.type_ref()?;
+                let mut needs = vec![];
+                if self.matches(&[TokenKind::Needs]) {
+                    loop {
+                        let capability =
+                            self.consume_identifier("expected capability after needs")?;
+                        if needs.contains(&capability) {
+                            return Err(self.error_here("duplicate capability in needs list"));
+                        }
+                        needs.push(capability);
+                        if !self.matches(&[TokenKind::Comma]) {
+                            break;
+                        }
+                    }
+                }
+                members.push(crate::ast::ProtocolMember {
+                    name: member_name,
+                    params,
+                    return_type,
+                    needs,
+                    span: member_span,
+                });
+                self.optional_semicolon();
+            }
+            self.consume(
+                &TokenKind::RightBrace,
+                "expected '}' after protocol members",
+            )?;
+        }
+        self.optional_semicolon();
+        Ok(Stmt::Protocol {
+            name,
+            members,
+            span,
+        })
+    }
+
+    fn adoption_declaration(&mut self) -> Result<Stmt, NivError> {
+        let span = self.previous_span();
+        let protocol = self.consume_identifier("expected protocol name after adopt")?;
+        self.consume(&TokenKind::ForType, "expected 'for' after protocol name")?;
+        let ty = self.type_ref()?;
+        let mut members = vec![];
+        if self.matches(&[TokenKind::LeftBrace]) {
+            while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+                let member_span = Span {
+                    line: self.peek().line,
+                    column: self.peek().column,
+                };
+                let member = self.consume_identifier("expected protocol member name")?;
+                self.consume(&TokenKind::Equal, "expected '=' after protocol member name")?;
+                let implementation =
+                    self.consume_identifier("expected implementation function name")?;
+                members.push(crate::ast::AdoptionMember {
+                    member,
+                    implementation,
+                    span: member_span,
+                });
+                if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+                    && !self.check(&TokenKind::RightBrace)
+                {
+                    return Err(self.error_here("expected ',' or '}' after protocol mapping"));
+                }
+            }
+            self.consume(
+                &TokenKind::RightBrace,
+                "expected '}' after protocol adoption",
+            )?;
+        }
+        self.optional_semicolon();
+        Ok(Stmt::Adoption {
+            protocol,
+            ty,
+            members,
             span,
         })
     }
@@ -244,12 +454,24 @@ impl Parser {
                 column: self.peek().column,
             };
             let name = self.consume_identifier("expected type name")?;
-            if name == "Result" && self.matches(&[TokenKind::Less]) {
-                let ok = self.type_ref()?;
-                self.consume(&TokenKind::Comma, "expected ',' between Result types")?;
-                let error = self.type_ref()?;
-                self.consume(&TokenKind::Greater, "expected '>' after Result types")?;
-                TypeRef::Result(Box::new(ok), Box::new(error), span)
+            if self.matches(&[TokenKind::Less]) {
+                let mut arguments = vec![];
+                loop {
+                    arguments.push(self.type_ref()?);
+                    if !self.matches(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+                self.consume(&TokenKind::Greater, "expected '>' after type arguments")?;
+                if name == "Result" && arguments.len() == 2 {
+                    TypeRef::Result(
+                        Box::new(arguments.remove(0)),
+                        Box::new(arguments.remove(0)),
+                        span,
+                    )
+                } else {
+                    TypeRef::Applied(name, arguments, span)
+                }
             } else {
                 TypeRef::Named(name, span)
             }
@@ -283,6 +505,9 @@ impl Parser {
         }
         if self.matches(&[TokenKind::For]) {
             return self.for_statement();
+        }
+        if self.matches(&[TokenKind::Using]) {
+            return self.using_statement();
         }
         if self.matches(&[TokenKind::LeftBrace]) {
             let span = self.previous_span();
@@ -363,6 +588,20 @@ impl Parser {
         })
     }
 
+    fn using_statement(&mut self) -> Result<Stmt, NivError> {
+        let span = self.previous_span();
+        let name = self.consume_identifier("expected resource name after using")?;
+        self.consume(&TokenKind::Equal, "expected '=' after resource name")?;
+        let resource = self.expression()?;
+        let body = Box::new(self.statement()?);
+        Ok(Stmt::Using {
+            name,
+            resource,
+            body,
+            span,
+        })
+    }
+
     fn control_condition(&mut self, keyword: &str) -> Result<Expr, NivError> {
         if self.matches(&[TokenKind::LeftParen]) {
             let condition = self.expression()?;
@@ -424,7 +663,7 @@ impl Parser {
     }
 
     fn coalesce_inner(&mut self) -> Result<Expr, NivError> {
-        let expression = self.or()?;
+        let expression = self.pipeline()?;
         if self.matches(&[TokenKind::QuestionQuestion]) {
             let span = self.previous_span();
             return Ok(Expr::Coalesce(
@@ -436,9 +675,39 @@ impl Parser {
         Ok(expression)
     }
 
+    fn pipeline(&mut self) -> Result<Expr, NivError> {
+        let mut expression = self.or()?;
+        while self.matches(&[TokenKind::Through]) {
+            let span = self.previous_span();
+            let stage = self.call()?;
+            expression = match stage {
+                Expr::Call(callee, mut arguments, _) => {
+                    arguments.insert(0, expression);
+                    Expr::Call(callee, arguments, span)
+                }
+                Expr::Variable(_, _) | Expr::Get(_, _, _) => {
+                    Expr::Call(Box::new(stage), vec![expression], span)
+                }
+                _ => {
+                    return Err(NivError::new(
+                        "through expects a function or function call",
+                        span.line,
+                        span.column,
+                    ));
+                }
+            };
+        }
+        Ok(expression)
+    }
+
     fn or(&mut self) -> Result<Expr, NivError> {
         let mut expression = self.and()?;
         while self.matches(&[TokenKind::Or]) {
+            if self.matches(&[TokenKind::Return]) {
+                let span = self.previous_span();
+                expression = Expr::Propagate(Box::new(expression), span);
+                break;
+            }
             let operator = self.previous().kind.clone();
             let span = self.previous_span();
             expression = Expr::Logical(Box::new(expression), operator, Box::new(self.and()?), span);
@@ -510,6 +779,18 @@ impl Parser {
     }
 
     fn unary_inner(&mut self) -> Result<Expr, NivError> {
+        for (kind, operation) in [
+            (TokenKind::Start, "spawn"),
+            (TokenKind::Wait, "await"),
+            (TokenKind::Together, "all"),
+            (TokenKind::Race, "race"),
+        ] {
+            if self.matches(&[kind]) {
+                let span = self.previous_span();
+                let argument = self.unary()?;
+                return Ok(task_call(operation, argument, span));
+            }
+        }
         if self.matches(&[TokenKind::Bang, TokenKind::Minus]) {
             let operator = self.previous().kind.clone();
             let span = self.previous_span();
@@ -721,6 +1002,13 @@ impl Parser {
             self.advance();
         }
     }
+}
+
+fn task_call(operation: &str, argument: Expr, span: Span) -> Expr {
+    let standard = Expr::Variable("std".into(), span);
+    let task = Expr::Get(Box::new(standard), "tasks".into(), span);
+    let function = Expr::Get(Box::new(task), operation.into(), span);
+    Expr::Call(Box::new(function), vec![argument], span)
 }
 
 fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {

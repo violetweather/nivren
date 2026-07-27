@@ -1,0 +1,13 @@
+define protocol_id() gives Result<Int, String> {
+    keep magic = std.u16.from_int(20054) or give
+    keep version = std.u16.from_int(3) or give
+    keep header = std.binary.concat(
+        std.binary.u16_be(magic),
+        std.binary.u16_be(version),
+    ) or give
+
+    keep decoded_magic = std.binary.read_u16_be(header, 0) or give
+    give std.u16.to_int(decoded_magic)
+}
+
+show protocol_id()

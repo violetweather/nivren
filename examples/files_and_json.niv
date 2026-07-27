@@ -1,0 +1,12 @@
+shape Document { title: String, published: Bool }
+
+define load_document(path: String) gives Result<String, String> needs FileRead {
+    keep opened = std.files.open_read(path)
+    using file = opened or give {
+        keep source = std.files.read_open(file, 1048576) or give
+        keep document = std.json.decode(Document, source) or give
+        give std.json.stringify(document)
+    }
+}
+
+load_document("data.json")

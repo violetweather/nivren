@@ -1,0 +1,11 @@
+use "../src/main.niv"
+
+define works() gives Result<Bool, String> {
+    keep labels = std.map.single("route", "/health")
+    keep value = main.sample("nivren_requests_total", "Handled requests", "counter", 42.0, labels) or give
+    keep output = main.encode([value]) or give
+    assert(output == "# HELP nivren_requests_total Handled requests\n# TYPE nivren_requests_total counter\nnivren_requests_total{route=\"/health\"} 42\n", "Prometheus text encoding")
+    give ok(yes)
+}
+
+works()

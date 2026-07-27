@@ -1,0 +1,15 @@
+use "../src/main.niv"
+
+define works() gives Result<Bool, String> {
+    keep pixels = std.bytes.from_values([255, 0, 0, 0, 255, 0]) or give
+    keep source = main.image(2, 1, pixels) or give
+    keep encoded = main.encode_ppm(source) or give
+    assert(std.bytes.length(encoded) == 17, "canonical PPM byte length")
+    keep decoded = main.decode_ppm(encoded) or give
+    assert(decoded == source, "P6 round trip")
+    keep commented = std.binary.concat(std.bytes.from_string("P6\n# Nivren\n2 1\n255\n"), pixels) or give
+    assert((main.decode_ppm(commented) or give) == source, "commented PPM header")
+    give ok(yes)
+}
+
+works()

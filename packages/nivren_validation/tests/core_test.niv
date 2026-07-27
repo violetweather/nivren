@@ -1,0 +1,4 @@
+use "../src/main.niv"
+
+assert(main.required("name", "Nivren") == ok("Nivren"), "name should validate")
+assert(main.range("port", 443, 1, 65535) == ok(443), "port should validate")

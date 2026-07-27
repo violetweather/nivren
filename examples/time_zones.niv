@@ -1,0 +1,10 @@
+define meeting_time(seconds: Int, zone: String) gives Result<String, String> {
+    keep instant = std.time.from_unix(seconds, "UTC") or give
+    keep local = std.time.in_zone(instant, zone) or give
+    give ok(std.time.format(local))
+}
+
+choose meeting_time(0, "America/New_York") {
+    Ok(value) => value,
+    Err(problem) => problem
+}

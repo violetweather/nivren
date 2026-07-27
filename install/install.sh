@@ -1,19 +1,21 @@
 #!/bin/sh
 set -eu
 
-VERSION="0.10.0-beta.5"
+VERSION="0.10.0-beta.6"
 INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/nivren"
 BIN_DIR="$HOME/.local/bin"
 ADD_PATH=ask
 VSCODE=ask
 ASSUME_YES=0
+UNINSTALL=0
 
 usage() {
   cat <<'EOF'
 Nivren installer
 
 Usage: install.sh [options]
-  --version VERSION       Install a specific release (default: 0.10.0-beta.5)
+  --version VERSION       Install a specific release (default: 0.10.0-beta.6)
+  --uninstall             Remove a Nivren installation owned by this installer
   --install-root PATH     Keep versions and documentation here
   --bin-dir PATH          Put the stable niv command here
   --yes                   Accept recommended choices without prompting
@@ -27,6 +29,7 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) [ "$#" -ge 2 ] || { echo "missing value for --version" >&2; exit 64; }; VERSION=$2; shift 2 ;;
+    --uninstall) UNINSTALL=1; shift ;;
     --install-root) [ "$#" -ge 2 ] || { echo "missing value for --install-root" >&2; exit 64; }; INSTALL_ROOT=$2; shift 2 ;;
     --bin-dir) [ "$#" -ge 2 ] || { echo "missing value for --bin-dir" >&2; exit 64; }; BIN_DIR=$2; shift 2 ;;
     --yes) ASSUME_YES=1; shift ;;
@@ -43,6 +46,33 @@ case "$VERSION" in
 esac
 case "$INSTALL_ROOT$BIN_DIR" in *"
 "*|*"'"*) echo "install paths cannot contain newlines or single quotes" >&2; exit 64 ;; esac
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  [ -n "$INSTALL_ROOT" ] || { echo "refusing an empty install root" >&2; exit 65; }
+  [ ! -L "$INSTALL_ROOT" ] || { echo "refusing a symbolic-link install root: $INSTALL_ROOT" >&2; exit 65; }
+  [ -d "$INSTALL_ROOT" ] || { echo "installation root does not exist: $INSTALL_ROOT" >&2; exit 65; }
+  resolved_root=$(CDPATH= cd -- "$INSTALL_ROOT" && pwd -P)
+  resolved_home=$(CDPATH= cd -- "$HOME" && pwd -P)
+  case "$resolved_root" in ""|/|"$resolved_home") echo "refusing unsafe install root: $resolved_root" >&2; exit 65 ;; esac
+  marker="$INSTALL_ROOT/.nivren-install-root"
+  [ -f "$marker" ] || { echo "refusing to remove an installation without $marker" >&2; exit 65; }
+  [ "$(cat "$marker")" = "nivren-managed-root-v1" ] || { echo "installation ownership marker is invalid" >&2; exit 65; }
+  if [ -L "$BIN_DIR/niv" ]; then
+    link_target=$(readlink "$BIN_DIR/niv")
+    case "$link_target" in "$INSTALL_ROOT"/versions/*/bin/niv) rm -f "$BIN_DIR/niv" ;; *) echo "leaving unrelated $BIN_DIR/niv in place" >&2 ;; esac
+  fi
+  if [ -f "$INSTALL_ROOT/path-profile" ]; then
+    profile=$(cat "$INSTALL_ROOT/path-profile")
+    if [ -f "$profile" ]; then
+      cleaned=$(mktemp "${TMPDIR:-/tmp}/nivren-profile.XXXXXX")
+      awk 'skip { skip = 0; next } $0 == "# Nivren" { skip = 1; next } { print }' "$profile" > "$cleaned"
+      mv "$cleaned" "$profile"
+    fi
+  fi
+  rm -rf "$resolved_root"
+  echo "Nivren was uninstalled."
+  exit 0
+fi
 
 if [ "$ASSUME_YES" -eq 1 ]; then
   [ "$ADD_PATH" = ask ] && ADD_PATH=yes
@@ -110,6 +140,7 @@ rm -rf "$version_root"
 mv "$staging" "$version_root"
 ln -sfn "$version_root/bin/niv" "$BIN_DIR/niv"
 printf '%s\n' "$VERSION" > "$INSTALL_ROOT/current-version"
+printf '%s\n' "nivren-managed-root-v1" > "$INSTALL_ROOT/.nivren-install-root"
 
 if [ "$ADD_PATH" = ask ]; then
   case ":$PATH:" in *":$BIN_DIR:"*) ADD_PATH=no ;; *) ADD_PATH=$(ask_yes_no "Add $BIN_DIR to your PATH? [Y/n]" yes) ;; esac
@@ -129,6 +160,7 @@ if [ "$ADD_PATH" = yes ]; then
     else
       printf '\n%s\nexport PATH='\''%s'\'':"$PATH"\n' "$marker" "$BIN_DIR" >> "$profile"
     fi
+    printf '%s\n' "$profile" > "$INSTALL_ROOT/path-profile"
   fi
   PATH="$BIN_DIR:$PATH"
   export PATH

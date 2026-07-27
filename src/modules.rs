@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Stmt;
@@ -74,7 +73,7 @@ impl Loader {
             return Ok(program.clone());
         }
 
-        let source = fs::read_to_string(&canonical).map_err(|error| {
+        let source = crate::source_io::read_to_string(&canonical).map_err(|error| {
             vec![NivError::new(
                 format!("cannot read module '{}': {error}", canonical.display()),
                 1,

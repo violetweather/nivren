@@ -1,0 +1,26 @@
+define gzip(data: Bytes, level: Int) gives Result<Bytes, String> {
+    give std.compression.gzip(data, level)
+}
+
+define gunzip(data: Bytes, maximum: Int) gives Result<Bytes, String> {
+    give std.compression.gunzip(data, maximum)
+}
+
+define zlib(data: Bytes, level: Int) gives Result<Bytes, String> {
+    give std.compression.zlib(data, level)
+}
+
+define unzlib(data: Bytes, maximum: Int) gives Result<Bytes, String> {
+    give std.compression.unzlib(data, maximum)
+}
+
+define gzip_text(text: String, level: Int) gives Result<Bytes, String> {
+    give gzip(std.bytes.from_string(text), level)
+}
+
+define gunzip_text(data: Bytes, maximum: Int) gives Result<String, String> {
+    keep restored = gunzip(data, maximum) or give
+    give std.bytes.to_string(restored)
+}
+
+expose { gzip, gunzip, zlib, unzlib, gzip_text, gunzip_text }

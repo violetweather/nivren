@@ -1,0 +1,15 @@
+define exact_total() gives Result<String, String> {
+    keep subtotal = std.decimal.parse("19.99") or give
+    keep tax = std.decimal.parse("1.60") or give
+    give ok(std.decimal.format(subtotal + tax))
+}
+
+define beyond_machine_int() gives Result<String, String> {
+    keep huge = std.bigint.parse("1000000000000000000000000000000") or give
+    give ok(std.bigint.format(huge * std.bigint.from_int(2)))
+}
+
+choose exact_total() {
+    Ok(value) => value,
+    Err(problem) => problem
+}

@@ -1,0 +1,28 @@
+use "../src/main.niv"
+
+assert(main.expect_equal(42, 42, "answer") == ok(none), "equal values pass")
+assert(main.expect_yes(yes, "truth") == ok(none), "yes passes")
+assert(main.expect_no(no, "falsehood") == ok(none), "no passes")
+
+define controlled() gives Result<Bool, String> needs Task, Channel {
+    keep first = main.gate()
+    keep second = main.gate()
+    keep events = std.channels.create(2)
+    define one() gives Result<Null, String> needs Channel {
+        main.pass(first) or give
+        give main.checkpoint(events, "one")
+    }
+    define two() gives Result<Null, String> needs Channel {
+        main.pass(second) or give
+        give main.checkpoint(events, "two")
+    }
+    keep tasks = [start one, start two]
+    main.open(second) or give
+    keep observed_second = std.channels.receive(events, 5.0) or give
+    main.open(first) or give
+    keep observed_first = std.channels.receive(events, 5.0) or give
+    together tasks or give
+    give ok(observed_second == "two" and observed_first == "one")
+}
+
+controlled()

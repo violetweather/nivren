@@ -1,0 +1,13 @@
+use "../src/main.niv"
+
+define verify() gives Result<Bool, String> {
+    keep headers = ["name", "note"]
+    keep rows = main.decode("Ada,\"hello, Nivren\"\r\nLin,portable\r\n", headers, 10) or give
+    assert(len(rows) == 2, "two rows")
+    assert(std.map.get(rows[0], "note") == "hello, Nivren", "quoted field")
+    keep encoded = main.encode(rows, headers) or give
+    keep decoded = main.decode(encoded, headers, 10) or give
+    give ok(decoded == rows)
+}
+
+verify()

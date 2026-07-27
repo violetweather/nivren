@@ -1,42 +1,32 @@
 # Nivren 1.0 release audit
 
-Last updated: 2026-07-26
+Audit date: 2026-07-26
 
-This document maps the 1.0 requirements to reviewable evidence. “Ready locally” means the implementation and local checks exist; it does not substitute for hosted platform results, elapsed compatibility time, or real production use.
+**1.0 is not releasable and no repository/site publication is authorized yet.** Edition 3 is a working draft. Its bounded async TCP/HTTP/TLS/WebSocket foundation and twenty-two-package baseline are implemented, but `docs/CAPABILITY_AUDIT.md` still records material gaps in complete-language AOT, platform/domain breadth, hosted ecosystem operations, systems escape hatches, deployment/signing, independent audits, usability trials, and production pilots.
 
-## Current decision
+## Evidence currently passing locally
 
-**1.0 is not releasable.** `niv release check .` correctly rejects the current tree because the Edition 2 freeze ends on 2027-01-26, the toolchain version is `0.10.0-beta.5`, and zero of three required independent 30-day production pilots are recorded.
+- Edition 2 and Edition 3 black-box conformance suites execute the external `niv` binary.
+- Workspace unit, language, property, FFI, JIT, and documentation tests pass.
+- Strict workspace Clippy passes with warnings denied.
+- Edition 3 has checked capabilities plus runtime project grants, typed `or give`, `through`, structured concurrency words, generic protocols and collections, immutable bytes, deterministic `using`, unified project commands, instruction budgets, call-depth limits, bounded WebSocket text clients/servers over plain or configured verified TLS, stable JSON observation export, and privacy-safe crash reports.
+- Bytecode version 5 is bounded, recursively verified, bundle-tested, and documents `Using`, `Propagate`, canonical shape schemas, payload-choice metadata, and coherent protocol dispatch.
+- Deterministic package, registry trust, checksum, provenance, advisory, installer, and native release foundations remain in the tree.
+- Reproducible WASI Preview 1 and zero-import browser compiler/runtime guests execute check, diagnostics, formatting, bytecode compilation, and Edition 3 programs through a bounded owned-memory ABI. The public browser SDK passes the same real-module test.
+- Bounded asynchronous native host operations return ordinary structured tasks; transferable sequentially consistent atomic integers pass four-task contention in both engines.
+- Twenty-two official packages, including deterministic bounded gzip/zlib compression, explicit-schema CSV tables, descriptive statistics and matrices, RGB raster and PCM16 audio interchange, cloud signing, OIDC/PKCE, tracing/metrics, capability-checked random keys, bounded Argon2id password storage, random-nonce ChaCha20-Poly1305 authenticated encryption, and algorithm-pinned HS256/Ed25519 JWT authentication, rebuild, document, publish, install, lock, import, and execute together in both engines.
+- A 34.6 MB OCI image builds locally, runs the CLI from a read-only filesystem as non-root UID/GID 10001, includes certificate roots, and has tag-gated amd64/arm64 provenance/SBOM publication automation.
 
-## Requirement matrix
+## Blocking gates
 
-| Requirement | Status | Evidence or remaining action |
-| --- | --- | --- |
-| Normative Edition 2 language, bytecode, package, and standard-library definitions | Ready locally | `spec/LANGUAGE-2.md`, `spec/BYTECODE-1.md`, `spec/PACKAGE-1.md`, and `spec/STANDARD-LIBRARY-2.md` |
-| Frozen external conformance corpus | Ready locally | `conformance/edition2-baseline.json`; 27 vectors; SHA-256 pinned in `release/policy.json` and checked by `tests/conformance.rs` |
-| Canonical source syntax | Ready locally | Edition 2 deliberately has no legacy aliases or migration path because no earlier Nivren syntax had users |
-| Exact, checksum-pinned dependency resolution | Ready locally | Package resolver tests, lockfile tests, immutable archive checks, and `spec/PACKAGE-1.md` |
-| Runtime, VM, JIT, GC, FFI, registry, and tooling test suites | Ready locally | Workspace, language, native, property, FFI, and JIT tests; the latest full local suite passed on 2026-07-26 using Rust 1.85.0 |
-| Performance gate | Ready locally | `benches/performance.rs`; latest release gate measured a 1.906x tiered speedup on 2026-07-26 |
-| Deterministic distributable archives | Ready locally | `tools/package_release.py` and `tools/test_release_packager.py`; archives use fixed metadata and include the executable, project documents, Edition 2 source specifications, format specifications, locked dependency inventory, and available dependency license/notice files |
-| Reproducible native builds | Ready, new release proof pending | `.github/workflows/release.yml` performs two clean builds through the same target path and compares them; beta.3 passed all six native build jobs, and Edition 2 must repeat that result |
-| Six tier-one platform checks | Ready, new release proof pending | `.github/workflows/ci.yml` defines Linux, macOS, and Windows on x64 and ARM64; beta.3 passed every build job |
-| Dependency security monitoring and fuzzing | Ready and hosted | `.github/workflows/security.yml` uses RustSec; `.github/workflows/fuzz.yml` runs both fuzz targets; `.github/dependabot.yml` covers Rust, fuzz, editor, and workflow dependencies |
-| Private vulnerability-reporting channel | Pending owner decision | `SECURITY.md` intentionally contains no invented address. Add a monitored security email or enable a documented private reporting facility before public distribution |
-| Six-month Edition 2 compatibility freeze | Time-gated | Began 2026-07-26 and cannot pass before 2027-01-26 |
-| Three independent 30-day production pilots | Pending real users | Add only independently reviewable records under `release/pilots/`; synthetic records are prohibited |
-| Version and immutable signed release | Pending final gate | Change all workspace packages to exactly `1.0.0` only after every other gate passes, then use a matching `v1.0.0` tag and the attested release workflow |
+Every row in `docs/CAPABILITY_AUDIT.md` must have an idiomatic API, executable example, reference documentation, actionable diagnostics, automated tests, resource/performance expectations, and a supported distribution path. In addition:
 
-## Local verification snapshot
+- all supported OS/architecture jobs must pass from clean runners twice with byte-identical artifacts;
+- installer, PATH, editor, package, registry, upgrade, and uninstall flows must pass on clean machines;
+- Edition 3 must complete its compatibility freeze and independent production pilots;
+- fuzz, hostile-bundle/package, quota, sandbox, one-way and mutual TLS/network, and supply-chain suites must pass;
+- external security findings must be resolved or explicitly release-blocking;
+- the language docs, generated API docs, examples, editor, installers, release archives, and website must describe the exact shipped behavior;
+- only after all gates pass may the language repository, release artifacts, and website be published.
 
-- Rust minimum supported version: 1.85.0.
-- `cargo fmt --all -- --check`: pass.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`: pass.
-- Full workspace/language/native/property/FFI/JIT suite: pass after the Edition 2 syntax and packaging changes.
-- Release archive unit tests: 2 pass.
-- Two independently created beta archives had identical SHA-256 digests and valid member integrity.
-- A clean release-only macOS ARM64 build produced two byte-identical archives with 121 dependency license/inventory entries. The extracted beta ran `niv version` and `examples/hello.niv` successfully; archive SHA-256: `cdcb9e6f7c6b0b9557ed9bdc8d1ef5c3f810fcf6ff99b0fb08263ffb778e75a7`.
-
-## Before publishing 1.0
-
-Create a hosted repository with immutable CI history, configure the private reporting channel, collect real pilot evidence, wait for the compatibility freeze, rerun every gate on all tier-one platforms, review dependency and fuzz findings, and only then promote the version and tag. Any failure resets the affected evidence; it must not be waived by editing `release/policy.json`.
+Past beta release attempts are historical evidence only. Successful partial jobs do not satisfy this audit, and failed/missing release objects must not be represented as shipped versions.

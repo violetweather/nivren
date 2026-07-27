@@ -4,11 +4,25 @@ use std::process::Command;
 
 #[test]
 fn edition_two_black_box_conformance_vectors() {
-    let cases: serde_json::Value =
-        serde_json::from_str(include_str!("../conformance/edition2-baseline.json")).unwrap();
+    run_suite(
+        include_str!("../conformance/edition2-baseline.json"),
+        "edition2",
+    );
+}
+
+#[test]
+fn edition_three_black_box_conformance_vectors() {
+    run_suite(
+        include_str!("../conformance/edition3-baseline.json"),
+        "edition3",
+    );
+}
+
+fn run_suite(source: &str, edition: &str) {
+    let cases: serde_json::Value = serde_json::from_str(source).unwrap();
     let cases = cases.as_array().unwrap();
     let directory = std::env::temp_dir().join(format!(
-        "nivren-conformance-{}-{:?}",
+        "nivren-conformance-{edition}-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
@@ -53,6 +67,7 @@ fn run_case(case: &serde_json::Value, directory: &std::path::Path) {
         .collect::<Vec<_>>();
     let output = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_niv")))
         .args(arguments)
+        .current_dir(&project)
         .output()
         .unwrap();
     assert_eq!(

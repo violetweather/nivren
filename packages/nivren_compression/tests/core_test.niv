@@ -1,0 +1,16 @@
+use "../src/main.niv"
+
+keep packed = main.gzip_text("Nivren Nivren", 6)
+keep restored = choose packed {
+    Ok(bytes) => main.gunzip_text(bytes, 1024),
+    Err(problem) => err(problem),
+}
+assert(restored == ok("Nivren Nivren"), "gzip text roundtrip")
+
+keep input = std.bytes.from_string("portable")
+keep zlib = main.zlib(input, 9)
+keep unzlib = choose zlib {
+    Ok(bytes) => main.unzlib(bytes, 1024),
+    Err(problem) => err(problem),
+}
+assert(unzlib == ok(input), "zlib roundtrip")

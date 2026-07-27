@@ -1,0 +1,21 @@
+use "../src/main.niv"
+
+assert(main.bulk("PING") == ok("$4\r\nPING\r\n"), "bulk string")
+assert(
+    main.command(["SET", "greeting", "hello"]) == ok("*3\r\n$3\r\nSET\r\n$8\r\ngreeting\r\n$5\r\nhello\r\n"),
+    "RESP command"
+)
+assert(main.command([]) == err("Redis command requires at least one part"), "empty command")
+assert(
+    main.redirect("MOVED 42 [::1]:6379") == ok(main.Redirect("MOVED", 42, "::1", 6379)),
+    "cluster redirect"
+)
+assert(main.pool(0) == err("Redis pool size must be from 1 through 1024"), "pool lower bound")
+keep empty = main.pool(4)
+assert(
+    choose empty {
+        Ok(value) => main.pool_take(value) == err("Redis pool is empty"),
+        Err(problem) => no
+    },
+    "empty pool"
+)

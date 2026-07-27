@@ -1,0 +1,57 @@
+shape IntColumn { name: String, values: [Int] }
+shape FloatColumn { name: String, values: [Float] }
+shape TextColumn { name: String, values: [String] }
+
+choice Column {
+    Ints(IntColumn),
+    Floats(FloatColumn),
+    Texts(TextColumn),
+}
+
+shape Table { rows: Int, columns: [Column] }
+
+define column_name(column: Column) gives String {
+    give choose column {
+        Ints(value) => value.name,
+        Floats(value) => value.name,
+        Texts(value) => value.name,
+    }
+}
+
+define column_length(column: Column) gives Int {
+    give choose column {
+        Ints(value) => len(value.values),
+        Floats(value) => len(value.values),
+        Texts(value) => len(value.values),
+    }
+}
+
+define table(columns: [Column]) gives Result<Table, String> {
+    when len(columns) == 0 { give err("table requires at least one column") }
+    when len(columns) > 4096 { give err("table exceeds 4096 columns") }
+    keep rows = column_length(columns[0])
+    when rows > 1000000 { give err("table exceeds one million rows") }
+    change names: [String] = []
+    each column within columns {
+        keep name = column_name(column)
+        when name == "" { give err("column names must not be empty") }
+        each existing within names { when existing == name { give err("column names must be unique") } }
+        when column_length(column) != rows { give err("all columns must have the same row count") }
+        names = append(names, name)
+    }
+    give ok(Table(rows, columns))
+}
+
+define select(value: Table, names: [String]) gives Result<Table, String> {
+    when len(names) == 0 { give err("selection requires at least one column") }
+    change selected: [Column] = []
+    each name within names {
+        change found: Column? = none
+        each column within value.columns { when column_name(column) == name { found = column } }
+        when found == none { give err("selected column does not exist") }
+        selected = append(selected, found ?? value.columns[0])
+    }
+    give table(selected)
+}
+
+expose { IntColumn, FloatColumn, TextColumn, Column, Table, column_name, column_length, table, select }
