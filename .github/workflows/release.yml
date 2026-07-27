@@ -109,12 +109,15 @@ jobs:
           $env:SOURCE_DATE_EPOCH = git log -1 --pretty=%ct
           $env:CARGO_TARGET_DIR = "target-repro"
           $env:RUSTFLAGS = "-C link-arg=/Brepro"
+          python tools/test_normalize_coff_archive.py
           cargo build --release --workspace --locked
+          python tools/normalize_coff_archive.py "target-repro/release/nivren_ffi.lib"
           Copy-Item "target-repro/release/${{ matrix.binary }}" "reproducible-first"
           New-Item -ItemType Directory -Path "reproducible-libs" | Out-Null
           Get-ChildItem "target-repro/release" -File | Where-Object { $_.Name -match 'nivren_ffi.*\.(dll|lib)$' } | Copy-Item -Destination "reproducible-libs"
           cargo clean
           cargo build --release --workspace --locked
+          python tools/normalize_coff_archive.py "target-repro/release/nivren_ffi.lib"
           $first = (Get-FileHash "reproducible-first" -Algorithm SHA256).Hash
           $second = (Get-FileHash "target-repro/release/${{ matrix.binary }}" -Algorithm SHA256).Hash
           if ($first -ne $second) { throw "release build is not reproducible" }
