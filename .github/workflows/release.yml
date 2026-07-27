@@ -33,12 +33,18 @@ jobs:
           - platform: windows-x64
             os: windows-2025
             binary: niv.exe
+            msvc_arch: x64
           - platform: windows-arm64
             os: windows-11-arm
             binary: niv.exe
+            msvc_arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.msvc_arch }}
       - uses: dtolnay/rust-toolchain@1.88.0
       - name: Verify release version
         shell: python
