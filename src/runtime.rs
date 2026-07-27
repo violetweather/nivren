@@ -3463,6 +3463,13 @@ impl Collector for GenerationalCollector {
             thread::spawn(move || {
                 let mut marked = std::collections::HashSet::new();
                 mark_roots(&globals, &current, &roots, &stack, &mut marked);
+                // Release the marker's root snapshots before reporting
+                // completion so an explicit full collection is a true
+                // synchronization point for both marking and root ownership.
+                drop(stack);
+                drop(roots);
+                drop(current);
+                drop(globals);
                 let _ = sender.send(marked);
             });
             self.pending = Some(receiver);
