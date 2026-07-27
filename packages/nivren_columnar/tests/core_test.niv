@@ -1,0 +1,13 @@
+use "../src/main.niv"
+
+define works() gives Result<Bool, String> {
+    keep ids = main.Column.Ints(main.IntColumn("id", [1, 2]))
+    keep names = main.Column.Texts(main.TextColumn("name", ["Ada", "Lin"]))
+    keep data = main.table([ids, names]) or give
+    assert(data.rows == 2, "columnar row count")
+    keep chosen = main.select(data, ["name"]) or give
+    assert(main.column_name(chosen.columns[0]) == "name", "column selection")
+    give ok(yes)
+}
+
+works()

@@ -1,0 +1,10 @@
+define first_readable(streams: [TcpStream]) gives Result<Int?, String> needs Network {
+    give std.net.ready_any(streams, "read", 5.0)
+}
+
+define exchange(stream: TcpStream, message: String) gives Result<String, String> needs Network {
+    keep sent = std.net.write_ready(stream, message, 65536, 5.0) or give
+    give std.net.read_ready(stream, 1048576, 5.0)
+}
+
+show("Use first_readable for up to 1024 streams, then exchange with bounded adapters.")

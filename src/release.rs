@@ -18,7 +18,8 @@ struct Policy {
     minimum_pilots: usize,
     minimum_pilot_days: u64,
     minimum_conformance_cases: usize,
-    edition2_baseline_sha256: String,
+    baseline_sha256: String,
+    roadmap_complete: bool,
     required_files: Vec<String>,
     tier_one_platforms: Vec<String>,
 }
@@ -49,17 +50,22 @@ pub struct Audit {
 
 pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
     let policy: Policy = read_json(&root.join("release/policy.json"), "release policy")?;
-    if policy.format != 1 || policy.edition != "2" {
+    if policy.format != 2 || policy.edition != "3" {
         return Err(release_error("unsupported release policy"));
     }
     let mut blockers = vec![];
-    if now < policy.freeze_ends_unix {
+    if !policy.roadmap_complete {
+        blockers.push("Edition 3 capability roadmap is not complete".into());
+    }
+    if policy.freeze_started.is_empty() || policy.freeze_ends.is_empty() {
+        blockers.push("Edition 3 compatibility freeze has not started".into());
+    } else if now < policy.freeze_ends_unix {
         blockers.push(format!(
-            "Edition 2 compatibility freeze does not end until {}",
+            "Edition 3 compatibility freeze does not end until {}",
             policy.freeze_ends
         ));
     }
-    if policy.freeze_started >= policy.freeze_ends {
+    if !policy.freeze_started.is_empty() && policy.freeze_started >= policy.freeze_ends {
         blockers.push("compatibility freeze dates are invalid".into());
     }
     if crate::VERSION != "1.0.0" {
@@ -74,7 +80,7 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
         }
     }
 
-    let baseline_path = root.join("conformance/edition2-baseline.json");
+    let baseline_path = root.join("conformance/edition3-baseline.json");
     let baseline_bytes = fs::read(&baseline_path).map_err(|error| {
         release_error(format!(
             "cannot read conformance baseline '{}': {error}",
@@ -82,8 +88,8 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
         ))
     })?;
     let baseline_digest = encode_hex(&Sha256::digest(&baseline_bytes));
-    if baseline_digest != policy.edition2_baseline_sha256 {
-        blockers.push("Edition 2 conformance baseline was modified".into());
+    if baseline_digest != policy.baseline_sha256 {
+        blockers.push("Edition 3 conformance baseline was modified".into());
     }
     let cases: serde_json::Value = serde_json::from_slice(&baseline_bytes)
         .map_err(|error| release_error(format!("invalid conformance baseline: {error}")))?;
@@ -194,7 +200,7 @@ mod tests {
     #[test]
     fn repository_release_policy_is_machine_checkable() {
         let audit = audit(Path::new(env!("CARGO_MANIFEST_DIR")), u64::MAX).unwrap();
-        assert_eq!(audit.conformance_cases, 27);
+        assert_eq!(audit.conformance_cases, 17);
         assert_eq!(audit.pilots, 0);
         assert!(
             audit
@@ -212,7 +218,13 @@ mod tests {
             audit
                 .blockers
                 .iter()
-                .all(|blocker| !blocker.contains("compatibility freeze"))
+                .any(|blocker| blocker.contains("roadmap"))
+        );
+        assert!(
+            audit
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("freeze has not started"))
         );
     }
 }

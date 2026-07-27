@@ -1,13 +1,9 @@
 keep language: String = "Nivren"
 keep values: [Int] = [2, 3, 5, 7]
 
-define sum(items: [Int]) gives Int {
-    change total: Int = 0
-    each (value within items) {
-        total = total + value
-    }
-    give total
+define add(total: Int, value: Int) gives Int {
+    give total + value
 }
 
 show("Hello, " + language + "!")
-show(sum(values))
+show(values through std.list.fold(0, add))

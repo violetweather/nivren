@@ -1,0 +1,10 @@
+// An embedding host installs the callback. Handle identifiers stay opaque and
+// using asks the host to release the resource on every exit path.
+define query_database(request: String) gives Result<String, String> needs Native {
+    keep opened = std.host.open("database", "{\"url\":\"local\"}") or give
+    using database = opened {
+        give std.host.call(database, "query", request)
+    }
+}
+
+query_database("{\"sql\":\"select 42\"}")

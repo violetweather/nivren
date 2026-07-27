@@ -1,0 +1,10 @@
+define update() gives Result<Map<String, Int>, String> {
+    keep original = std.map.single("count", 1)
+    keep transaction = std.transactions.begin(original)
+    using changes = transaction {
+        keep written = std.transactions.set(changes, "count", 2) or give
+        give std.transactions.commit(changes)
+    }
+}
+
+update()

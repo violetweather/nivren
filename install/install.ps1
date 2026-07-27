@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
-    [string]$Version = "0.10.0-beta.5",
+    [string]$Version = "0.10.0-beta.6",
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "Nivren"),
+    [switch]$Uninstall,
     [switch]$Yes,
     [switch]$NoPath,
     [ValidateSet("Ask", "Install", "Skip")]
@@ -31,6 +32,26 @@ $base = "https://github.com/violetweather/nivren/releases/download/v$Version"
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("nivren-install-" + [guid]::NewGuid())
 $versionRoot = Join-Path $InstallRoot "versions\$Version"
 $binDir = Join-Path $InstallRoot "bin"
+
+if ($Uninstall) {
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) { throw "Refusing an empty install root" }
+    if (-not (Test-Path $InstallRoot -PathType Container)) { throw "Installation root does not exist: $InstallRoot" }
+    $rootItem = Get-Item -LiteralPath $InstallRoot -Force
+    if ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw "Refusing a reparse-point install root: $InstallRoot" }
+    $marker = Join-Path $InstallRoot ".nivren-install-root"
+    if (-not (Test-Path $marker -PathType Leaf)) { throw "Refusing to remove an installation without $marker" }
+    if ((Get-Content -Raw $marker).Trim() -ne "nivren-managed-root-v1") { throw "Installation ownership marker is invalid" }
+    $resolvedRoot = [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $homeRoot = [System.IO.Path]::GetFullPath($HOME).TrimEnd('\')
+    $driveRoot = [System.IO.Path]::GetPathRoot($resolvedRoot).TrimEnd('\')
+    if ($resolvedRoot -eq $homeRoot -or $resolvedRoot -eq $driveRoot) { throw "Refusing unsafe install root: $InstallRoot" }
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $pathParts = @($userPath -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $binDir.TrimEnd('\') })
+    [Environment]::SetEnvironmentVariable("Path", ($pathParts -join ';'), "User")
+    Remove-Item -Recurse -Force $InstallRoot
+    Write-Host "Nivren was uninstalled." -ForegroundColor Cyan
+    return
+}
 
 Write-Host "Nivren $Version installer" -ForegroundColor Cyan
 Write-Host "Platform: windows-$machine"
@@ -73,6 +94,7 @@ try {
     Move-Item $staging $versionRoot
     Copy-Item (Join-Path $versionRoot "bin\niv.exe") (Join-Path $binDir "niv.exe") -Force
     Set-Content -NoNewline (Join-Path $InstallRoot "current-version") $Version
+    Set-Content -NoNewline (Join-Path $InstallRoot ".nivren-install-root") "nivren-managed-root-v1"
 
     $addPath = -not $NoPath
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

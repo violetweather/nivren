@@ -1,0 +1,14 @@
+define count_valid_lines(path: String) gives Result<Int, String> needs FileRead {
+    keep opened = std.files.open_read(path) or give
+    using file = opened {
+        keep lines = std.iter.lines(file, 65536) or give
+        change count = 0
+        each line within lines {
+            keep text = line or give
+            count = count + 1
+        }
+        give ok(count)
+    }
+}
+
+count_valid_lines("events.log")

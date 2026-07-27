@@ -42,8 +42,15 @@ niv package [project]
 niv install /path/to/registry [project]
 niv install --trusted https://registry.example root.pub [project]
 niv package verify target/name-version.nivpkg
+niv registry search web /path/to/registry
 niv registry publish target/name-version.nivpkg /path/to/registry
 niv registry fetch name 1.2.3 /path/to/registry ./vendor/name
 ```
 
 Extraction requires a destination that does not exist. Files are written to a sibling temporary directory and committed with one rename; failures clean up the temporary sandbox.
+
+Registry search is case-insensitive and deterministic. It returns package names in ascending order and stable semantic versions newest-first, ignores symlinked index entries, limits output to 100 packages, and is available from a hosted registry at `GET /v1/search/<query>`.
+
+## Official packages
+
+The source, tests, compatibility rules, and release acceptance matrix for Nivren-maintained packages are documented in `docs/OFFICIAL_PACKAGES.md`. Official identities are importable Nivren identifiers such as `nivren_validation`; hyphens are not accepted in dependency keys or `use "@package"` paths. Generated entry-module docs include only names from `expose`.

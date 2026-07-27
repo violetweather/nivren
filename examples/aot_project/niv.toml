@@ -1,0 +1,4 @@
+[package]
+name = "aot-example"
+version = "1.0.0"
+entry = "src/main.niv"

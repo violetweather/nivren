@@ -1,0 +1,17 @@
+define connect_secure(host: String, path: String) gives Result<WebSocket, String> needs Network {
+    keep policy = std.web.tls_options()
+    give std.web.websocket_secure_connect(host, 443, path, 10.0, policy)
+}
+
+define connect_mutual(host: String, path: String, root_pem: String, certificate_pem: String, private_key_pem: String) gives Result<WebSocket, String> needs Network {
+    keep roots = std.map.set(std.web.tls_options(), "additional_root_pem", root_pem)
+    keep identity = std.map.set(roots, "client_certificate_pem", certificate_pem)
+    keep policy = std.map.set(identity, "client_private_key_pem", private_key_pem)
+    give std.web.websocket_secure_connect(host, 443, path, 10.0, policy)
+}
+
+keep connected = connect_secure("example.com", "/events")
+choose connected {
+    Ok(socket) => std.web.websocket_close(socket),
+    Err(problem) => err(problem),
+}

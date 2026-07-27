@@ -51,7 +51,17 @@ jobs:
               sys.exit(f"tag {tag!r} does not match package version v{version}")
       - name: Validate Unix installer
         if: runner.os != 'Windows'
-        run: sh -n install/install.sh
+        run: |
+          sh -n install/install.sh
+          root="$RUNNER_TEMP/nivren-uninstall-root"
+          bin="$RUNNER_TEMP/nivren-uninstall-bin"
+          mkdir -p "$root/versions/1/bin" "$bin"
+          touch "$root/versions/1/bin/niv"
+          ln -s "$root/versions/1/bin/niv" "$bin/niv"
+          printf 'nivren-managed-root-v1\n' > "$root/.nivren-install-root"
+          sh install/install.sh --uninstall --install-root "$root" --bin-dir "$bin"
+          test ! -e "$root"
+          test ! -e "$bin/niv"
       - name: Validate Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -60,6 +70,11 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile("install/install.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+          $root = Join-Path $env:RUNNER_TEMP "nivren-uninstall-root"
+          New-Item -ItemType Directory -Force (Join-Path $root "bin") | Out-Null
+          Set-Content -NoNewline (Join-Path $root ".nivren-install-root") "nivren-managed-root-v1"
+          & "install/install.ps1" -Uninstall -InstallRoot $root
+          if (Test-Path $root) { throw "uninstaller left its managed root behind" }
       - name: Test release source
         run: cargo test --workspace --all-targets --locked
       - name: Enforce the 1.0 release policy
@@ -72,12 +87,15 @@ jobs:
           set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
           export CARGO_TARGET_DIR=target-repro
-          cargo build --release --locked
+          cargo build --release --workspace --locked
           cp "target-repro/release/${{ matrix.binary }}" reproducible-first
+          mkdir reproducible-libs
+          find target-repro/release -maxdepth 1 -type f \( -name 'libnivren_ffi.so' -o -name 'libnivren_ffi.dylib' -o -name 'libnivren_ffi.a' \) -exec cp {} reproducible-libs/ \;
           cargo clean
-          cargo build --release --locked
+          cargo build --release --workspace --locked
           cmp reproducible-first "target-repro/release/${{ matrix.binary }}"
-          python tools/package_release.py reproducible-first "${RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${RELEASE_LABEL}-${{ matrix.platform }}.zip"
+          for library in reproducible-libs/*; do cmp "$library" "target-repro/release/$(basename "$library")"; done
+          python tools/package_release.py reproducible-first "${RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${RELEASE_LABEL}-${{ matrix.platform }}.zip" target-repro/release
       - name: Build twice
         shell: pwsh
         if: runner.os == 'Windows'
@@ -85,23 +103,95 @@ jobs:
           $env:SOURCE_DATE_EPOCH = git log -1 --pretty=%ct
           $env:CARGO_TARGET_DIR = "target-repro"
           $env:RUSTFLAGS = "-C link-arg=/Brepro"
-          cargo build --release --locked
+          cargo build --release --workspace --locked
           Copy-Item "target-repro/release/${{ matrix.binary }}" "reproducible-first"
+          New-Item -ItemType Directory -Path "reproducible-libs" | Out-Null
+          Get-ChildItem "target-repro/release" -File | Where-Object { $_.Name -match 'nivren_ffi.*\.(dll|lib)$' } | Copy-Item -Destination "reproducible-libs"
           cargo clean
-          cargo build --release --locked
+          cargo build --release --workspace --locked
           $first = (Get-FileHash "reproducible-first" -Algorithm SHA256).Hash
           $second = (Get-FileHash "target-repro/release/${{ matrix.binary }}" -Algorithm SHA256).Hash
           if ($first -ne $second) { throw "release build is not reproducible" }
-          python tools/package_release.py reproducible-first "${env:RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${env:RELEASE_LABEL}-${{ matrix.platform }}.zip"
+          Get-ChildItem "reproducible-libs" -File | ForEach-Object {
+            $rebuilt = Join-Path "target-repro/release" $_.Name
+            if ((Get-FileHash $_.FullName -Algorithm SHA256).Hash -ne (Get-FileHash $rebuilt -Algorithm SHA256).Hash) { throw "$($_.Name) is not reproducible" }
+          }
+          python tools/package_release.py reproducible-first "${env:RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${env:RELEASE_LABEL}-${{ matrix.platform }}.zip" target-repro/release
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
 
+  wasm:
+    name: build (wasm32-wasip1)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: wasm32-wasip1, wasm32-unknown-unknown
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Build and verify reproducible WASI and browser modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          cargo build -p nivren-wasm --target wasm32-wasip1 --release --locked
+          node tools/test_wasm_host.mjs
+          cargo build -p nivren-wasm --target wasm32-unknown-unknown --release --locked
+          node tools/test_wasm_browser.mjs
+          cp target/wasm32-wasip1/release/nivren_wasm.wasm reproducible-first.wasm
+          cp target/wasm32-unknown-unknown/release/nivren_wasm.wasm reproducible-browser.wasm
+          cargo clean -p nivren-wasm
+          cargo build -p nivren-wasm --target wasm32-wasip1 --release --locked
+          cargo build -p nivren-wasm --target wasm32-unknown-unknown --release --locked
+          cmp reproducible-first.wasm target/wasm32-wasip1/release/nivren_wasm.wasm
+          cmp reproducible-browser.wasm target/wasm32-unknown-unknown/release/nivren_wasm.wasm
+          mkdir dist
+          cp reproducible-first.wasm "dist/nivren-${RELEASE_LABEL}-wasm32-wasip1.wasm"
+          cp reproducible-browser.wasm "dist/nivren-${RELEASE_LABEL}-browser.wasm"
+          cp sdk/browser/nivren.mjs "dist/nivren-${RELEASE_LABEL}-browser.mjs"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-wasm32-wasip1
+          path: dist/*
+          if-no-files-found: error
+
+  oci:
+    name: publish (OCI multi-architecture)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, wasm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Build and publish provenance-bearing OCI indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx create --name nivren-release --use
+          docker buildx build \
+            --file containers/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=mode=max \
+            --sbom=true \
+            --tag "${image}:${GITHUB_REF_NAME}" \
+            --tag "${image}:latest" \
+            --push .
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, wasm]
     runs-on: ubuntu-24.04
     permissions:
       attestations: write
@@ -116,9 +206,13 @@ jobs:
           merge-multiple: false
       - name: Collect release archives
         run: |
-          mkdir -p release
-          find downloaded -type f -name 'nivren-*.zip' -exec cp {} release/ \;
-          test "$(find release -maxdepth 1 -type f -name 'nivren-*.zip' | wc -l)" -eq 6
+          mkdir -p release-assets
+          find downloaded -type f -name 'nivren-*.zip' -exec cp {} release-assets/ \;
+          find downloaded -type f -name 'nivren-*.wasm' -exec cp {} release-assets/ \;
+          find downloaded -type f -name 'nivren-*-browser.mjs' -exec cp {} release-assets/ \;
+          test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*.zip' | wc -l)" -eq 6
+          test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*.wasm' | wc -l)" -eq 2
+          test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*-browser.mjs' | wc -l)" -eq 1
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -129,15 +223,15 @@ jobs:
         run: |
           npm ci
           npm run package
-          cp nivren-*.vsix ../../release/
+          cp nivren-*.vsix ../../release-assets/
       - name: Write checksums
-        working-directory: release
+        working-directory: release-assets
         run: sha256sum nivren-* > SHA256SUMS
       - name: Sign release provenance
         uses: actions/attest@v4
         with:
-          subject-path: release/*
+          subject-path: release-assets/*
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" release/* --verify-tag --generate-notes
+        run: gh release create "${{ github.ref_name }}" release-assets/* --verify-tag --generate-notes

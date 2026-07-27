@@ -1,0 +1,12 @@
+use "../src/main.niv"
+
+define works() gives Result<Bool, String> {
+    keep base = main.canvas(320, 200) or give
+    keep background = main.rect(base, 0, 0, 320, 200, "#101828") or give
+    keep labelled = main.text(background, 16, 32, "Nivren <safe>", "white") or give
+    keep output = main.render(labelled) or give
+    assert(output == "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\"><rect x=\"0\" y=\"0\" width=\"320\" height=\"200\" fill=\"#101828\"/><text x=\"16\" y=\"32\" fill=\"white\">Nivren &lt;safe&gt;</text></svg>", "deterministic escaped SVG")
+    give ok(yes)
+}
+
+works()

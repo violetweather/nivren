@@ -1,0 +1,19 @@
+define double(value: Int) gives Int { give value * 2 }
+define useful(value: Int) gives Bool { give value > 4 }
+define add(total: Int, value: Int) gives Int { give total + value }
+
+keep source = std.iter.from([1, 2, 3, 4, 5])
+keep mapped = std.iter.transform(source, double)
+keep selected = std.iter.select(mapped, useful)
+keep page = std.iter.take(std.iter.skip(selected, 1), 2)
+
+keep collected = std.iter.collect(page)
+keep combined = std.iter.chain(std.iter.from(collected), std.iter.from([12]))
+keep total = std.iter.fold(combined, 0, add)
+
+keep ranged = choose std.iter.range(0, 10, 2) {
+    Ok(stream) => std.iter.collect(stream),
+    Err(problem) => [],
+}
+
+total + len(ranged)

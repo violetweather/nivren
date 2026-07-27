@@ -1,0 +1,10 @@
+define load(path: String) gives Result<String, String> needs FileRead, Task {
+    keep queued = std.files.read_async(path, 1048576) or give
+    give wait queued
+}
+
+keep contents = load("notes.txt")
+show(choose contents {
+    Ok(text) => text,
+    Err(problem) => problem,
+})

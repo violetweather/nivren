@@ -1,0 +1,17 @@
+shape Protected {
+    nonce: Bytes,
+    ciphertext: Bytes,
+}
+
+define protect(key: SecretKey, context: Bytes, plaintext: Bytes) gives Result<Protected, String> needs Random {
+    keep nonce = std.crypto.random_bytes(12) or give
+    keep ciphertext = std.crypto.encrypt(key, nonce, context, plaintext) or give
+    give ok(Protected(nonce, ciphertext))
+}
+
+define reveal(key: SecretKey, context: Bytes, protected: Protected) gives Result<Bytes, String> {
+    give std.crypto.decrypt(key, protected.nonce, context, protected.ciphertext)
+}
+
+// A project calling protect grants Random in niv.toml. Context can bind the
+// ciphertext to a record, tenant, or protocol without being encrypted.

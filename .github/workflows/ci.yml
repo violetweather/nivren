@@ -69,3 +69,29 @@ jobs:
       - run: cargo bench --bench performance --locked
         env:
           NIVREN_BENCH_GATE: "1"
+
+  wasm:
+    name: WebAssembly host and guest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: wasm32-wasip1, wasm32-unknown-unknown
+          components: clippy
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: cargo clippy -p nivren-wasm --target wasm32-wasip1 --locked -- -D warnings
+      - run: cargo build -p nivren-wasm --target wasm32-wasip1 --release --locked
+      - run: node tools/test_wasm_host.mjs
+      - run: cargo build -p nivren-wasm --target wasm32-unknown-unknown --release --locked
+      - run: node tools/test_wasm_browser.mjs
+
+  container:
+    name: OCI container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build --tag nivren-ci --file containers/Dockerfile .
+      - run: docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m nivren-ci version

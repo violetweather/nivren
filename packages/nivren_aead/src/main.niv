@@ -1,0 +1,29 @@
+shape Sealed {
+    nonce: Bytes,
+    body: Bytes,
+}
+
+define import_key(bytes: Bytes) gives Result<SecretKey, String> {
+    give std.crypto.key_import(bytes)
+}
+
+define generate_key() gives Result<SecretKey, String> needs Random {
+    give std.crypto.key_generate()
+}
+
+define seal(key: SecretKey, context: Bytes, plaintext: Bytes) gives Result<Sealed, String> needs Random {
+    keep nonce = std.crypto.random_bytes(12) or give
+    keep body = std.crypto.encrypt(key, nonce, context, plaintext) or give
+    give ok(Sealed(nonce, body))
+}
+
+define seal_with_nonce(key: SecretKey, nonce: Bytes, context: Bytes, plaintext: Bytes) gives Result<Sealed, String> {
+    keep body = std.crypto.encrypt(key, nonce, context, plaintext) or give
+    give ok(Sealed(nonce, body))
+}
+
+define unseal(key: SecretKey, context: Bytes, sealed: Sealed) gives Result<Bytes, String> {
+    give std.crypto.decrypt(key, sealed.nonce, context, sealed.body)
+}
+
+expose { Sealed, import_key, generate_key, seal, seal_with_nonce, unseal }

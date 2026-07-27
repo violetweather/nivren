@@ -1,23 +1,20 @@
-# Nivren Bytecode 1
+# Nivren Bytecode 2
 
-Nivren 0.5 compiles checked source into versioned stack bytecode. The VM never executes a decoded bundle until structural and control-flow verification succeeds.
+`niv sourcemap <source|project|bundle> <output.json>` exports the stable `org.nivren.sourcemap.v1` schema. It records bytecode version, source identity, and every top-level or nested instruction path with its one-based source line/column and stable operation name. Debuggers, crash processors, coverage viewers, and deployment systems can consume this JSON without linking compiler internals.
 
-## Bundle envelope
+Edition 3 compiles checked source into portable stack bytecode version 5. The normative format is `spec/BYTECODE-5.md`; earlier versions remain documented as pre-freeze history. Version 5 embeds canonical shape schemas, payload-choice metadata, and coherent protocol declaration/adoption dispatch tables.
 
-A bundle begins with the four ASCII bytes `NIVB`, followed by a little-endian bytecode chunk. Every chunk contains:
+A `.nivb` bundle begins with ASCII `NIVB`, followed by a bounded little-endian chunk. Every nested function, match arm, iterator, module, and `using` body is its own recursively verified chunk. The decoder rejects unsupported versions, unknown tags, invalid UTF-8, oversized counts, excessive nesting, truncation, and trailing data.
 
-1. a little-endian 16-bit bytecode version;
-2. a little-endian 32-bit instruction count;
-3. source line and column metadata plus an encoded operation for each instruction.
+The verifier checks operands, jump targets, stack depth, lexical-scope depth, control-flow joins, nested chunks, and exit values before execution. Bytecode remains subject to runtime type checks, capability grants, instruction budgets, call-depth limits, deterministic cleanup, and I/O bounds.
 
-Strings are UTF-8 prefixed by a little-endian 32-bit byte length. Nested functions, match arms, iterators, and modules contain recursively encoded chunks. Decoder limits cap individual counts and nesting depth, reject integer overflow and truncation, and reject trailing bytes.
+Use:
 
-## Verification
+```text
+niv build .
+niv check target/app.nivb
+niv disasm target/app.nivb
+niv run target/app.nivb
+```
 
-The verifier rejects unsupported versions, unknown or invalid operands, out-of-range jumps, stack underflow, scope underflow, unclosed scopes, and control-flow joins with inconsistent stack or scope depths. It recursively verifies every nested chunk.
-
-## Runtime and memory
-
-`niv run application.nivb` decodes, verifies, and executes a self-contained bundle. `niv check application.nivb` verifies it without execution, and `niv disasm application.nivb` prints deterministic structured assembly with source positions.
-
-Closure environments are managed by a precise reachability collector behind the runtime collector interface. `NIVREN_GC_STRESS=1` collects after every safe bytecode instruction and is exercised by the conformance suite.
+Bundles contain no host pointers or object layouts. VM, tree interpreter, bundle execution, and native tiers must agree on observable behavior.

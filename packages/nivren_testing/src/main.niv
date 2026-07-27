@@ -1,0 +1,35 @@
+define expect_equal<Value: Comparable>(actual: Value, expected: Value, label: String) gives Result<Null, String> {
+    when actual == expected { give ok(none) }
+    give err(label + ": values differ")
+}
+
+define expect_yes(condition: Bool, label: String) gives Result<Null, String> {
+    when condition { give ok(none) }
+    give err(label + ": expected yes")
+}
+
+define expect_no(condition: Bool, label: String) gives Result<Null, String> {
+    when !condition { give ok(none) }
+    give err(label + ": expected no")
+}
+
+shape Gate { signal: Channel }
+
+define gate() gives Gate needs Channel {
+    give Gate(std.channels.create(1))
+}
+
+define open(value: Gate) gives Result<Null, String> needs Channel {
+    give std.channels.send(value.signal, none, 5.0)
+}
+
+define pass(value: Gate) gives Result<Null, String> needs Channel {
+    keep signal = std.channels.receive(value.signal, 5.0) or give
+    give ok(none)
+}
+
+define checkpoint(events: Channel, label: String) gives Result<Null, String> needs Channel {
+    give std.channels.send(events, label, 5.0)
+}
+
+expose { Gate, expect_equal, expect_yes, expect_no, gate, open, pass, checkpoint }

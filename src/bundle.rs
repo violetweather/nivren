@@ -113,12 +113,21 @@ impl Writer {
             Op::DefineRecord { name, fields } => {
                 self.u8(19);
                 self.string(name)?;
-                self.strings(fields)?;
+                self.len(fields.len())?;
+                for (field, schema) in fields {
+                    self.string(field)?;
+                    self.string(schema)?;
+                }
             }
-            Op::DefineEnum { name, variants } => {
+            Op::DefineEnum {
+                name,
+                variants,
+                payload_variants,
+            } => {
                 self.u8(20);
                 self.string(name)?;
                 self.strings(variants)?;
+                self.strings(payload_variants)?;
             }
             Op::Match(arms) => {
                 self.u8(21);
@@ -141,6 +150,31 @@ impl Writer {
                 self.u8(23);
                 self.string(name)?;
                 self.chunk(body)?;
+            }
+            Op::Using { name, body } => {
+                self.u8(24);
+                self.string(name)?;
+                self.chunk(body)?;
+            }
+            Op::Propagate => self.u8(25),
+            Op::DefineProtocol { name, members } => {
+                self.u8(26);
+                self.string(name)?;
+                self.strings(members)?;
+            }
+            Op::AdoptProtocol {
+                protocol,
+                type_name,
+                mappings,
+            } => {
+                self.u8(27);
+                self.string(protocol)?;
+                self.string(type_name)?;
+                self.len(mappings.len())?;
+                for (member, implementation) in mappings {
+                    self.string(member)?;
+                    self.string(implementation)?;
+                }
             }
         }
         Ok(())
@@ -286,11 +320,19 @@ impl Reader<'_> {
             18 => Op::Return,
             19 => Op::DefineRecord {
                 name: self.string()?,
-                fields: self.strings()?,
+                fields: {
+                    let count = self.count()?;
+                    let mut fields = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        fields.push((self.string()?, self.string()?));
+                    }
+                    fields
+                },
             },
             20 => Op::DefineEnum {
                 name: self.string()?,
                 variants: self.strings()?,
+                payload_variants: self.strings()?,
             },
             21 => {
                 let count = self.count()?;
@@ -308,6 +350,27 @@ impl Reader<'_> {
             23 => Op::Iterate {
                 name: self.string()?,
                 body: self.chunk(depth + 1)?,
+            },
+            24 => Op::Using {
+                name: self.string()?,
+                body: self.chunk(depth + 1)?,
+            },
+            25 => Op::Propagate,
+            26 => Op::DefineProtocol {
+                name: self.string()?,
+                members: self.strings()?,
+            },
+            27 => Op::AdoptProtocol {
+                protocol: self.string()?,
+                type_name: self.string()?,
+                mappings: {
+                    let count = self.count()?;
+                    let mut mappings = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        mappings.push((self.string()?, self.string()?));
+                    }
+                    mappings
+                },
             },
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };

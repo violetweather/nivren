@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nivren browser host</title>
+  </head>
+  <body>
+    <label for="source">Nivren source</label>
+    <textarea id="source" rows="12">define double(value: Int) gives Int { give value * 2 }
+double(21)</textarea>
+    <button id="run" type="button">Run</button>
+    <pre id="result" aria-live="polite"></pre>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

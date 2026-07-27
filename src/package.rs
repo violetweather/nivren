@@ -30,7 +30,7 @@ impl Package {
     pub fn build(manifest: &Manifest) -> Result<Self, NivError> {
         let mut files = BTreeMap::new();
         collect_sources(&manifest.root, &manifest.root, &mut files)?;
-        let manifest_source = fs::read(manifest.root.join(MANIFEST_NAME))
+        let manifest_source = crate::source_io::read(manifest.root.join(MANIFEST_NAME))
             .map_err(|error| package_error(format!("cannot read manifest: {error}")))?;
         files.insert(MANIFEST_NAME.into(), manifest_source);
         files.insert(
@@ -249,6 +249,87 @@ pub fn fetch(name: &str, version: &str, registry: &Path) -> Result<Vec<u8>, NivE
         return Err(package_error("registry artifact identity mismatch"));
     }
     Ok(bytes)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SearchResult {
+    pub name: String,
+    pub versions: Vec<String>,
+}
+
+pub fn search(query: &str, registry: &Path) -> Result<Vec<SearchResult>, NivError> {
+    if query.len() > 64
+        || !query
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(package_error(
+            "registry search must use at most 64 ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    let index = registry.join("v1/index");
+    let entries = match fs::read_dir(&index) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(package_error(format!("cannot search registry: {error}"))),
+    };
+    let query = query.to_ascii_lowercase();
+    let mut results = vec![];
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| package_error(format!("cannot search registry: {error}")))?;
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| package_error(format!("cannot inspect registry index: {error}")))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().contains(&query) {
+            continue;
+        }
+        let mut versions = vec![];
+        for version in fs::read_dir(entry.path())
+            .map_err(|error| package_error(format!("cannot read registry index: {error}")))?
+        {
+            let version = version
+                .map_err(|error| package_error(format!("cannot read registry index: {error}")))?;
+            let path = version.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            {
+                if let Some(version) = path.file_stem().and_then(|value| value.to_str()) {
+                    if validate_identity("search-result", version).is_ok() {
+                        versions.push(version.to_string());
+                    }
+                }
+            }
+        }
+        versions.sort_by_key(|version| std::cmp::Reverse(version_parts(version)));
+        if !versions.is_empty() {
+            results.push(SearchResult { name, versions });
+        }
+    }
+    results.sort_by(|left, right| left.name.cmp(&right.name));
+    results.truncate(100);
+    Ok(results)
+}
+
+fn version_parts(version: &str) -> (u64, u64, u64) {
+    let mut parts = version.split('.').map(|part| part.parse().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usize, NivError> {
@@ -602,7 +683,7 @@ fn collect_sources(
                 .ok_or_else(|| package_error("package path is not UTF-8"))?
                 .replace(std::path::MAIN_SEPARATOR, "/");
             validate_path(&path)?;
-            let contents = fs::read(&child)
+            let contents = crate::source_io::read(&child)
                 .map_err(|error| package_error(format!("cannot read source: {error}")))?;
             files.insert(path, contents);
         }

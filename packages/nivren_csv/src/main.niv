@@ -1,0 +1,27 @@
+define decode(source: String, headers: [String], maximum_rows: Int) gives Result<[Map<String, String>], String> {
+    give std.csv.decode(source, headers, ",", maximum_rows)
+}
+
+define encode(rows: [Map<String, String>], headers: [String]) gives Result<String, String> {
+    give std.csv.encode(rows, headers, ",")
+}
+
+define decode_with(source: String, headers: [String], delimiter: String, maximum_rows: Int) gives Result<[Map<String, String>], String> {
+    give std.csv.decode(source, headers, delimiter, maximum_rows)
+}
+
+define encode_with(rows: [Map<String, String>], headers: [String], delimiter: String) gives Result<String, String> {
+    give std.csv.encode(rows, headers, delimiter)
+}
+
+define read(path: String, headers: [String], maximum_rows: Int) gives Result<[Map<String, String>], String> needs FileRead {
+    keep source = std.files.read(path) or give
+    give decode(source, headers, maximum_rows)
+}
+
+define write(path: String, rows: [Map<String, String>], headers: [String]) gives Result<Null, String> needs FileWrite {
+    keep source = encode(rows, headers) or give
+    give std.files.write(path, source)
+}
+
+expose { decode, encode, decode_with, encode_with, read, write }

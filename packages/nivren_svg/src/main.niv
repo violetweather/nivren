@@ -1,0 +1,54 @@
+shape Canvas { width: Int, height: Int, elements: [String] }
+
+define join(parts: [String]) gives Result<String, String> {
+    change value = ""
+    each part within parts { value = std.text.concat(value, part) or give }
+    give ok(value)
+}
+
+define escape(value: String) gives Result<String, String> {
+    when len(value) > 1048576 { give err("SVG text exceeds 1 MiB") }
+    change output = ""
+    each character within value {
+        change escaped = character
+        when character == "&" { escaped = "&amp;" }
+        when character == "<" { escaped = "&lt;" }
+        when character == ">" { escaped = "&gt;" }
+        when character == "\"" { escaped = "&quot;" }
+        output = std.text.concat(output, escaped) or give
+    }
+    give ok(output)
+}
+
+define canvas(width: Int, height: Int) gives Result<Canvas, String> {
+    when width <= 0 or height <= 0 or width > 32768 or height > 32768 { give err("SVG dimensions must be 1 through 32768") }
+    give ok(Canvas(width, height, []))
+}
+
+define add(value: Canvas, element: String) gives Result<Canvas, String> {
+    when len(value.elements) >= 100000 { give err("SVG exceeds 100000 elements") }
+    when len(element) > 1048576 { give err("SVG element exceeds 1 MiB") }
+    give ok(Canvas(value.width, value.height, append(value.elements, element)))
+}
+
+define rect(value: Canvas, x: Int, y: Int, width: Int, height: Int, fill: String) gives Result<Canvas, String> {
+    when width < 0 or height < 0 { give err("rectangle dimensions must not be negative") }
+    keep color = escape(fill) or give
+    keep element = join(["<rect x=\"", std.int.format(x), "\" y=\"", std.int.format(y), "\" width=\"", std.int.format(width), "\" height=\"", std.int.format(height), "\" fill=\"", color, "\"/>"]) or give
+    give add(value, element)
+}
+
+define text(value: Canvas, x: Int, y: Int, content: String, fill: String) gives Result<Canvas, String> {
+    keep safe_content = escape(content) or give
+    keep color = escape(fill) or give
+    keep element = join(["<text x=\"", std.int.format(x), "\" y=\"", std.int.format(y), "\" fill=\"", color, "\">", safe_content, "</text>"]) or give
+    give add(value, element)
+}
+
+define render(value: Canvas) gives Result<String, String> {
+    change output = join(["<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"", std.int.format(value.width), "\" height=\"", std.int.format(value.height), "\" viewBox=\"0 0 ", std.int.format(value.width), " ", std.int.format(value.height), "\">"]) or give
+    each element within value.elements { output = std.text.concat(output, element) or give }
+    give std.text.concat(output, "</svg>")
+}
+
+expose { Canvas, canvas, add, rect, text, render }

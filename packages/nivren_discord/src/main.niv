@@ -1,0 +1,25 @@
+shape Message { content: String }
+
+define message_body(content: String) gives Result<String, String> {
+    give std.json.stringify(Message(content))
+}
+
+define bot_headers(token: String) gives Map<String, String> {
+    keep authorization = std.map.single("Authorization", "Bot " + token)
+    give std.map.set(authorization, "Content-Type", "application/json")
+}
+
+define send_message(token: String, channel_id: String, content: String) gives Result<String, String> needs Network {
+    keep body = message_body(content) or give
+    keep response = std.web.request(
+        "POST",
+        "https://discord.com/api/v10/channels/" + channel_id + "/messages",
+        bot_headers(token),
+        body,
+        10.0,
+        1048576
+    ) or give
+    give ok(std.map.get(response, "status") ?? "missing status")
+}
+
+expose { Message, message_body, bot_headers, send_message }

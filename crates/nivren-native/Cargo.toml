@@ -1,0 +1,17 @@
+[package]
+name = "nivren-native"
+version = "0.10.0-beta.6"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Isolated dynamic-library boundary for Nivren"
+repository = "https://github.com/violetweather/nivren"
+
+[dependencies]
+libloading = "0.8"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"

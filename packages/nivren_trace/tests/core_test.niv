@@ -1,0 +1,16 @@
+use "../src/main.niv"
+
+define compatibility() gives Result<Bool, String> {
+    keep value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    keep parsed = main.parse(value) or give
+    assert(main.traceparent(parsed) == ok(value), "W3C traceparent round trip")
+    assert(std.map.get(main.headers(parsed) or give, "traceparent") == value, "trace propagation header")
+    keep attribute = main.otlp_attribute("service.name", "nivren") or give
+    keep span = main.otlp_span(parsed, "request", "100", "250", [attribute]) or give
+    keep encoded = main.encode_otlp_json(span) or give
+    assert(encoded == "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"nivren\"}}],\"endTimeUnixNano\":\"250\",\"flags\":1,\"name\":\"request\",\"spanId\":\"00f067aa0ba902b7\",\"startTimeUnixNano\":\"100\",\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\"}]}]}]}", "OTLP JSON request")
+    assert(choose main.otlp_span(parsed, "request", "025", "250", []) { Ok(value) => no, Err(problem) => yes }, "canonical timestamps")
+    give ok(yes)
+}
+
+compatibility()

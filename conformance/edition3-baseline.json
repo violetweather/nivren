@@ -1,0 +1,137 @@
+[
+  {
+    "name": "through-pipeline",
+    "source": "define add(value: Int, amount: Int) gives Int { give value + amount } define double(value: Int) gives Int { give value * 2 } show(5 through add(3) through double)",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "16\n"
+  },
+  {
+    "name": "generic-number",
+    "source": "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } show(add(20, 22))",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "42\n"
+  },
+  {
+    "name": "generic-constraint-rejected",
+    "source": "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } add(\"a\", \"b\")",
+    "arguments": ["check", "{source}"],
+    "status": 65,
+    "stderr_contains": "does not satisfy Number"
+  },
+  {
+    "name": "or-give-success",
+    "source": "define source() gives Result<Int, String> { give ok(41) } define answer() gives Result<Int, String> { keep value = source() or give give ok(value + 1) } show(answer())",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "Ok(42)\n"
+  },
+  {
+    "name": "or-give-failure",
+    "source": "define source() gives Result<Int, String> { give err(\"blocked\") } define answer() gives Result<Int, String> { keep value = source() or give give ok(value + 1) } show(answer())",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "Err(blocked)\n"
+  },
+  {
+    "name": "missing-needs",
+    "source": "define load(path: String) gives Result<String, String> { give std.files.read(path) }",
+    "arguments": ["check", "{source}"],
+    "status": 65,
+    "stderr_contains": "needs FileRead"
+  },
+  {
+    "name": "runtime-capability-denied",
+    "files": {
+      "niv.toml": "[package]\nname = \"denied\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n",
+      "src/main.niv": "show(std.files.exists(\"missing\"))"
+    },
+    "arguments": ["run", "{project}"],
+    "status": 70,
+    "stderr_contains": "does not allow FileRead"
+  },
+  {
+    "name": "runtime-capability-allowed",
+    "files": {
+      "niv.toml": "[package]\nname = \"allowed\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nFileRead = \"allow\"\n",
+      "src/main.niv": "show(std.files.exists(\"definitely-missing\"))"
+    },
+    "arguments": ["run", "{project}"],
+    "status": 0,
+    "stdout": "no\n"
+  },
+  {
+    "name": "structured-together",
+    "source": "define one() gives Int { give 1 } define two() gives Int { give 2 } keep joined = together [start one, start two] show(choose joined { Ok(values) => values[0] + values[1], Err(problem) => 0 })",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "3\n"
+  },
+  {
+    "name": "bytes-and-persistent-map",
+    "source": "keep data: Bytes = std.bytes.from_string(\"Nivren\") keep map: Map<String, Int> = std.map.single(\"size\", std.bytes.length(data)) show(std.map.get(map, \"size\") ?? 0)",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "6\n"
+  },
+  {
+    "name": "instruction-limit",
+    "files": {
+      "niv.toml": "[package]\nname = \"limited\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[limits]\ninstructions = \"100\"\n",
+      "src/main.niv": "repeat yes { none }"
+    },
+    "arguments": ["run", "{project}"],
+    "status": 70,
+    "stderr_contains": "instruction limit exceeded"
+  },
+  {
+    "name": "memory-limit",
+    "files": {
+      "niv.toml": "[package]\nname = \"memory-limited\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[limits]\nmemory_bytes = \"16\"\n",
+      "src/main.niv": "\"this value is intentionally larger than sixteen bytes\""
+    },
+    "arguments": ["run", "{project}"],
+    "status": 70,
+    "stderr_contains": "memory limit exceeded"
+  },
+  {
+    "name": "json-value-roundtrip",
+    "source": "keep parsed = std.json.parse(\"{\\\"edition\\\":3}\") show(choose parsed { Ok(value) => std.json.stringify(value), Err(problem) => err(problem) })",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "Ok({\"edition\":3})\n"
+  },
+  {
+    "name": "shape-derived-json",
+    "source": "choice Role { Admin, Member } shape User { name: String, role: Role, score: U8 } keep decoded = std.json.decode(User, \"{\\\"name\\\":\\\"Mira\\\",\\\"role\\\":\\\"Admin\\\",\\\"score\\\":255}\") show(choose decoded { Ok(user) => user.name, Err(problem) => problem })",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "Mira\n"
+  },
+  {
+    "name": "bounded-typed-json-stream",
+    "files": {
+      "niv.toml": "[package]\nname = \"streamed\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nFileRead = \"allow\"\n",
+      "src/main.niv": "shape Event { id: Int } define load() gives Result<Int, String> needs FileRead { keep opened = std.files.open_read(\"events.ndjson\") or give using file = opened { keep event = std.json.read_next_as(Event, file, 64) or give give ok((event ?? Event(0)).id) } } show(load())",
+      "events.ndjson": "{\"id\":42}\n"
+    },
+    "arguments": ["run", "{project}"],
+    "status": 0,
+    "stdout": "Ok(42)\n"
+  },
+  {
+    "name": "native-host-is-explicit",
+    "source": "show(std.host.invoke(\"example\", \"{}\"))",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "Err(no native host callback is installed)\n"
+  },
+  {
+    "name": "empty-web-headers",
+    "source": "show(std.map.length(std.web.headers()))",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "0\n"
+  }
+]

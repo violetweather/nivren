@@ -1,0 +1,8 @@
+[package]
+name = "nivren_testing"
+version = "1.0.0"
+entry = "src/main.niv"
+
+[capabilities]
+Task = "allow"
+Channel = "allow"

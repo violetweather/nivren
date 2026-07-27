@@ -1,0 +1,5 @@
+choice Role { Admin, Member }
+shape Address { city: String, postal: U32 }
+shape User { name: String, role: Role, address: Address?, tags: [String] }
+
+expose { Role, Address, User }

@@ -1,0 +1,23 @@
+define count_twice() gives Result<Int, String> needs Task {
+    keep counter = std.locks.create(0)
+
+    define increment() gives Result<Null, String> needs Task {
+        keep acquired = std.locks.acquire(counter, 2.0) or give
+        using guard = acquired {
+            keep current = std.locks.read(guard) or give
+            keep written = std.locks.write(guard, current + 1) or give
+            give ok(none)
+        }
+    }
+
+    keep completed = together [start increment, start increment] or give
+    keep acquired = std.locks.acquire(counter, 2.0) or give
+    using guard = acquired {
+        give std.locks.read(guard)
+    }
+}
+
+choose count_twice() {
+    Ok(value) => value,
+    Err(problem) => -1
+}

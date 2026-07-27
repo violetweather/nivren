@@ -1,0 +1,12 @@
+use "../src/main.niv"
+
+define works() gives Result<Bool, String> {
+    keep source = main.Audio(48000, 2, [0, 32767, -32768, 42])
+    keep encoded = main.encode_pcm16(source) or give
+    assert(std.bytes.length(encoded) == 52, "WAV byte length")
+    keep decoded = main.decode_pcm16(encoded) or give
+    assert(decoded == source, "PCM16 round trip")
+    give ok(yes)
+}
+
+works()

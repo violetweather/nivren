@@ -1,0 +1,20 @@
+use "../src/main.niv"
+
+keep encoded = main.hash_password_with_salt(
+    "correct horse battery staple",
+    std.bytes.from_string("0123456789abcdef")
+)
+keep valid = choose encoded {
+    Ok(hash) => main.verify_password("correct horse battery staple", hash),
+    Err(problem) => err(problem),
+}
+assert(valid == ok(yes), "matching password")
+
+keep invalid = choose encoded {
+    Ok(hash) => main.verify_password("wrong", hash),
+    Err(problem) => err(problem),
+}
+assert(invalid == ok(no), "wrong password")
+
+keep key = main.random_key(32)
+assert(choose key { Ok(bytes) => std.bytes.length(bytes) == 32, Err(problem) => no }, "secure key width")

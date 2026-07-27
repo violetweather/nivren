@@ -1,0 +1,20 @@
+define fingerprint(text: String) gives Result<Bytes, String> {
+    give std.crypto.sha256(std.bytes.from_string(text))
+}
+
+define sign(key: String, message: String) gives Result<Bytes, String> {
+    give std.crypto.hmac_sha256(
+        std.bytes.from_string(key),
+        std.bytes.from_string(message)
+    )
+}
+
+define verify(key: String, message: String, tag: Bytes) gives Result<Bool, String> {
+    give std.crypto.verify_hmac_sha256(
+        std.bytes.from_string(key),
+        std.bytes.from_string(message),
+        tag
+    )
+}
+
+expose { fingerprint, sign, verify }

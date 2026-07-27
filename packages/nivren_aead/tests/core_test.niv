@@ -1,0 +1,19 @@
+use "../src/main.niv"
+
+define verify() gives Result<Bool, String> {
+    keep key = main.import_key(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
+    keep nonce = std.bytes.from_string("unique-nonce")
+    keep context = std.bytes.from_string("record:42")
+    keep message = std.bytes.from_string("protected")
+    keep sealed = main.seal_with_nonce(key, nonce, context, message) or give
+    keep opened = main.unseal(key, context, sealed) or give
+    assert(opened == message, "authenticated encryption round trip")
+
+    keep rejected = choose main.unseal(key, std.bytes.from_string("record:43"), sealed) {
+        Ok(value) => no,
+        Err(problem) => yes,
+    }
+    give ok(rejected)
+}
+
+verify()

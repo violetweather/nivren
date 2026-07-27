@@ -46,22 +46,34 @@ Status: all listed features are implemented, documented, and verified, including
 
 Status: the native JIT tier, concurrent generational closure collection, benchmark/performance gates, signed provenance, trusted-publisher authorization, advisories, incident controls, and hostable bounded registry service are implemented and verified.
 
-## 0.10 — Edition 2 compatibility beta
+## 0.10 — Edition 2 compatibility beta (historical baseline)
 
 - Normative language/bytecode/package specifications and independent conformance suite
 - Six tier-1 OS/architecture combinations, reproducible signed artifacts, and design-partner production pilots
 - Six-month source-compatibility freeze
 
-Status: the Edition 2 language, bytecode, package, and standard-library specifications; 27-case black-box conformance corpus; exact transitive dependency resolver; strict single-syntax parser; six-platform CI definition; deterministic self-contained release archives; reproducible attested release workflow; fuzz/security schedules; and machine-enforced freeze/pilot gate are implemented. Completion still requires an Edition 2 release to repeat the six native builds and three real 30-day production pilots; the compatibility clock ends 2027-01-26.
+Status: Edition 2 remains a tested historical baseline. Its old freeze no longer qualifies Nivren for 1.0 because Edition 3 intentionally redesigns the pre-user language surface.
+
+## 0.11 — Edition 3 capability program (in progress)
+
+- Nivren identity: `needs`, `or give`, `through`, structured-concurrency words, `using`, preferred namespaces, and `niv new/add/dev/test/ship`
+- Reusable core: inferred generics, sealed protocol constraints, higher-order list algorithms, bytes, and persistent maps/sets
+- Runtime policy: scoped path/host grants, shared instruction and memory budgets, call-depth limits, scoped file/listener/stream cleanup, and policy-aware run/test/debug/profile/coverage/standalone apps
+- Platform foundation: bounded HTTP/TLS clients and servers, TCP listeners, structured JSON, stable compiler/C APIs, owned native host callbacks, standalone executables, shared/static libraries, and SPDX-bearing release archives
+- Normative Edition 3 language/standard-library/bytecode drafts and external-process conformance vectors
+- Every capability, domain, ecosystem, target, tooling, distribution, and hardening row below completed to the acceptance rule
+
+Status: these foundations are implemented locally and tested. `docs/CAPABILITY_AUDIT.md` remains authoritative for work such as the production event loop/WebSockets, deeper generic protocols/reflection/data types, additional targets/domains, ecosystem breadth, external audits, and pilots. No GitHub or website publication occurs until the entire program and final validation matrix pass.
 
 ## 1.0 — Stable production release
 
 - All conformance, security, performance, platform, documentation, registry, and production-pilot gates pass
+- Every row in `docs/CAPABILITY_AUDIT.md` has complete executable evidence and no required-completion item remains
 - Strict SemVer and editions begin; first annual LTS receives three years of fixes
 
-## Beyond 1.0 — No artificial ceiling
+## Capability program — No artificial ceiling
 
-These are long-term directions, not promises for the 1.0 compatibility surface. New syntax must earn its place through prototypes, user testing, specification review, and an Edition boundary.
+These capabilities are required by the current no-artificial-ceiling program. Syntax still must earn its place through prototypes, user testing, specification review, and an Edition boundary; specialized capabilities should remain packages when core syntax would weaken clarity.
 
 ### Capability foundation
 
@@ -87,11 +99,11 @@ Capability coverage is not complete merely because a low-level primitive exists.
 ### Recognizable Nivren identity
 
 - Keep one intent-first vocabulary: `keep`/`change`, `define`/`give`, `when`/`otherwise`, `each`/`within`, and `shape`/`choice`/`choose`, without accumulating synonyms
-- Explore explicit capability declarations such as `needs FileRead` so a function's effects are visible, checkable, and suitable for sandbox policy
-- Explore concise typed failure propagation while preserving `choose` for explicit, exhaustive handling
-- Prototype a readable word-based pipeline such as `through` only if it improves real programs without weakening precedence or tooling
-- Give structured concurrency a small, scoped vocabulary such as `start`, `wait`, `together`, and `race`; spawned work must not silently outlive its owner
-- Make the project path obvious with consistent commands such as `niv new`, `niv add`, `niv dev`, `niv test`, and `niv ship`, one standard layout, and minimal configuration
+- Keep checked capability declarations with `needs FileRead` so effects are visible, transitive, and enforceable by project policy
+- Keep typed `or give` failure propagation while preserving `choose` for explicit, exhaustive handling
+- Keep the readable `through` pipeline only while it improves real programs without weakening precedence or tooling
+- Keep `start`, `wait`, `together`, and `race` scoped; spawned work must not silently outlive its owner
+- Keep `niv new`, `niv add`, `niv dev`, `niv test`, and `niv ship` consistent around one standard layout and minimal configuration
 - Give diagnostics a distinctive intent-first voice: explain what the program attempted, show the relevant types or values, and suggest a concrete correction
 - Maintain short, stable, batteries-included namespaces such as `web`, `json`, `files`, `time`, `tasks`, and `process`, leaving specialized integrations to packages
 - Enforce a punctuation budget: prefer familiar structure and meaningful words over cryptic operators or ornamental syntax

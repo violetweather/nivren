@@ -1,0 +1,61 @@
+shape Authorization { url: String, state: String, nonce: String, verifier: String }
+shape CoreClaims { issuer: String, audience: String, subject: String, expires_at: Int, issued_at: Int, nonce: String }
+
+define join(left: String, right: String) gives Result<String, String> {
+    give std.text.concat(left, right)
+}
+
+define parameter(name: String, value: String) gives Result<String, String> {
+    keep encoded = std.web.encode_component(value) or give
+    keep prefix = join(name, "=") or give
+    give join(prefix, encoded)
+}
+
+define pkce_challenge(verifier: String) gives Result<String, String> {
+    when len(verifier) < 43 or len(verifier) > 128 { give err("PKCE verifier must contain 43 through 128 characters") }
+    keep encoded = std.web.encode_component(verifier) or give
+    when encoded != verifier { give err("PKCE verifier must use only RFC 3986 unreserved characters") }
+    keep digest = std.crypto.sha256(std.bytes.from_string(verifier)) or give
+    give std.encoding.base64url(digest)
+}
+
+define authorization_url(endpoint: String, client_id: String, redirect_uri: String, scope: String, state: String, nonce: String, verifier: String) gives Result<Authorization, String> {
+    when !std.text.starts_with(endpoint, "https://") { give err("OIDC authorization endpoint must use HTTPS") }
+    when len(std.text.split(endpoint, "?", 2) or give) != 1 { give err("OIDC authorization endpoint must not contain a query") }
+    when client_id == "" or redirect_uri == "" or scope == "" { give err("OIDC client, redirect URI, and scope must not be empty") }
+    when len(state) < 16 or len(state) > 256 or len(nonce) < 16 or len(nonce) > 256 { give err("OIDC state and nonce must each contain 16 through 256 characters") }
+    keep challenge = pkce_challenge(verifier) or give
+    change url = join(endpoint, "?response_type=code") or give
+    url = join(url, "&") or give
+    url = join(url, parameter("client_id", client_id) or give) or give
+    url = join(url, "&") or give
+    url = join(url, parameter("redirect_uri", redirect_uri) or give) or give
+    url = join(url, "&") or give
+    url = join(url, parameter("scope", scope) or give) or give
+    url = join(url, "&") or give
+    url = join(url, parameter("state", state) or give) or give
+    url = join(url, "&") or give
+    url = join(url, parameter("nonce", nonce) or give) or give
+    url = join(url, "&") or give
+    url = join(url, parameter("code_challenge", challenge) or give) or give
+    url = join(url, "&code_challenge_method=S256") or give
+    give ok(Authorization(url, state, nonce, verifier))
+}
+
+define validate_claims(value: CoreClaims, expected_issuer: String, expected_audience: String, expected_nonce: String, now: Int, clock_skew: Int) gives Result<CoreClaims, String> {
+    when clock_skew < 0 or clock_skew > 300 { give err("OIDC clock skew must be 0 through 300 seconds") }
+    when value.issuer != expected_issuer { give err("OIDC issuer does not match") }
+    when value.audience != expected_audience { give err("OIDC audience does not match") }
+    when value.nonce != expected_nonce { give err("OIDC nonce does not match") }
+    when value.subject == "" { give err("OIDC subject must not be empty") }
+    when value.expires_at <= now - clock_skew { give err("OIDC token has expired") }
+    when value.issued_at > now + clock_skew { give err("OIDC token was issued in the future") }
+    give ok(value)
+}
+
+define validate_id_claims(payload_json: String, expected_issuer: String, expected_audience: String, expected_nonce: String, now: Int, clock_skew: Int) gives Result<CoreClaims, String> {
+    keep value = std.json.decode(CoreClaims, payload_json) or give
+    give validate_claims(value, expected_issuer, expected_audience, expected_nonce, now, clock_skew)
+}
+
+expose { Authorization, CoreClaims, pkce_challenge, authorization_url, validate_claims, validate_id_claims }

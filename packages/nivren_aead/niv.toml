@@ -1,0 +1,7 @@
+[package]
+name = "nivren_aead"
+version = "1.0.0"
+entry = "src/main.niv"
+
+[capabilities]
+Random = "allow"

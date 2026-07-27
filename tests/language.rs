@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 fn eval(source: &str) -> Value {
@@ -38,6 +39,690 @@ fn arithmetic_and_precedence() {
 }
 
 #[test]
+fn through_pipelines_values_into_readable_stages() {
+    assert_eq!(
+        eval(
+            "define add(value: Int, amount: Int) gives Int { give value + amount }\n\
+             define double(value: Int) gives Int { give value * 2 }\n\
+             5 through add(3) through double"
+        ),
+        Value::Int(16)
+    );
+}
+
+#[test]
+fn public_edition_three_examples_all_type_check() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    for name in [
+        "api_client.niv",
+        "async_files.niv",
+        "discord_bot.niv",
+        "files_and_json.niv",
+        "fixed_width_numbers.niv",
+        "getting_started.niv",
+        "hello.niv",
+        "json_stream.niv",
+        "line_stream.niv",
+        "iterators.niv",
+        "native_host.niv",
+        "async_host.niv",
+        "atomics.niv",
+        "authenticated_encryption.niv",
+        "csv_tables.niv",
+        "signed_token.niv",
+        "native_library.niv",
+        "native_schema.niv",
+        "network_reactor.niv",
+        "tcp_lines.niv",
+        "numbers.niv",
+        "passwords.niv",
+        "scoped_lock.niv",
+        "secure_websocket.niv",
+        "secure_websocket_server.niv",
+        "time_zones.niv",
+        "transactions.niv",
+        "web_server.niv",
+        "websocket_echo.niv",
+    ] {
+        let path = root.join(name);
+        let source = fs::read_to_string(&path).unwrap();
+        nivren::check(&source)
+            .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
+    }
+}
+
+#[test]
+fn intent_concurrency_starts_waits_joins_and_races_scoped_tasks() {
+    let source = r#"
+define one() gives Int { give 1 }
+define two() gives Int { give 2 }
+keep joined = together [start one, start two]
+keep first = race [start one, start two]
+choose joined {
+    Ok(values) => choose first {
+        Ok(value) => values[0] + values[1] + value,
+        Err(problem) => 0,
+    },
+    Err(problem) => 0
+}
+"#;
+    let tree = eval_tree(source);
+    let vm = eval_vm(source);
+    assert!(matches!(tree, Value::Int(4) | Value::Int(5)));
+    assert!(matches!(vm, Value::Int(4) | Value::Int(5)));
+}
+
+#[test]
+fn scoped_locks_serialize_shared_updates_in_both_engines() {
+    let source = r#"
+define count() gives Result<Int, String> needs Task {
+    keep counter = std.locks.create(0)
+    define increment() gives Result<Null, String> needs Task {
+        keep acquired = std.locks.acquire(counter, 2.0) or give
+        using guard = acquired {
+            keep current = std.locks.read(guard) or give
+            keep written = std.locks.write(guard, current + 1) or give
+            give ok(none)
+        }
+    }
+    keep completed = together [start increment, start increment] or give
+    keep acquired = std.locks.acquire(counter, 2.0) or give
+    using guard = acquired {
+        give std.locks.read(guard)
+    }
+}
+
+choose count() { Ok(value) => value, Err(problem) => -1 }
+"#;
+    assert_eq!(eval_tree(source), Value::Int(2));
+    assert_eq!(eval_vm(source), Value::Int(2));
+
+    let closed = r#"
+define inspect() gives Result<Bool, String> needs Task {
+    keep lock = std.locks.create("safe")
+    keep guard = std.locks.acquire(lock, 1.0) or give
+    keep first = std.locks.close(guard) or give
+    keep second = std.locks.close(guard) or give
+    give choose std.locks.read(guard) { Ok(value) => ok(no), Err(problem) => ok(yes) }
+}
+choose inspect() { Ok(value) => value, Err(problem) => no }
+"#;
+    assert_eq!(eval_tree(closed), Value::Bool(true));
+    assert_eq!(eval_vm(closed), Value::Bool(true));
+
+    let timeout = r#"
+define blocked() gives Result<Bool, String> needs Task {
+    keep lock = std.locks.create(1)
+    keep first = std.locks.acquire(lock, 1.0) or give
+    keep second = std.locks.acquire(lock, 0.01)
+    keep closed = std.locks.close(first) or give
+    give choose second { Ok(guard) => ok(no), Err(problem) => ok(yes) }
+}
+choose blocked() { Ok(value) => value, Err(problem) => no }
+"#;
+    assert_eq!(eval_tree(timeout), Value::Bool(true));
+    assert_eq!(eval_vm(timeout), Value::Bool(true));
+}
+
+#[test]
+fn atomic_integers_are_linearizable_transferable_and_checked_in_both_engines() {
+    let source = r#"
+define count() gives Result<Int, String> needs Task {
+    keep counter = std.atomics.create(0)
+    define increment() gives Result<Null, String> {
+        change index = 0
+        repeat index < 250 {
+            keep previous = std.atomics.add(counter, 1) or give
+            index = index + 1
+        }
+        give ok(none)
+    }
+    keep completed = together [start increment, start increment, start increment, start increment] or give
+    give ok(std.atomics.load(counter))
+}
+
+count()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Int(1000)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let operations = r#"
+keep value = std.atomics.create(4)
+keep old = std.atomics.swap(value, 5)
+keep success = std.atomics.compare_exchange(value, 5, 9)
+keep failure = std.atomics.compare_exchange(value, 5, 10)
+choose failure { Ok(previous) => -1, Err(observed) => old + observed + std.atomics.load(value) }
+"#;
+    assert_eq!(eval_tree(operations), Value::Int(22));
+    assert_eq!(eval_vm(operations), Value::Int(22));
+
+    assert_eq!(
+        eval_vm(
+            "keep value = std.atomics.create(9223372036854775807) choose std.atomics.add(value, 1) { Ok(previous) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+    assert!(nivren::check("std.atomics.store(std.atomics.create(0), 1.0)").is_err());
+}
+
+#[test]
+fn transactions_commit_or_rollback_and_close_deterministically() {
+    let commit = r#"
+define update() gives Result<Int, String> {
+    keep original = std.map.single("count", 1)
+    keep transaction: Transaction<String, Int> = std.transactions.begin(original)
+    keep changed = std.transactions.set(transaction, "count", 2) or give
+    keep committed = std.transactions.commit(transaction) or give
+    give ok(std.map.get(committed, "count") ?? 0)
+}
+choose update() { Ok(value) => value, Err(problem) => 0 }
+"#;
+    assert_eq!(eval_tree(commit), Value::Int(2));
+    assert_eq!(eval_vm(commit), Value::Int(2));
+
+    let rollback = r#"
+define update() gives Result<Int, String> {
+    keep original = std.map.single("count", 1)
+    keep transaction = std.transactions.begin(original)
+    keep changed = std.transactions.set(transaction, "count", 9) or give
+    keep restored = std.transactions.rollback(transaction) or give
+    give ok(std.map.get(restored, "count") ?? 0)
+}
+choose update() { Ok(value) => value, Err(problem) => 0 }
+"#;
+    assert_eq!(eval_tree(rollback), Value::Int(1));
+    assert_eq!(eval_vm(rollback), Value::Int(1));
+
+    let scoped = r#"
+define abandon(transaction: Transaction<String, Int>) gives Result<Null, String> {
+    using active = transaction {
+        keep changed = std.transactions.set(active, "count", 7) or give
+        give err("abandoned")
+    }
+}
+keep transaction = std.transactions.begin(std.map.single("count", 1))
+keep abandoned = abandon(transaction)
+keep closed = std.transactions.get(transaction, "count")
+keep first_close = std.transactions.close(transaction)
+keep second_close = std.transactions.close(transaction)
+choose closed { Ok(value) => no, Err(problem) => yes }
+"#;
+    assert_eq!(eval_tree(scoped), Value::Bool(true));
+    assert_eq!(eval_vm(scoped), Value::Bool(true));
+
+    assert!(nivren::check("std.transactions.set(std.transactions.begin(std.map.single(1, \"a\")), \"wrong\", \"b\")").is_err());
+}
+
+#[test]
+fn native_handles_are_opaque_scoped_and_released_once_in_both_engines() {
+    let source = r#"
+define operate() gives Result<String, String> needs Native {
+    keep opened = std.host.open("database", "configuration") or give
+    using handle = opened {
+        give std.host.call(handle, "query", "select 42")
+    }
+}
+
+operate()
+"#;
+
+    fn exercise_dynamic_libraries() {
+        let directory = std::env::temp_dir().join(format!(
+            "nivren-native-library-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("fixture.c");
+        fs::write(
+            &source,
+            "#include <stdint.h>\n#include <stddef.h>\n\
+         #ifdef _WIN32\n#define EXPORT __declspec(dllexport)\n#else\n#define EXPORT\n#endif\n\
+         EXPORT int64_t nivren_add(int64_t left, int64_t right) { return left + right; }\n\
+         EXPORT double nivren_mean(double left, double right) { return (left + right) / 2.0; }\n\
+         EXPORT int64_t nivren_upper(const unsigned char *input, size_t length, unsigned char *output, size_t capacity) { if (capacity < length) return -2; for (size_t i = 0; i < length; i++) output[i] = input[i] >= 'a' && input[i] <= 'z' ? (unsigned char)(input[i] - 32) : input[i]; return (int64_t)length; }\n",
+        )
+        .unwrap();
+        let library = if cfg!(windows) {
+            let library = directory.join("fixture.dll");
+            let output = Command::new("cl")
+                .args(["/nologo", "/LD"])
+                .arg(&source)
+                .arg("/link")
+                .arg(format!("/OUT:{}", library.display()))
+                .current_dir(&directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "could not build native fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            library
+        } else {
+            let library = directory.join(if cfg!(target_os = "macos") {
+                "libfixture.dylib"
+            } else {
+                "libfixture.so"
+            });
+            let mut command = Command::new("cc");
+            if cfg!(target_os = "macos") {
+                command.arg("-dynamiclib");
+            } else {
+                command.args(["-shared", "-fPIC"]);
+            }
+            let output = command
+                .arg(&source)
+                .arg("-o")
+                .arg(&library)
+                .current_dir(&directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "could not build native fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            library
+        };
+        let path = library
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let integer = format!(
+            r#"
+define calculate() gives Result<Int, String> needs Native {{
+    keep opened = std.native.open("{path}") or give
+    using library = opened {{
+        give std.native.call_int(library, "nivren_add", [20, 22])
+    }}
+}}
+choose calculate() {{ Ok(value) => value, Err(problem) => -1 }}
+"#
+        );
+        let float = format!(
+            r#"
+define calculate() gives Result<Float, String> needs Native {{
+    keep opened = std.native.open("{path}") or give
+    using library = opened {{
+        give std.native.call_float(library, "nivren_mean", [1.5, 2.5])
+    }}
+}}
+choose calculate() {{ Ok(value) => value, Err(problem) => -1.0 }}
+"#
+        );
+        let closed = format!(
+            r#"
+define verify() gives Result<Bool, String> needs Native {{
+    keep library = std.native.open("{path}") or give
+    keep closed = std.native.close(library) or give
+    give choose std.native.call_int(library, "nivren_add", [1, 2]) {{
+        Ok(value) => ok(no),
+        Err(problem) => ok(yes),
+    }}
+}}
+choose verify() {{ Ok(value) => value, Err(problem) => no }}
+"#
+        );
+        let buffer = format!(
+            r#"
+define transform() gives Result<String, String> needs Native {{
+    keep opened = std.native.open("{path}") or give
+    using library = opened {{
+        keep output = std.native.call_buffer(library, "nivren_upper", std.bytes.from_string("Nivren"), 64) or give
+        give std.bytes.to_string(output)
+    }}
+}}
+choose transform() {{ Ok(value) => value, Err(problem) => problem }}
+"#
+        );
+        for source in [&integer, &float, &buffer, &closed] {
+            let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+            nivren::typecheck::check(&program).unwrap();
+            let chunk = nivren::bytecode::compile(&program).unwrap();
+            let tree = nivren::runtime::Interpreter::new().run(&program).unwrap();
+            let bytecode = nivren::runtime::Interpreter::new()
+                .run_bytecode(&chunk)
+                .unwrap();
+            assert_eq!(tree, bytecode);
+        }
+        assert_eq!(eval_tree(&integer), Value::Int(42));
+        assert_eq!(eval_tree(&float), Value::Float(2.0));
+        assert_eq!(eval_tree(&buffer), Value::String("NIVREN".into()));
+        assert_eq!(eval_tree(&closed), Value::Bool(true));
+        let program = nivren::parser::parse(nivren::lexer::scan(&integer).unwrap()).unwrap();
+        let allowed = nivren::runtime::Interpreter::new()
+            .with_capability_scopes([(
+                String::from("Native"),
+                format!("path:{}", directory.display()),
+            )])
+            .run(&program)
+            .unwrap();
+        assert_eq!(allowed, Value::Int(42));
+        let denied = nivren::runtime::Interpreter::new()
+            .with_capability_scopes([(
+                String::from("Native"),
+                String::from("path:/definitely/not/the/fixture"),
+            )])
+            .run(&program)
+            .unwrap_err();
+        assert!(denied.message.contains("outside the project grant"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    for bytecode in [false, true] {
+        let events = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let captured = events.clone();
+        let mut interpreter =
+            nivren::runtime::Interpreter::new().with_host_callback(move |operation, request| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((operation.to_string(), request.to_string()));
+                match operation {
+                    "nivren.handle.open:database" => Ok("handle-42".into()),
+                    "nivren.handle.call:query" => Ok("row:42".into()),
+                    "nivren.handle.close" => Ok("closed".into()),
+                    _ => Err("unexpected operation".into()),
+                }
+            });
+        let result = if bytecode {
+            interpreter.run_bytecode(&chunk).unwrap()
+        } else {
+            interpreter.run(&program).unwrap()
+        };
+        assert_eq!(result, Value::Ok(Arc::new(Value::String("row:42".into()))));
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(name, _)| name == "nivren.handle.close")
+                .count(),
+            1
+        );
+        let call = events
+            .iter()
+            .find(|(name, _)| name == "nivren.handle.call:query")
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&call.1).unwrap();
+        assert_eq!(envelope["handle"], "handle-42");
+        assert_eq!(envelope["request"], "select 42");
+    }
+    exercise_dynamic_libraries();
+}
+
+#[test]
+fn native_handle_cleanup_retries_failures_and_survives_stress() {
+    let retry = r#"
+define close_retry() gives Result<Bool, String> needs Native {
+    keep handle = std.host.open("device", "configuration") or give
+    keep first = std.host.close(handle)
+    keep second = std.host.close(handle)
+    give ok(choose first { Ok(value) => no, Err(problem) => choose second { Ok(value) => yes, Err(problem) => no } })
+}
+close_retry()
+"#;
+    let stress = r#"
+define exercise() gives Result<Int, String> needs Native {
+    change index = 0
+    repeat index < 1000 {
+        keep opened = std.host.open("device", "configuration") or give
+        using handle = opened { index = index + 1 }
+    }
+    give ok(index)
+}
+exercise()
+"#;
+    for bytecode in [false, true] {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = attempts.clone();
+        let mut interpreter =
+            nivren::runtime::Interpreter::new().with_host_callback(move |operation, _| {
+                match operation {
+                    "nivren.handle.open:device" => Ok("retry-handle".into()),
+                    "nivren.handle.close"
+                        if captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 =>
+                    {
+                        Err("injected close failure".into())
+                    }
+                    "nivren.handle.close" => Ok("closed".into()),
+                    _ => Err("unexpected operation".into()),
+                }
+            });
+        let program = nivren::parser::parse(nivren::lexer::scan(retry).unwrap()).unwrap();
+        nivren::typecheck::check(&program).unwrap();
+        let result = if bytecode {
+            interpreter
+                .run_bytecode(&nivren::bytecode::compile(&program).unwrap())
+                .unwrap()
+        } else {
+            interpreter.run(&program).unwrap()
+        };
+        assert_eq!(result, Value::Ok(Arc::new(Value::Bool(true))));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = closes.clone();
+        let mut interpreter =
+            nivren::runtime::Interpreter::new().with_host_callback(move |operation, _| {
+                match operation {
+                    "nivren.handle.open:device" => Ok("stress-handle".into()),
+                    "nivren.handle.close" => {
+                        captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok("closed".into())
+                    }
+                    _ => Err("unexpected operation".into()),
+                }
+            });
+        let program = nivren::parser::parse(nivren::lexer::scan(stress).unwrap()).unwrap();
+        nivren::typecheck::check(&program).unwrap();
+        let result = if bytecode {
+            interpreter
+                .run_bytecode(&nivren::bytecode::compile(&program).unwrap())
+                .unwrap()
+        } else {
+            interpreter.run(&program).unwrap()
+        };
+        assert_eq!(result, Value::Ok(Arc::new(Value::Int(1000))));
+        assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1000);
+    }
+}
+
+#[test]
+fn native_host_operations_join_as_bounded_structured_tasks_in_both_engines() {
+    let source = r#"
+define query() gives Result<String, String> needs Native, Task {
+    keep queued = std.host.invoke_async("device.read", "{\"port\":7}") or give
+    give wait queued
+}
+
+query()
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    for bytecode in [false, true] {
+        let mut interpreter =
+            nivren::runtime::Interpreter::new().with_host_callback(|operation, request| {
+                assert_eq!(operation, "device.read");
+                assert_eq!(request, "{\"port\":7}");
+                Ok("sample:42".into())
+            });
+        let value = if bytecode {
+            interpreter.run_bytecode(&chunk).unwrap()
+        } else {
+            interpreter.run(&program).unwrap()
+        };
+        assert_eq!(
+            value,
+            Value::Ok(Arc::new(Value::String("sample:42".into())))
+        );
+    }
+
+    assert!(nivren::check(r#"define missing() { std.host.invoke_async("x", "y") }"#).is_err());
+    let no_host = nivren::run(
+        r#"define missing() gives Result<Task, String> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
+    )
+    .unwrap();
+    assert!(matches!(no_host, Value::Err(_)));
+}
+
+#[test]
+fn datetime_values_preserve_instants_and_iana_zones_in_both_engines() {
+    let source = r#"
+define render() gives Result<String, String> {
+    keep epoch = std.time.from_unix(0, "UTC") or give
+    keep new_york = std.time.in_zone(epoch, "America/New_York") or give
+    keep later = std.time.add_seconds(epoch, 3600) or give
+    assert(later > epoch, "DateTime ordering follows the instant")
+    keep parsed = std.time.parse("1970-01-01T09:00:00+09:00[Asia/Tokyo]") or give
+    assert(parsed == epoch, "equal instants compare equally")
+    assert(std.time.unix(later) == 3600, "Unix conversion preserves seconds")
+    give ok(std.time.format(new_york))
+}
+
+choose render() { Ok(value) => value, Err(problem) => problem }
+"#;
+    let expected = Value::String("1969-12-31T19:00:00-05:00[America/New_York]".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    assert_eq!(
+        eval_vm(
+            "choose std.time.from_unix(0, \"Not/A_Zone\") { Ok(value) => no, Err(problem) => yes }",
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn bigint_and_decimal_arithmetic_is_exact_checked_and_typed() {
+    let source = r#"
+define calculate() gives Result<String, String> {
+    keep huge = std.bigint.parse("1000000000000000000000000000000") or give
+    keep two = std.bigint.from_int(2)
+    keep exact = std.decimal.parse("0.1") or give
+    keep more = std.decimal.parse("0.2") or give
+    keep total = exact + more
+    assert(std.decimal.format(total) == "0.3", "decimal addition stays exact")
+    assert((huge + two) > huge, "BigInt ordering is exact")
+    give ok(std.bigint.format(huge + two))
+}
+
+choose calculate() { Ok(value) => value, Err(problem) => problem }
+"#;
+    let expected = Value::String("1000000000000000000000000000002".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    assert!(
+        nivren::run(
+            "keep value = std.decimal.from_int(1) keep zero = std.decimal.from_int(0) value / zero"
+        )
+        .is_err()
+    );
+    let outside = r#"
+define inspect() gives Result<Bool, String> {
+    keep huge = std.bigint.parse("999999999999999999999999") or give
+    give choose std.bigint.to_int(huge) { Ok(value) => ok(no), Err(problem) => ok(yes) }
+}
+choose inspect() { Ok(value) => value, Err(problem) => no }
+"#;
+    assert_eq!(eval_vm(outside), Value::Bool(true));
+}
+
+#[test]
+fn fixed_width_signed_and_unsigned_numbers_are_distinct_and_checked() {
+    let source = r#"
+define render() gives Result<String, String> {
+    keep first: U8 = std.u8.from_int(250) or give
+    keep second: U8 = std.u8.from_int(5) or give
+    keep maximum: U8 = first + second
+    keep signed: I16 = std.i16.parse("-32000") or give
+    keep zero: I16 = std.i16.from_int(0) or give
+    keep wide: U64 = std.u64.parse("18446744073709551615") or give
+    assert(signed < zero, "signed ordering")
+    assert(choose std.u64.to_int(wide) { Ok(value) => no, Err(problem) => yes }, "U64 conversion is checked")
+    give ok(std.u8.format(maximum) + ":" + std.u64.format(wide))
+}
+choose render() { Ok(value) => value, Err(problem) => problem }
+"#;
+    let expected = Value::String("255:18446744073709551615".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let overflow = r#"
+define overflow() gives Result<U8, String> {
+    keep left = std.u8.from_int(250) or give
+    keep right = std.u8.from_int(6) or give
+    give ok(left + right)
+}
+overflow()
+"#;
+    assert!(nivren::run(overflow).is_err());
+    let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    assert!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&chunk)
+            .is_err()
+    );
+    assert!(nivren::check(
+        "define mixed() gives Result<U8, String> { keep left = std.u8.from_int(1) or give keep right = std.i8.from_int(1) or give give ok(left + right) }"
+    )
+    .is_err());
+    assert!(nivren::check(
+        "define negative() gives Result<U8, String> { keep value = std.u8.from_int(1) or give give ok(-value) }"
+    )
+    .is_err());
+}
+
+#[test]
+fn capability_needs_are_explicit_and_transitive() {
+    let direct = nivren::check(
+        "define load(path: String) gives Result<String, String> { give std.files.read(path) }",
+    )
+    .unwrap_err();
+    assert!(direct[0].message.contains("needs FileRead"));
+
+    nivren::check(
+        "define load(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) }",
+    )
+    .unwrap();
+
+    let transitive = nivren::check(
+        "define load(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) }\n\
+         define config() gives Result<String, String> { give load(\"app.json\") }",
+    )
+    .unwrap_err();
+    assert!(transitive[0].message.contains("needs FileRead"));
+
+    let spawned = nivren::check(
+        "define worker() gives Null needs Channel { give none }\n\
+         define launch() gives Task needs Task { give start worker }",
+    )
+    .unwrap_err();
+    assert!(
+        spawned
+            .iter()
+            .any(|error| error.message.contains("needs Channel")),
+        "{spawned:?}"
+    );
+}
+
+#[test]
+fn intent_wait_awaits_a_started_task() {
+    let source = "define answer() gives Int { give 42 } keep task = start answer keep result = wait task choose result { Ok(value) => value, Err(problem) => 0 }";
+    assert_eq!(eval_tree(source), Value::Int(42));
+    assert_eq!(eval_vm(source), Value::Int(42));
+}
+
+#[test]
 fn immutable_bindings_reject_assignment() {
     let errors = nivren::run("keep answer = 42; answer = 7;").unwrap_err();
     assert!(errors[0].message.contains("immutable"));
@@ -57,6 +742,154 @@ fn functions_return_values() {
         eval("define add(a, b) { give a + b; } add(20, 22)"),
         Value::Int(42)
     );
+}
+
+#[test]
+fn generic_functions_infer_reuse_and_check_type_parameters() {
+    let source = "define identity<Value>(value: Value) gives Value { give value } keep number: Int = identity(42) keep text: String = identity(\"nivren\") number";
+    assert_eq!(eval_tree(source), Value::Int(42));
+    assert_eq!(eval_vm(source), Value::Int(42));
+
+    let arrays = "define first<Element>(values: [Element]) gives Element { give values[0] } keep answer: Int = first([42, 7]) answer";
+    assert_eq!(eval_vm(arrays), Value::Int(42));
+
+    let mixed = nivren::check(
+        "define same<Value>(left: Value, right: Value) gives Value { give left } same(1, \"two\")",
+    )
+    .unwrap_err();
+    assert!(
+        mixed
+            .iter()
+            .any(|error| error.message.contains("generic argument"))
+    );
+}
+
+#[test]
+fn generic_protocols_make_constraints_visible_and_checkable() {
+    let source = "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } keep integer: Int = add(20, 22) keep decimal: Float = add(1.5, 2.5) integer";
+    assert_eq!(eval_vm(source), Value::Int(42));
+
+    let rejected = nivren::check(
+        "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } add(\"a\", \"b\")",
+    )
+    .unwrap_err();
+    assert!(
+        rejected
+            .iter()
+            .any(|error| error.message.contains("does not satisfy Number"))
+    );
+
+    nivren::check(
+        "define entry<Key: Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
+    )
+    .unwrap();
+    assert!(nivren::check(
+        "define entry<Key, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) }",
+    )
+    .is_err());
+    assert!(
+        nivren::check("define bad<Value: Magical>(value: Value) gives Value { give value }",)
+            .is_err()
+    );
+}
+
+#[test]
+fn user_marker_protocols_are_explicit_coherent_and_dual_engine() {
+    let source = r#"
+protocol Identified
+shape User { id: Int, name: String }
+adopt Identified for User
+
+define preserve<Value: Identified>(value: Value) gives Value {
+    give value
+}
+
+keep user = User(7, "Mira")
+preserve(user)
+"#;
+    let expected = eval_tree("shape User { id: Int, name: String } User(7, \"Mira\")");
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let missing = nivren::check(
+        r#"
+protocol Identified
+shape User { id: Int }
+shape Project { id: Int }
+adopt Identified for User
+define preserve<Value: Identified>(value: Value) gives Value { give value }
+preserve(Project(2))
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        missing
+            .iter()
+            .any(|error| error.message.contains("does not satisfy Identified"))
+    );
+
+    let duplicate = nivren::check(
+        "protocol Tagged shape Item { id: Int } adopt Tagged for Item adopt Tagged for Item",
+    )
+    .unwrap_err();
+    assert!(
+        duplicate
+            .iter()
+            .any(|error| error.message.contains("already adopted"))
+    );
+
+    let sealed = nivren::check("adopt Comparable for String").unwrap_err();
+    assert!(
+        sealed
+            .iter()
+            .any(|error| error.message.contains("sealed protocol"))
+    );
+}
+
+#[test]
+fn protocol_members_are_required_and_dispatch_coherently_in_both_engines() {
+    let source = r#"
+protocol Rendered {
+    define render(value: Self) gives String
+}
+shape User { name: String }
+define render_user(value: User) gives String { give value.name }
+adopt Rendered for User { render = render_user }
+
+define present<Value: Rendered>(value: Value) gives String {
+    give Rendered.render(value)
+}
+present(User("Mira"))
+"#;
+    assert_eq!(eval_tree(source), Value::String("Mira".into()));
+    assert_eq!(eval_vm(source), Value::String("Mira".into()));
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let bundle = nivren::bundle::encode(&nivren::bytecode::compile(&program).unwrap()).unwrap();
+    let decoded = nivren::bundle::decode(&bundle).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&decoded)
+            .unwrap(),
+        Value::String("Mira".into())
+    );
+
+    assert!(nivren::check(
+        "protocol Named { define name(value: Self) gives String } shape User { name: String } adopt Named for User"
+    )
+    .is_err());
+    assert!(nivren::check(
+        "protocol Named { define name(value: Self) gives String } shape User { name: String } define wrong(value: User) gives Int { give 1 } adopt Named for User { name = wrong }"
+    )
+    .is_err());
+    assert!(nivren::check("protocol Named { define name(value: Int) gives String }").is_err());
+    assert!(nivren::check(
+        "protocol Logged { define emit(value: Self) gives Null needs Log } shape Event { text: String } define emit_event(value: Event) gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit = emit_event } define hidden<Value: Logged>(value: Value) { Logged.emit(value) }"
+    )
+    .is_err());
+    assert!(nivren::check(
+        "protocol Tagged shape Box<Value> { value: Value } adopt Tagged for Box<Int> adopt Tagged for Box<String>"
+    )
+    .is_err());
 }
 
 #[test]
@@ -212,6 +1045,38 @@ fn records_are_nominal_typed_values() {
 }
 
 #[test]
+fn safe_reflection_inspects_shape_values_without_vm_internals() {
+    let source = r#"
+choice Role { Admin, Member }
+shape User { name: String, active: Bool }
+define inspect() gives Result<String, String> {
+    keep user = User("Mira", yes)
+    keep fields = std.reflect.fields(user) or give
+    keep shape_schema = std.reflect.schema(User) or give
+    keep choice_schema = std.reflect.schema(Role) or give
+    give ok(
+        (std.map.get(fields, "name") ?? "")
+        + ":" + (std.map.get(fields, "active") ?? "")
+        + ":" + std.reflect.kind(user)
+        + ":" + (std.map.get(shape_schema, "$kind") ?? "")
+        + ":" + (std.map.get(shape_schema, "name") ?? "")
+        + ":" + (std.map.get(choice_schema, "$kind") ?? "")
+        + ":" + (std.map.get(choice_schema, "Member") ?? "")
+    )
+}
+choose inspect() {
+    Ok(value) => value,
+    Err(problem) => problem
+}
+"#;
+    let expected = Value::String("String:Bool:User:shape:String:choice:1".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    assert!(matches!(eval("std.reflect.fields(42)"), Value::Err(_)));
+    assert!(matches!(eval("std.reflect.schema(42)"), Value::Err(_)));
+}
+
+#[test]
 fn sealed_enums_require_exhaustive_matches() {
     let source = "choice State { Idle, Running, Done } keep state: State = State.Running; choose (state) { Idle => 0, Running => 1, Done => 2 }";
     assert_eq!(eval(source), Value::Int(1));
@@ -222,6 +1087,92 @@ fn sealed_enums_require_exhaustive_matches() {
         .is_err()
     );
     assert!(nivren::check("choice State { Idle } keep state = State.Missing").is_err());
+}
+
+#[test]
+fn choices_carry_typed_recursive_payloads_in_both_engines() {
+    let source = r#"
+choice Response {
+    Text(String),
+    Number(Int),
+    Array([Response]),
+    Nil
+}
+define score(value: Response) gives Int {
+    give choose value {
+        Text(text) => len(text),
+        Number(number) => number,
+        Array(items) => len(items),
+        Nil => 0
+    }
+}
+score(Response.Array([Response.Text("ok"), Response.Number(5)]))
+"#;
+    assert_eq!(eval_tree(source), Value::Int(2));
+    assert_eq!(eval_vm(source), Value::Int(2));
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let compiled = nivren::bytecode::compile(&program).unwrap();
+    let encoded = nivren::bundle::encode(&compiled).unwrap();
+    let decoded = nivren::bundle::decode(&encoded).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&decoded)
+            .unwrap(),
+        Value::Int(2)
+    );
+    let json = r#"choice Value { Text(String), Nil } std.json.stringify(Value.Text("ok"))"#;
+    let expected_json = Value::Ok(Arc::new(Value::String(
+        r#"{"$value":"ok","$variant":"Text"}"#.into(),
+    )));
+    assert_eq!(eval_tree(json), expected_json);
+    assert_eq!(eval_vm(json), expected_json);
+
+    assert!(nivren::check("choice Value { Text(String) } keep value: Value = Value.Text").is_err());
+    assert!(nivren::check("choice Value { Text(String) } Value.Text(42)").is_err());
+    assert!(nivren::check("choice Value { Nil } Value.Nil(1)").is_err());
+    assert!(nivren::check(
+        "choice Value { Text(String) } keep value = Value.Text(\"ok\") choose value { Text => 1 }"
+    )
+    .is_err());
+}
+
+#[test]
+fn shapes_and_choices_are_generic_nominal_and_inferred() {
+    let source = r#"
+shape Pair<Left, Right> { left: Left, right: Right }
+choice Maybe<Value> { Some(Value), None }
+
+define unwrap(value: Maybe<Int>) gives Int {
+    give choose value { Some(item) => item, None => 0 }
+}
+
+keep pair: Pair<String, Int> = Pair("age", 42)
+keep present: Maybe<Int> = Maybe.Some(pair.right)
+keep absent: Maybe<Int> = Maybe.None
+unwrap(present) + unwrap(absent)
+"#;
+    assert_eq!(eval_tree(source), Value::Int(42));
+    assert_eq!(eval_vm(source), Value::Int(42));
+
+    assert!(nivren::check(
+        "shape Pair<Left, Right> { left: Left, right: Right } keep pair: Pair<Int, String> = Pair(1, 2)"
+    )
+    .is_err());
+    assert!(
+        nivren::check(
+            "choice Maybe<Value> { Some(Value), None } keep value: Maybe<String> = Maybe.Some(1)"
+        )
+        .is_err()
+    );
+    assert!(nivren::check("shape Box<Value> { value: Value } keep value: Box = Box(1)").is_err());
+    assert!(
+        nivren::check("shape Keyed<Key: Comparable> { key: Key } Keyed(std.iter.from([1]))")
+            .is_err()
+    );
+    assert!(nivren::check(
+        "shape Keyed<Key: Comparable> { key: Key } define invalid(value: Keyed<Iterator<Int>>) { show(value) }"
+    )
+    .is_err());
 }
 
 #[test]
@@ -263,6 +1214,52 @@ fn typed_results_require_exhaustive_payload_matching() {
     assert!(nivren::check("keep result: Result<Int, String> = err(\"bad\"); choose (result) { Ok => 1, Err(error) => 0 }").is_err());
 }
 
+#[test]
+fn or_give_propagates_typed_failures_through_nested_expressions() {
+    let program = r#"
+define parse(valid: Bool) gives Result<Int, String> {
+    when valid { give ok(41) }
+    give err("invalid")
+}
+define answer(valid: Bool) gives Result<Int, String> {
+    keep value: Int = parse(valid) or give
+    give ok(value + 1)
+}
+answer(yes)
+"#;
+    assert_eq!(eval_tree(program), Value::Ok(Arc::new(Value::Int(42))));
+    assert_eq!(eval_vm(program), Value::Ok(Arc::new(Value::Int(42))));
+    let parsed = nivren::parser::parse(nivren::lexer::scan(program).unwrap()).unwrap();
+    nivren::typecheck::check(&parsed).unwrap();
+    let chunk = nivren::bytecode::compile(&parsed).unwrap();
+    let encoded = nivren::bundle::encode(&chunk).unwrap();
+    let decoded = nivren::bundle::decode(&encoded).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&decoded)
+            .unwrap(),
+        Value::Ok(Arc::new(Value::Int(42)))
+    );
+
+    let failure = program.replace("answer(yes)", "answer(no)");
+    assert_eq!(
+        eval_tree(&failure),
+        Value::Err(Arc::new(Value::String("invalid".into())))
+    );
+    assert_eq!(eval_vm(&failure), eval_tree(&failure));
+
+    let nested = "define value() gives Result<Int, String> { give ok(20) } define answer() gives Result<Int, String> { give ok((value() or give) * 2 + 2) } answer()";
+    assert_eq!(eval_tree(nested), Value::Ok(Arc::new(Value::Int(42))));
+    assert_eq!(eval_vm(nested), Value::Ok(Arc::new(Value::Int(42))));
+
+    assert!(nivren::check("ok(1) or give").is_err());
+    assert!(nivren::check("define bad() gives Int { give ok(1) or give }").is_err());
+    assert!(nivren::check(
+        "define bad() gives Result<Int, Int> { keep value = err(\"wrong\") or give give ok(value) }",
+    )
+    .is_err());
+}
+
 fn module_fixture(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "nivren-{name}-{}-{:?}",
@@ -291,7 +1288,10 @@ fn file_modules_resolve_relative_imports_once() {
     let program = nivren::modules::load(&entry).unwrap();
     nivren::typecheck::check(&program).unwrap();
     assert_eq!(
-        nivren::runtime::Interpreter::new().run(&program).unwrap(),
+        nivren::runtime::Interpreter::new()
+            .with_instruction_limit(10_000_000)
+            .run(&program)
+            .unwrap(),
         Value::Int(42)
     );
 
@@ -345,6 +1345,40 @@ fn module_record_types_are_nominally_namespaced() {
 }
 
 #[test]
+fn module_protocol_adoptions_follow_qualified_types_without_collisions() {
+    let directory = module_fixture("protocol-modules");
+    fs::write(
+        directory.join("people.niv"),
+        "protocol Identified shape User { id: Int } adopt Identified for User define preserve<Value: Identified>(value: Value) gives Value { give value } expose { User, preserve }",
+    )
+    .unwrap();
+    let entry = directory.join("main.niv");
+    fs::write(
+        &entry,
+        "use \"people.niv\" people.preserve(people.User(9)).id",
+    )
+    .unwrap();
+
+    let program = nivren::modules::load(&entry).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let expected = Value::Int(9);
+    assert_eq!(
+        nivren::runtime::Interpreter::new().run(&program).unwrap(),
+        expected
+    );
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .with_instruction_limit(10_000_000)
+            .run_bytecode(&chunk)
+            .unwrap(),
+        expected
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn file_modules_reject_import_cycles() {
     let directory = module_fixture("cycles");
     let first = directory.join("first.niv");
@@ -366,6 +1400,7 @@ fn project_manifests_are_strict_and_deterministic() {
     assert_eq!(manifest.name, "example-app");
     assert_eq!(manifest.entry_path(), root.join("src/main.niv"));
     assert!(manifest.dependencies.is_empty());
+    assert!(manifest.capabilities.is_empty());
     assert_eq!(manifest.lockfile(), manifest.lockfile());
     assert!(
         nivren::project::Manifest::parse(&source.replace("1.2.3", "01.2.3"), root.clone()).is_err()
@@ -374,6 +1409,296 @@ fn project_manifests_are_strict_and_deterministic() {
         nivren::project::Manifest::parse(&source.replace("src/main.niv", "../main.niv"), root)
             .is_err()
     );
+}
+
+#[test]
+fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
+    let root = PathBuf::from("/tmp/capability-example");
+    let source = "[package]\nname = \"capability-app\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[capabilities]\nFileRead = \"allow\"\n";
+    let manifest = nivren::project::Manifest::parse(source, root.clone()).unwrap();
+    assert!(manifest.capabilities.contains("FileRead"));
+    assert!(manifest.capability_scopes.is_empty());
+    assert!(
+        nivren::project::Manifest::parse(&source.replace("FileRead", "Everything"), root.clone())
+            .is_err()
+    );
+    assert!(
+        nivren::project::Manifest::parse(&source.replace("\"allow\"", "\"deny\""), root).is_err()
+    );
+
+    let program = nivren::parser::parse(
+        nivren::lexer::scan("std.fs.exists(\"definitely-missing\")").unwrap(),
+    )
+    .unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let denied = nivren::runtime::Interpreter::new()
+        .with_capabilities(Vec::<String>::new())
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(denied.message.contains("does not allow FileRead"));
+    let allowed = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["FileRead".to_string()])
+        .run_bytecode(&chunk)
+        .unwrap();
+    assert_eq!(allowed, Value::Bool(false));
+
+    let directory = module_fixture("scoped-capabilities");
+    let allowed_file = directory.join("allowed.txt");
+    fs::write(&allowed_file, "ok").unwrap();
+    let scoped_source = source.replace(
+        "FileRead = \"allow\"",
+        &format!("FileRead = \"path:{}\"", directory.display()),
+    );
+    let scoped = nivren::project::Manifest::parse(&scoped_source, directory.clone()).unwrap();
+    assert_eq!(
+        scoped.capability_scopes.get("FileRead"),
+        Some(&format!("path:{}", directory.display()))
+    );
+    assert_eq!(
+        nivren::project::Manifest::parse(&scoped.source(), directory.clone())
+            .unwrap()
+            .capability_scopes,
+        scoped.capability_scopes
+    );
+
+    let source = format!("std.files.exists(\"{}\")", allowed_file.display());
+    let program = nivren::parser::parse(nivren::lexer::scan(&source).unwrap()).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let inside = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["FileRead".into()])
+        .with_capability_scopes(scoped.capability_scopes.clone())
+        .run_bytecode(&chunk)
+        .unwrap();
+    assert_eq!(inside, Value::Bool(true));
+
+    let outside_source = "std.files.exists(\"/definitely-outside-nivren-scope\")";
+    let outside_program =
+        nivren::parser::parse(nivren::lexer::scan(outside_source).unwrap()).unwrap();
+    let outside = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["FileRead".into()])
+        .with_capability_scopes(scoped.capability_scopes)
+        .run(&outside_program)
+        .unwrap_err();
+    assert!(outside.message.contains("outside the project grant"));
+
+    let network = nivren::parser::parse(
+        nivren::lexer::scan("std.net.connect(\"example.com\", 80, 0.01)").unwrap(),
+    )
+    .unwrap();
+    let denied_host = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["Network".into()])
+        .with_capability_scopes([(String::from("Network"), String::from("host:localhost"))])
+        .run(&network)
+        .unwrap_err();
+    assert!(denied_host.message.contains("outside the project grant"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn advanced_capability_scopes_limit_environment_process_and_native_kinds() {
+    let root = module_fixture("advanced-scopes");
+    let manifest = nivren::project::Manifest::parse(
+        "[package]\nname = \"scopes\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nEnvironment = \"prefix:NIVREN_\"\nProcess = \"command:nivren-command-that-does-not-exist\"\nNative = \"kind:database\"\n",
+        root.clone(),
+    )
+    .unwrap();
+    assert_eq!(manifest.capability_scopes["Environment"], "prefix:NIVREN_");
+    assert_eq!(
+        manifest.capability_scopes["Process"],
+        "command:nivren-command-that-does-not-exist"
+    );
+    assert_eq!(manifest.capability_scopes["Native"], "kind:database");
+
+    let allowed_process = "std.process.run(\"nivren-command-that-does-not-exist\", [])";
+    let program = nivren::parser::parse(nivren::lexer::scan(allowed_process).unwrap()).unwrap();
+    let value = nivren::runtime::Interpreter::new()
+        .with_capability_scopes(manifest.capability_scopes.clone())
+        .run(&program)
+        .unwrap();
+    assert!(matches!(value, Value::Err(_)));
+    let denied_process = nivren::parser::parse(
+        nivren::lexer::scan("std.process.run(\"different-command\", [])").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        nivren::runtime::Interpreter::new()
+            .with_capability_scopes(manifest.capability_scopes.clone())
+            .run(&denied_process)
+            .unwrap_err()
+            .message
+            .contains("outside the project grant")
+    );
+
+    let environment =
+        nivren::parser::parse(nivren::lexer::scan("std.env.get(\"PATH\")").unwrap()).unwrap();
+    assert!(
+        nivren::runtime::Interpreter::new()
+            .with_capability_scopes(manifest.capability_scopes.clone())
+            .run(&environment)
+            .unwrap_err()
+            .message
+            .contains("outside the project grant")
+    );
+
+    let native = nivren::parser::parse(
+        nivren::lexer::scan("std.host.open(\"database\", \"configuration\")").unwrap(),
+    )
+    .unwrap();
+    let value = nivren::runtime::Interpreter::new()
+        .with_capability_scopes(manifest.capability_scopes)
+        .with_host_callback(|operation, _| match operation {
+            "nivren.handle.open:database" => Ok("handle".into()),
+            "nivren.handle.close" => Ok("closed".into()),
+            _ => Err("unexpected operation".into()),
+        })
+        .run(&native)
+        .unwrap();
+    assert!(matches!(value, Value::Ok(_)));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn composed_capability_scopes_constrain_hosts_methods_commands_and_arguments() {
+    let root = module_fixture("composed-scopes");
+    let manifest = nivren::project::Manifest::parse(
+        "[package]\nname = \"composed\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nNetwork = \"host:127.0.0.1,localhost;method:GET\"\nProcess = \"command:nivren-command-that-does-not-exist;arg0:status\"\n",
+        root.clone(),
+    )
+    .unwrap();
+
+    let allowed_web = nivren::parser::parse(
+        nivren::lexer::scan(
+            "std.web.request(\"GET\", \"http://127.0.0.1:1/status\", std.web.headers(), \"\", 0.01, 64)",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        nivren::runtime::Interpreter::new()
+            .with_capability_scopes(manifest.capability_scopes.clone())
+            .run(&allowed_web)
+            .unwrap(),
+        Value::Err(_)
+    ));
+    let denied_method = nivren::parser::parse(
+        nivren::lexer::scan(
+            "std.web.request(\"POST\", \"http://127.0.0.1:1/status\", std.web.headers(), \"\", 0.01, 64)",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        nivren::runtime::Interpreter::new()
+            .with_capability_scopes(manifest.capability_scopes.clone())
+            .run(&denied_method)
+            .unwrap_err()
+            .message
+            .contains("outside the project grant")
+    );
+
+    let allowed_process = nivren::parser::parse(
+        nivren::lexer::scan(
+            "std.process.run(\"nivren-command-that-does-not-exist\", [\"status\"])",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        nivren::runtime::Interpreter::new()
+            .with_capability_scopes(manifest.capability_scopes.clone())
+            .run(&allowed_process)
+            .unwrap(),
+        Value::Err(_)
+    ));
+    let denied_argument = nivren::parser::parse(
+        nivren::lexer::scan(
+            "std.process.run(\"nivren-command-that-does-not-exist\", [\"version\"])",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        nivren::runtime::Interpreter::new()
+            .with_capability_scopes(manifest.capability_scopes)
+            .run(&denied_argument)
+            .unwrap_err()
+            .message
+            .contains("outside the project grant")
+    );
+    assert!(nivren::project::Manifest::parse(
+        "[package]\nname = \"bad\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[capabilities]\nNetwork = \"method:GET\"\n",
+        root.clone(),
+    )
+    .is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn instruction_limits_stop_runaway_code_and_round_trip_in_projects() {
+    let root = PathBuf::from("/tmp/limited-example");
+    let source = "[package]\nname = \"limited\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[limits]\ninstructions = \"1000\"\nmemory_bytes = \"4096\"\n";
+    let manifest = nivren::project::Manifest::parse(source, root.clone()).unwrap();
+    assert_eq!(manifest.instruction_limit, Some(1000));
+    assert_eq!(manifest.memory_limit, Some(4096));
+    let reparsed = nivren::project::Manifest::parse(&manifest.source(), root.clone()).unwrap();
+    assert_eq!(reparsed.instruction_limit, Some(1000));
+    assert_eq!(reparsed.memory_limit, Some(4096));
+    assert!(
+        nivren::project::Manifest::parse(&source.replace("\"1000\"", "\"0\""), root.clone())
+            .is_err()
+    );
+    assert!(
+        nivren::project::Manifest::parse(&source.replace("instructions", "seconds"), root).is_err()
+    );
+
+    let program =
+        nivren::parser::parse(nivren::lexer::scan("repeat yes { none }").unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let tree_error = nivren::runtime::Interpreter::new()
+        .with_instruction_limit(100)
+        .run(&program)
+        .unwrap_err();
+    assert!(tree_error.message.contains("instruction limit"));
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let vm_error = nivren::runtime::Interpreter::new()
+        .with_instruction_limit(100)
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(vm_error.message.contains("instruction limit"));
+
+    let recursive = nivren::parser::parse(
+        nivren::lexer::scan("define recurse() gives Int { give recurse() } recurse()").unwrap(),
+    )
+    .unwrap();
+    nivren::typecheck::check(&recursive).unwrap();
+    let tree_depth = nivren::runtime::Interpreter::new()
+        .with_call_depth_limit(32)
+        .run(&recursive)
+        .unwrap_err();
+    assert!(tree_depth.message.contains("call depth limit"));
+    let recursive_chunk = nivren::bytecode::compile(&recursive).unwrap();
+    let vm_depth = nivren::runtime::Interpreter::new()
+        .with_call_depth_limit(32)
+        .run_bytecode(&recursive_chunk)
+        .unwrap_err();
+    assert!(vm_depth.message.contains("call depth limit"));
+
+    let allocating = nivren::parser::parse(
+        nivren::lexer::scan("\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"").unwrap(),
+    )
+    .unwrap();
+    let tree_memory = nivren::runtime::Interpreter::new()
+        .with_memory_limit(32)
+        .run(&allocating)
+        .unwrap_err();
+    assert!(tree_memory.message.contains("memory limit"));
+    let allocating_chunk = nivren::bytecode::compile(&allocating).unwrap();
+    let vm_memory = nivren::runtime::Interpreter::new()
+        .with_memory_limit(32)
+        .run_bytecode(&allocating_chunk)
+        .unwrap_err();
+    assert!(vm_memory.message.contains("memory limit"));
 }
 
 #[test]
@@ -391,7 +1716,69 @@ fn project_dependencies_are_exact_strict_and_canonically_locked() {
     assert!(
         nivren::project::Manifest::parse(&source.replace("1.2.3", "^1.2"), root.clone()).is_err()
     );
-    assert!(nivren::project::Manifest::parse(&source.replace("alpha", "bad-name"), root).is_err());
+    assert!(
+        nivren::project::Manifest::parse(&source.replace("alpha", "bad-name"), root.clone())
+            .is_err()
+    );
+
+    let mut updated = manifest.clone();
+    updated.add_dependency("middle", "3.4.5").unwrap();
+    let reparsed = nivren::project::Manifest::parse(&updated.source(), root.clone()).unwrap();
+    assert_eq!(reparsed.dependencies["middle"], "3.4.5");
+    assert!(updated.add_dependency("bad-name", "1.0.0").is_err());
+}
+
+#[test]
+fn unified_project_commands_create_develop_test_ship_and_add() {
+    let parent = module_fixture("project-commands");
+    let project = parent.join("sample-app");
+    let niv = env!("CARGO_BIN_EXE_niv");
+
+    for arguments in [
+        vec!["new".to_string(), project.display().to_string()],
+        vec!["dev".to_string(), project.display().to_string()],
+        vec![
+            "test".to_string(),
+            project.join("tests/niv").display().to_string(),
+        ],
+        vec!["ship".to_string(), project.display().to_string()],
+    ] {
+        let output = std::process::Command::new(niv)
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "command {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(project.join("target/sample-app-0.1.0.nivpkg").is_file());
+    assert!(project.join("target/doc/api.md").is_file());
+    let standalone = project.join(if cfg!(windows) {
+        "target/sample-app.exe"
+    } else {
+        "target/sample-app"
+    });
+    assert!(standalone.is_file());
+    let executed = std::process::Command::new(&standalone).output().unwrap();
+    assert!(
+        executed.status.success(),
+        "standalone failed: {}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("Welcome to Nivren"));
+
+    let project_text = project.display().to_string();
+    let added = std::process::Command::new(niv)
+        .args(["add", "answerlib", "1.2.3", &project_text])
+        .output()
+        .unwrap();
+    assert!(added.status.success());
+    let manifest = nivren::project::Manifest::load(&project).unwrap();
+    assert_eq!(manifest.dependencies["answerlib"], "1.2.3");
+
+    fs::remove_dir_all(parent).unwrap();
 }
 
 #[test]
@@ -527,6 +1914,45 @@ fn documentation_lists_only_explicit_module_exports() {
 }
 
 #[test]
+fn documentation_lists_entry_module_public_api() {
+    let source =
+        "define public(value: Int) gives Int { give value } keep hidden = 1 expose { public }";
+    let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let docs = nivren::documentation::generate("entry", "1.0.0", &parsed);
+    assert!(docs.contains("## Public API"));
+    assert!(docs.contains("define public(value: Int) gives Int"));
+    assert!(!docs.contains("hidden"));
+}
+
+#[test]
+fn documentation_includes_declared_capabilities() {
+    let source = "define read(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) } expose { read }";
+    let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let module = nivren::ast::Stmt::Module {
+        name: "files".into(),
+        body: parsed[..1].to_vec(),
+        exports: vec!["read".into()],
+        span: nivren::ast::Span { line: 1, column: 1 },
+    };
+    let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
+    assert!(docs.contains("needs FileRead"));
+}
+
+#[test]
+fn documentation_preserves_generic_function_signatures() {
+    let source = "define identity<Value: Comparable>(value: Value) gives Value { give value } expose { identity }";
+    let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let module = nivren::ast::Stmt::Module {
+        name: "generic".into(),
+        body: parsed[..1].to_vec(),
+        exports: vec!["identity".into()],
+        span: nivren::ast::Span { line: 1, column: 1 },
+    };
+    let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
+    assert!(docs.contains("define identity<Value: Comparable>(value: Value) gives Value"));
+}
+
+#[test]
 fn bytecode_is_versioned_verified_and_deterministic() {
     let source = "define sum(limit: Int) gives Int { change total = 0; change index = 0; repeat (index < limit) { total = total + index; index = index + 1; } give total; } sum(5)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
@@ -535,7 +1961,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
     nivren::bytecode::verify(&chunk).unwrap();
     let first = nivren::bytecode::disassemble(&chunk);
     assert_eq!(first, nivren::bytecode::disassemble(&chunk));
-    assert!(first.starts_with("NIVB 1\n"));
+    assert!(first.starts_with("NIVB 5\n"));
 
     let mut incompatible = chunk;
     incompatible.version += 1;
@@ -545,6 +1971,51 @@ fn bytecode_is_versioned_verified_and_deterministic() {
             .message
             .contains("unsupported bytecode version")
     );
+}
+
+#[test]
+fn source_maps_are_stable_nested_and_exportable() {
+    let source = "define answer() gives Int { give 42 }\nanswer()";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let first = nivren::bytecode::source_map(&chunk, "main.niv");
+    let second = nivren::bytecode::source_map(&chunk, "main.niv");
+    assert_eq!(first, second);
+    let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(parsed["schema"], "org.nivren.sourcemap.v1");
+    assert_eq!(parsed["bytecodeVersion"], 5);
+    assert!(
+        parsed["mappings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mapping| mapping["path"]
+                .as_str()
+                .is_some_and(|path| path.contains('.')))
+    );
+
+    let directory = module_fixture("source-map-cli");
+    let source_path = directory.join("main.niv");
+    let output_path = directory.join("main.niv.map.json");
+    fs::write(&source_path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "sourcemap",
+            source_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exported: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(exported["source"], source_path.to_str().unwrap());
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -620,6 +2091,137 @@ fn binary_bundles_round_trip_and_execute() {
             .unwrap(),
         Value::Int(32)
     );
+}
+
+#[test]
+fn cli_live_inspection_streams_privacy_safe_versioned_json_lines() {
+    let directory = module_fixture("live-inspection");
+    let source = directory.join("inspect.niv");
+    let output = directory.join("events.jsonl");
+    fs::write(
+        &source,
+        "keep secret = \"hidden-value\"\nkeep answer = 40 + 2\nanswer\n",
+    )
+    .unwrap();
+    let inspected = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .arg("inspect")
+        .arg(&source)
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        inspected.status.success(),
+        "inspection failed: {}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let jsonl = fs::read_to_string(&output).unwrap();
+    assert!(!jsonl.contains("hidden-value"));
+    let events = jsonl
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(events.len() >= 3);
+    assert_eq!(events[0]["schema"], "org.nivren.inspect.v1");
+    assert_eq!(events[0]["kind"], "started");
+    assert_eq!(events.last().unwrap()["kind"], "finished");
+    assert_eq!(events.last().unwrap()["status"], "ok");
+    assert!(events.last().unwrap()["instructions"].as_u64().unwrap() > 0);
+    let steps = events
+        .iter()
+        .filter(|event| event["kind"] == "step")
+        .collect::<Vec<_>>();
+    assert!(!steps.is_empty());
+    assert!(steps.iter().all(|event| event.get("variables").is_none()));
+    assert!(steps.iter().any(|event| {
+        event["variable_names"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == "secret"))
+    }));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn schema_bindgen_cli_emits_c_and_cpp_compatible_views() {
+    let directory = std::env::temp_dir().join(format!(
+        "nivren-bindgen-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let schema = directory.join("messages.niv");
+    let header = directory.join("messages.h");
+    fs::write(
+        &schema,
+        "choice Role { Admin, Member }\n\
+         shape Address { city: String, postal: U32 }\n\
+         shape User { name: String, role: Role, address: Address?, tags: [String] }\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["bindgen", "c"])
+        .arg(&schema)
+        .arg(&header)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "bindgen failed: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let consumer = directory.join("consumer.c");
+    let ffi_include = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates/nivren-ffi/include");
+    fs::write(
+        &consumer,
+        "#include \"messages.h\"\n\
+         #include \"nivren.h\"\n\
+         int main(void) { Nivren_User user = {0}; NivrenAsyncRun *run = 0; nivren_async_run_cancel(run); return (int)user.role; }\n",
+    )
+    .unwrap();
+    let cpp_consumer = directory.join("consumer.cpp");
+    fs::write(
+        &cpp_consumer,
+        "#include \"messages.h\"\n\
+         #include \"nivren.h\"\n\
+         int main() { Nivren_User user{}; NivrenAsyncRun *run = nullptr; nivren_async_run_cancel(run); return static_cast<int>(user.role); }\n",
+    )
+    .unwrap();
+    if cfg!(windows) {
+        for (source, language) in [(&consumer, "/TC"), (&cpp_consumer, "/TP")] {
+            let include = format!("/I{}", ffi_include.display());
+            let output = Command::new("cl")
+                .args(["/nologo", "/W4", "/WX", "/Zs", language])
+                .arg(include)
+                .arg(source)
+                .current_dir(&directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "MSVC rejected generated bindings: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    } else {
+        for (compiler, standard, source) in [
+            ("cc", "-std=c11", &consumer),
+            ("c++", "-std=c++17", &cpp_consumer),
+        ] {
+            let output = Command::new(compiler)
+                .args([standard, "-Wall", "-Wextra", "-Werror", "-fsyntax-only"])
+                .arg("-I")
+                .arg(&ffi_include)
+                .arg(source)
+                .current_dir(&directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{compiler} rejected generated bindings: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -719,6 +2321,756 @@ fn bounded_json_engine_validates_unicode_and_formats_deterministically() {
 }
 
 #[test]
+fn json_values_round_trip_through_nivren_collections() {
+    let source = r#"
+keep decoded = std.json.parse("{\"name\":\"Nivren\",\"stable\":true,\"versions\":[2,3]}")
+choose decoded {
+    Ok(value) => std.json.stringify(value),
+    Err(problem) => err(problem)
+}
+"#;
+    let expected = Value::Ok(Arc::new(Value::String(
+        r#"{"name":"Nivren","stable":true,"versions":[2,3]}"#.into(),
+    )));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    assert_eq!(
+        eval("std.json.stringify(std.set.single(1))"),
+        Value::Err(Arc::new(Value::String("JSON cannot represent Set".into())))
+    );
+}
+
+#[test]
+fn shapes_are_typed_json_schemas_in_both_engines() {
+    let source = r#"
+choice Role { Admin, Member }
+shape Address { city: String, postal: U32 }
+
+shape User {
+    name: String,
+    score: U8,
+    tags: [String],
+    alias: String?,
+    address: Address,
+    role: Role,
+}
+
+define display_name(source: String) gives Result<String, String> {
+    keep user = std.json.decode(User, source) or give
+    give ok(user.name)
+}
+
+keep decoded = std.json.decode(User, "{\"name\":\"Ada\",\"score\":255,\"tags\":[\"compiler\"],\"alias\":null,\"address\":{\"city\":\"London\",\"postal\":12345},\"role\":\"Admin\"}")
+choose decoded {
+    Ok(user) => std.json.stringify(user),
+    Err(problem) => err(problem),
+}
+"#;
+    let expected = Value::Ok(Arc::new(Value::String(
+        r#"{"address":{"city":"London","postal":12345},"alias":null,"name":"Ada","role":"Admin","score":255,"tags":["compiler"]}"#.into(),
+    )));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    for invalid in [
+        r#"{"name":"Ada","score":256,"tags":[],"alias":null,"address":{"city":"X","postal":1},"role":"Admin"}"#,
+        r#"{"name":"Ada","score":1,"tags":[],"address":{"city":"X","postal":1},"role":"Admin"}"#,
+        r#"{"name":"Ada","score":1,"tags":[],"alias":null,"address":{"city":"X"},"role":"Admin"}"#,
+        r#"{"name":"Ada","score":1,"tags":[],"alias":null,"address":{"city":"X","postal":1},"role":"Owner"}"#,
+        r#"{"name":"Ada","score":1,"tags":[],"alias":null,"address":{"city":"X","postal":1},"role":"Admin","admin":true}"#,
+    ] {
+        let program = format!(
+            "choice Role {{ Admin, Member }}\n\
+             shape Address {{ city: String, postal: U32 }}\n\
+             shape User {{ name: String, score: U8, tags: [String], alias: String?, address: Address, role: Role }}\n\
+             keep decoded = std.json.decode(User, {invalid:?})\n\
+             choose decoded {{ Ok(value) => no, Err(problem) => yes }}"
+        );
+        assert_eq!(eval_tree(&program), Value::Bool(true));
+        assert_eq!(eval_vm(&program), Value::Bool(true));
+    }
+}
+
+#[test]
+fn json_lines_stream_with_a_bounded_record_buffer() {
+    let path = std::env::temp_dir().join(format!(
+        "nivren-json-lines-{}-{}.ndjson",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    fs::write(&path, "{\"id\":1}\n{\"id\":2}\n").unwrap();
+    let source = format!(
+        r#"
+shape Item {{ id: Int }}
+define load(path: String) gives Result<String, String> needs FileRead {{
+    keep opened = std.files.open_read(path) or give
+    using file = opened {{
+        keep first = std.json.read_next_as(Item, file, 64) or give
+        keep second = std.json.read_next_as(Item, file, 64) or give
+        keep ending = std.json.read_next_as(Item, file, 64) or give
+        assert(ending == none, "stream reaches end")
+        keep first_item = first ?? Item(0)
+        keep second_item = second ?? Item(0)
+        assert(first_item.id + second_item.id == 3, "typed streamed fields")
+        give std.json.stringify([first_item, second_item])
+    }}
+}}
+load({:?})
+"#,
+        path.to_string_lossy()
+    );
+    let expected = Value::Ok(Arc::new(Value::String("[{\"id\":1},{\"id\":2}]".into())));
+    assert_eq!(eval_tree(&source), expected);
+    assert_eq!(eval_vm(&source), expected);
+
+    fs::write(&path, "{\"payload\":\"too long\"}\n{\"id\":3}\n").unwrap();
+    let recovery = format!(
+        r#"
+define recover(path: String) gives Result<String, String> needs FileRead {{
+    keep opened = std.files.open_read(path) or give
+    using file = opened {{
+        keep rejected = std.json.read_next(file, 8)
+        keep recovered = choose rejected {{
+            Ok(value) => err("oversized record accepted"),
+            Err(problem) => std.json.read_next(file, 64),
+        }}
+        keep next = recovered or give
+        give std.json.stringify(next)
+    }}
+}}
+recover({:?})
+"#,
+        path.to_string_lossy()
+    );
+    let recovered = Value::Ok(Arc::new(Value::String("{\"id\":3}".into())));
+    assert_eq!(eval_tree(&recovery), recovered);
+    assert_eq!(eval_vm(&recovery), recovered);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn file_line_iterators_are_lazy_bounded_and_recover_after_errors() {
+    let path = std::env::temp_dir().join(format!(
+        "nivren-lines-{}-{}.txt",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    fs::write(&path, "alpha\nway-too-long\nomega\r\n").unwrap();
+    let source = format!(
+        r#"
+define load(path: String) gives Result<Bool, String> needs FileRead {{
+    keep opened = std.files.open_read(path) or give
+    using file = opened {{
+        keep lines = std.iter.lines(file, 8) or give
+        keep first = std.iter.next(lines) ?? err("missing first line")
+        keep oversized = std.iter.next(lines) ?? ok("missing")
+        keep third = std.iter.next(lines) ?? err("missing third line")
+        keep ending = std.iter.next(lines)
+        keep first_text = first or give
+        keep third_text = third or give
+        keep rejected = choose oversized {{ Ok(value) => no, Err(problem) => yes }}
+        give ok(first_text == "alpha" and third_text == "omega" and rejected and ending == none)
+    }}
+}}
+load({:?})
+"#,
+        path.to_string_lossy()
+    );
+    let expected = Value::Ok(Arc::new(Value::Bool(true)));
+    assert_eq!(eval_tree(&source), expected);
+    assert_eq!(eval_vm(&source), expected);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn immutable_bytes_round_trip_unicode_and_check_bounds() {
+    let source = r#"
+keep data: Bytes = std.bytes.from_string("Nivren 🜁")
+keep length: Int = std.bytes.length(data)
+keep sliced = std.bytes.slice(data, 0, 6)
+keep text = choose sliced {
+    Ok(part) => choose std.bytes.to_string(part) {
+        Ok(value) => value,
+        Err(problem) => problem,
+    },
+    Err(problem) => problem,
+}
+assert(text == "Nivren", "byte slice")
+length
+"#;
+    assert_eq!(eval_tree(source), Value::Int(11));
+    assert_eq!(eval_vm(source), Value::Int(11));
+
+    let invalid = eval_vm(
+        "keep made = std.bytes.from_values([0, 256]) choose made { Ok(value) => no, Err(problem) => yes }",
+    );
+    assert_eq!(invalid, Value::Bool(true));
+
+    let outside = eval_vm(
+        "keep data = std.bytes.from_string(\"one\") keep found = std.bytes.get(data, 9) choose found { Ok(value) => no, Err(problem) => yes }",
+    );
+    assert_eq!(outside, Value::Bool(true));
+}
+
+#[test]
+fn explicit_text_concatenation_is_typed_bounded_and_dual_engine() {
+    let source = r#"
+choose std.text.concat("Niv", "ren") {
+    Ok(value) => value,
+    Err(problem) => problem,
+}
+"#;
+    let expected = Value::String("Nivren".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    assert!(nivren::check("std.text.concat(\"value\", 1)").is_err());
+}
+
+#[test]
+fn bounded_text_partition_and_float_conversion_are_dual_engine() {
+    let source = r#"
+define inspect() gives Result<String, String> {
+    keep parts = std.text.split("MOVED 42 [::1]:6379", " ", 4) or give
+    keep address = std.text.split_last(parts[2], ":") or give
+    keep number = std.float.parse("1.5") or give
+    keep rendered = std.float.format(number) or give
+    assert(std.text.starts_with(parts[0], "MOVE"), "prefix")
+    give std.text.concat(address[1], rendered)
+}
+inspect()
+"#;
+    let expected = Value::Ok(Arc::new(Value::String("63791.5".into())));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    assert_eq!(
+        eval_vm("choose std.float.parse(\"NaN\") { Ok(value) => no, Err(problem) => yes }"),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn int_text_conversion_is_explicit_checked_and_dual_engine() {
+    let source = r#"
+define round_trip() gives Result<Int, String> {
+    keep parsed = std.int.parse("-9223372036854775808") or give
+    assert(std.int.format(parsed) == "-9223372036854775808", "Int format")
+    give ok(parsed)
+}
+round_trip()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Int(i64::MIN)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    assert_eq!(
+        eval_vm(
+            "choose std.int.parse(\"9223372036854775808\") { Ok(value) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn binary_codecs_are_typed_bounded_and_endian_explicit() {
+    let source = r#"
+define verify() gives Result<Int, String> {
+    keep number = std.u16.from_int(4660) or give
+    keep big = std.binary.u16_be(number)
+    keep little = std.binary.u16_le(number)
+    keep big_first = std.bytes.get(big, 0) or give
+    keep little_first = std.bytes.get(little, 0) or give
+    assert(big_first == 18, "big endian first byte")
+    assert(little_first == 52, "little endian first byte")
+    keep decoded = std.binary.read_u16_be(big, 0) or give
+    keep decoded_int = std.u16.to_int(decoded) or give
+
+    keep signed_bytes = std.binary.int_le(-42)
+    keep signed = std.binary.read_int_le(signed_bytes, 0) or give
+    assert(signed == -42, "signed Int round trip")
+
+    keep float_bytes = std.binary.float_be(1.5)
+    keep floated = std.binary.read_float_be(float_bytes, 0) or give
+    assert(floated == 1.5, "Float round trip")
+
+    keep joined = std.binary.concat(big, little) or give
+    assert(std.bytes.length(joined) == 4, "bounded concatenation")
+    give ok(decoded_int)
+}
+verify()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Int(4660)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let outside = r#"
+keep bytes = std.bytes.from_values([1, 2, 3])
+choose bytes {
+    Ok(value) => choose std.binary.read_u32_be(value, 0) {
+        Ok(number) => no,
+        Err(problem) => yes,
+    },
+    Err(problem) => no,
+}
+"#;
+    assert_eq!(eval_tree(outside), Value::Bool(true));
+    assert_eq!(eval_vm(outside), Value::Bool(true));
+
+    assert!(nivren::check("std.binary.u16_be(1)").is_err());
+    assert!(nivren::check("std.binary.read_int_be(\"bytes\", 0)").is_err());
+}
+
+#[test]
+fn cryptographic_hashes_and_hmacs_are_bounded_and_constant_time_verified() {
+    let source = r#"
+define verify() gives Result<Int, String> {
+    keep key = std.bytes.from_string("secret")
+    keep message = std.bytes.from_string("Nivren")
+    keep digest = std.crypto.sha256(message) or give
+    keep repeated = std.crypto.sha256(message) or give
+    assert(digest == repeated, "deterministic SHA-256")
+    assert(std.bytes.length(digest) == 32, "SHA-256 width")
+
+    keep tag = std.crypto.hmac_sha256(key, message) or give
+    keep valid = std.crypto.verify_hmac_sha256(key, message, tag) or give
+    keep invalid = std.crypto.verify_hmac_sha256(key, std.bytes.from_string("other"), tag) or give
+    assert(valid, "valid HMAC")
+    assert(!invalid, "invalid HMAC")
+    give ok(std.bytes.length(tag))
+}
+
+verify()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Int(32)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let short_tag = r#"
+keep key = std.bytes.from_string("key")
+keep message = std.bytes.from_string("message")
+keep tag = std.bytes.from_string("short")
+choose std.crypto.verify_hmac_sha256(key, message, tag) {
+    Ok(valid) => no,
+    Err(problem) => yes,
+}
+"#;
+    assert_eq!(eval_vm(short_tag), Value::Bool(true));
+}
+
+#[test]
+fn secure_randomness_and_argon2id_are_capability_checked_and_bounded() {
+    let source = r#"
+define passwords() gives Result<Bool, String> {
+    keep salt = std.bytes.from_string("0123456789abcdef")
+    keep encoded = std.crypto.password_hash("correct horse", salt, 8192, 1, 1) or give
+    keep valid = std.crypto.password_verify("correct horse", encoded) or give
+    keep invalid = std.crypto.password_verify("wrong", encoded) or give
+    give ok(valid and !invalid)
+}
+
+passwords()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Bool(true)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let entropy = r#"
+define entropy() gives Result<Int, String> needs Random {
+    keep bytes = std.crypto.random_bytes(32) or give
+    give ok(std.bytes.length(bytes))
+}
+entropy()
+"#;
+    assert_eq!(eval_tree(entropy), Value::Ok(Arc::new(Value::Int(32))));
+    assert!(nivren::check("define entropy() { std.crypto.random_bytes(32) }").is_err());
+    let program = nivren::parser::parse(nivren::lexer::scan(entropy).unwrap()).unwrap();
+    let denied = nivren::runtime::Interpreter::new()
+        .with_capabilities(Vec::<String>::new())
+        .run(&program)
+        .unwrap_err();
+    assert!(denied.message.contains("does not allow Random"));
+
+    let hostile = "$argon2id$v=19$m=999999999,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let hostile_source = format!(
+        "choose std.crypto.password_verify(\"password\", \"{hostile}\") {{ Ok(valid) => no, Err(problem) => yes }}"
+    );
+    assert_eq!(eval_vm(&hostile_source), Value::Bool(true));
+    assert_eq!(
+        eval_vm(
+            "choose std.crypto.password_hash(\"password\", std.bytes.from_string(\"short\"), 8192, 1, 1) { Ok(value) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn authenticated_encryption_detects_tampering_and_enforces_key_nonce_and_size_bounds() {
+    let source = r#"
+define protect() gives Result<Bool, String> {
+    keep key = std.crypto.key_import(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
+    keep nonce = std.bytes.from_string("unique-nonce")
+    keep context = std.bytes.from_string("account:42")
+    keep message = std.bytes.from_string("Nivren secret")
+    keep ciphertext = std.crypto.encrypt(key, nonce, context, message) or give
+    assert(std.bytes.length(ciphertext) == std.bytes.length(message) + 16, "authentication tag")
+    keep plaintext = std.crypto.decrypt(key, nonce, context, ciphertext) or give
+    keep rejected = choose std.crypto.decrypt(key, nonce, std.bytes.from_string("account:43"), ciphertext) {
+        Ok(value) => no,
+        Err(problem) => yes,
+    }
+    give ok(plaintext == message and rejected)
+}
+
+protect()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Bool(true)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    assert_eq!(
+        eval_vm(
+            "choose std.crypto.key_import(std.bytes.from_string(\"short\")) { Ok(value) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+    assert!(nivren::check(
+        "std.crypto.encrypt(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\"), std.bytes.from_string(\"unique-nonce\"), std.bytes.from_string(\"\"), std.bytes.from_string(\"message\"))"
+    )
+    .is_err());
+    assert!(
+        nivren::check("define compare(key: SecretKey) gives Bool { give key == key }").is_err()
+    );
+    assert!(nivren::check("define key() { std.crypto.key_generate() }").is_err());
+    let imported = eval_vm(
+        "std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\"))",
+    );
+    assert_eq!(imported.to_string(), "Ok(<secret-key>)");
+    assert_eq!(
+        eval_vm(
+            "choose std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\")) { Ok(key) => choose std.json.stringify(key) { Ok(text) => no, Err(problem) => yes }, Err(problem) => no }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ed25519_matches_rfc8032_and_rejects_tampering_in_both_engines() {
+    let source = r#"
+define verify_vector() gives Result<Bool, String> {
+    keep seed = std.encoding.unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
+    keep key = std.crypto.key_import(seed) or give
+    keep public = std.crypto.ed25519_public(key) or give
+    keep expected_public = std.encoding.unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a") or give
+    assert(public == expected_public, "RFC 8032 public key")
+    keep message = std.bytes.from_string("")
+    keep signature = std.crypto.ed25519_sign(key, message) or give
+    keep expected_signature = std.encoding.unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b") or give
+    assert(signature == expected_signature, "RFC 8032 signature")
+    keep valid = std.crypto.ed25519_verify(public, message, signature) or give
+    keep changed = std.crypto.ed25519_verify(public, std.bytes.from_string("changed"), signature) or give
+    give ok(valid and !changed)
+}
+verify_vector()
+"#;
+    assert_eq!(eval_tree(source), Value::Ok(Arc::new(Value::Bool(true))));
+    assert_eq!(eval_vm(source), Value::Ok(Arc::new(Value::Bool(true))));
+    assert_eq!(
+        eval(
+            "choose std.crypto.ed25519_verify(std.bytes.from_string(\"short\"), std.bytes.from_string(\"\"), std.bytes.from_string(\"short\")) { Ok(value) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn gzip_and_zlib_are_deterministic_bounded_and_portable_in_both_engines() {
+    let source = r#"
+define roundtrip() gives Result<Bool, String> {
+    keep input = std.bytes.from_string("Nivren Nivren Nivren")
+    keep first = std.compression.gzip(input, 6) or give
+    keep second = std.compression.gzip(input, 6) or give
+    assert(first == second, "gzip output is deterministic")
+    keep restored = std.compression.gunzip(first, 1024) or give
+    keep packed = std.compression.zlib(input, 9) or give
+    keep inflated = std.compression.unzlib(packed, 1024) or give
+    give ok(restored == input and inflated == input)
+}
+roundtrip()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Bool(true)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let limited = r#"
+keep input = std.bytes.from_string("a long value")
+keep packed = std.compression.gzip(input, 6)
+choose packed {
+    Ok(bytes) => choose std.compression.gunzip(bytes, 2) {
+        Ok(value) => no,
+        Err(problem) => yes,
+    },
+    Err(problem) => no,
+}
+"#;
+    assert_eq!(eval_vm(limited), Value::Bool(true));
+    assert_eq!(
+        eval_vm(
+            "choose std.compression.gunzip(std.bytes.from_string(\"invalid\"), 1024) { Ok(value) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+    assert!(nivren::check("std.compression.gzip(\"text\", 6)").is_err());
+}
+
+#[test]
+fn hex_and_base64_encodings_are_canonical_bounded_and_portable() {
+    let source = r#"
+define roundtrip() gives Result<Bool, String> {
+    keep bytes = std.bytes.from_string("Nivren?")
+    keep hex = std.encoding.hex(bytes) or give
+    keep standard = std.encoding.base64(bytes) or give
+    keep url = std.encoding.base64url(bytes) or give
+    assert(hex == "4e697672656e3f", "lowercase canonical hex")
+    assert(standard == "Tml2cmVuPw==", "padded standard base64")
+    assert(url == "Tml2cmVuPw", "unpadded URL-safe base64")
+    keep from_hex = std.encoding.unhex("4E697672656E3F") or give
+    keep from_standard = std.encoding.unbase64(standard) or give
+    keep from_url = std.encoding.unbase64url(url) or give
+    give ok(from_hex == bytes and from_standard == bytes and from_url == bytes)
+}
+roundtrip()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Bool(true)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    assert_eq!(
+        eval_vm("choose std.encoding.unhex(\"xyz\") { Ok(bytes) => no, Err(problem) => yes }"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval_vm(
+            "choose std.encoding.unbase64(\"not base64\") { Ok(bytes) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+    assert!(nivren::check("std.encoding.hex(\"text\")").is_err());
+}
+
+#[test]
+fn csv_tables_are_quoted_bounded_typed_and_portable_in_both_engines() {
+    let source = r#"
+define roundtrip() gives Result<Bool, String> {
+    keep headers = ["name", "note"]
+    keep rows = std.csv.decode("Ada,\"hello, Nivren\"\r\nLin,\"line one\nline two\"\r\n", headers, ",", 10) or give
+    assert(len(rows) == 2, "two CSV records")
+    assert(std.map.get(rows[0], "note") == "hello, Nivren", "quoted delimiter")
+    assert(std.map.get(rows[1], "note") == "line one\nline two", "quoted newline")
+    keep encoded = std.csv.encode(rows, headers, ",") or give
+    keep decoded = std.csv.decode(encoded, headers, ",", 10) or give
+    give ok(decoded == rows)
+}
+roundtrip()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Bool(true)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    assert_eq!(
+        eval_vm(
+            "choose std.csv.decode(\"a,b\\r\\nc\\r\\n\", [\"left\", \"right\"], \",\", 10) { Ok(rows) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval_vm(
+            "choose std.csv.decode(\"a\\r\\nb\\r\\n\", [\"value\"], \",\", 1) { Ok(rows) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+    assert!(nivren::check("std.csv.decode(1, [\"value\"], \",\", 10)").is_err());
+}
+
+#[test]
+fn persistent_maps_and_sets_are_generic_and_deterministic() {
+    let source = r#"
+keep first: Map<String, Int> = std.map.single("nivren", 1)
+keep scores: Map<String, Int> = std.map.set(first, "nivren", 2)
+keep score: Int = std.map.get(scores, "nivren") ?? 0
+keep names: Set<String> = std.set.add(std.set.single("nivren"), "language")
+assert(std.map.length(first) == 1, "persistent source map")
+assert(std.map.contains(scores, "nivren"), "map contains")
+assert(std.set.contains(names, "language"), "set contains")
+score + std.set.length(names)
+"#;
+    assert_eq!(eval_tree(source), Value::Int(4));
+    assert_eq!(eval_vm(source), Value::Int(4));
+
+    assert!(nivren::check("std.set.add(std.set.single(1), \"two\")").is_err());
+    assert!(nivren::check("keep wrong: Map<String> = std.map.single(\"a\", 1)").is_err());
+
+    let unstable = nivren::run(
+        "define identity<Value>(value: Value) gives Value { give value } std.map.single(identity, 1)",
+    )
+    .unwrap_err();
+    assert!(
+        unstable
+            .iter()
+            .any(|error| error.message.contains("Comparable")
+                || error.message.contains("immutable comparable key"))
+    );
+}
+
+#[test]
+fn generic_list_algorithms_compose_through_readable_pipelines() {
+    let source = r#"
+define double(value: Int) gives Int { give value * 2 }
+define even(value: Int) gives Bool { give value % 2 == 0 }
+define sum(total: Int, value: Int) gives Int { give total + value }
+define positive(value: Int) gives Bool { give value > 0 }
+keep values: [Int] = [1, 2, 3] through std.list.transform(double) through std.list.select(even)
+assert(std.list.any(values, positive), "any")
+assert(std.list.every(values, positive), "every")
+std.list.fold(values, 0, sum)
+"#;
+    assert_eq!(eval_tree(source), Value::Int(12));
+    assert_eq!(eval_vm(source), Value::Int(12));
+
+    assert!(
+        nivren::check(
+            "define wrong(value: Int) gives Int { give value } std.list.select([1], wrong)",
+        )
+        .is_err()
+    );
+
+    let hidden_effect = nivren::check(
+        "define note(value: Int) gives Int needs Log { std.log.info(\"value\") give value } define collect() gives [Int] { give std.list.transform([1], note) }",
+    )
+    .unwrap_err();
+    assert!(
+        hidden_effect
+            .iter()
+            .any(|error| error.message.contains("needs Log"))
+    );
+}
+
+#[test]
+fn iterator_values_adapt_bound_and_consume_sequences() {
+    let source = r#"
+define double(value: Int) gives Int { give value * 2 }
+define above_two(value: Int) gives Bool { give value > 2 }
+keep source = std.iter.from([1, 2, 3, 4, 5])
+keep mapped = std.iter.transform(source, double)
+keep selected = std.iter.select(mapped, above_two)
+keep bounded = std.iter.take(std.iter.skip(selected, 1), 2)
+change total = 0
+each value within bounded { total = total + value }
+keep cursor = std.iter.from([7])
+keep first = std.iter.next(cursor) ?? 0
+keep ending = std.iter.next(cursor) ?? 9
+total + first + ending
+"#;
+    assert_eq!(eval_tree(source), Value::Int(30));
+    assert_eq!(eval_vm(source), Value::Int(30));
+
+    let collected = r#"
+keep stream = std.iter.from(["a", "b"])
+std.iter.collect(stream)
+"#;
+    assert_eq!(
+        eval_vm(collected),
+        Value::Array(Arc::new(vec![
+            Value::String("a".into()),
+            Value::String("b".into())
+        ]))
+    );
+
+    let hidden_effect = nivren::check(
+        "define note(value: Int) gives Int needs Log { std.log.info(\"value\") give value } define collect() gives Iterator<Int> { give std.iter.transform(std.iter.from([1]), note) }",
+    )
+    .unwrap_err();
+    assert!(
+        hidden_effect
+            .iter()
+            .any(|error| error.message.contains("needs Log"))
+    );
+}
+
+#[test]
+fn iterator_callback_adapters_are_truly_lazy_and_share_one_cursor() {
+    let source = r#"
+change calls = 0
+define observe(value: Int) gives Int {
+    calls = calls + 1
+    give value * 2
+}
+define above_four(value: Int) gives Bool { give value > 4 }
+
+keep mapped = std.iter.transform(std.iter.from([1, 2, 3, 4]), observe)
+assert(calls == 0, "transform must not run eagerly")
+keep first = std.iter.next(mapped) ?? -1
+assert(calls == 1, "next evaluates exactly one transform")
+keep selected = std.iter.select(mapped, above_four)
+assert(calls == 1, "select must not scan eagerly")
+keep chosen = std.iter.next(selected) ?? -1
+assert(calls == 3, "select stops at its first match")
+keep remaining = std.iter.next(mapped) ?? -1
+first + chosen + remaining + calls
+"#;
+    assert_eq!(eval_tree(source), Value::Int(20));
+    assert_eq!(eval_vm(source), Value::Int(20));
+}
+
+#[test]
+fn iterator_terminals_chain_fold_query_and_short_circuit_in_both_engines() {
+    let source = r#"
+define add(total: Int, value: Int) gives Int { give total + value }
+define even(value: Int) gives Bool { give value % 2 == 0 }
+define positive(value: Int) gives Bool { give value > 0 }
+define three(value: Int) gives Bool { give value == 3 }
+
+keep joined = std.iter.chain(std.iter.from([1, 2]), std.iter.from([3, 4]))
+keep sum = std.iter.fold(joined, 0, add)
+keep found = std.iter.find(std.iter.from([1, 2, 3, 4]), three) ?? 0
+keep has_even = std.iter.any(std.iter.from([1, 2, 3, 4]), even)
+keep all_positive = std.iter.every(std.iter.from([1, 2, 3, 4]), positive)
+keep count = std.iter.count(std.iter.from([1, 2, 3, 4]))
+change score = sum + found + count
+when has_even { score = score + 10 }
+when all_positive { score = score + 20 }
+score
+"#;
+    assert_eq!(eval_tree(source), Value::Int(47));
+    assert_eq!(eval_vm(source), Value::Int(47));
+}
+
+#[test]
+fn lazy_range_sources_are_bounded_single_pass_and_dual_engine() {
+    let source = r#"
+define add(total: Int, value: Int) gives Int { give total + value }
+define sample() gives Result<Int, String> {
+    keep source = std.iter.range(0, 1000000, 1) or give
+    keep first = std.iter.next(source) ?? -1
+    keep page = std.iter.take(source, 3)
+    keep subtotal = std.iter.fold(page, 0, add)
+    keep descending = std.iter.range(5, -1, -2) or give
+    keep descending_total = std.iter.fold(descending, 0, add)
+    give ok(first + subtotal + descending_total)
+}
+sample()
+"#;
+    let expected = Value::Ok(Arc::new(Value::Int(15)));
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+
+    let zero_step =
+        eval_vm("choose std.iter.range(0, 10, 0) { Ok(stream) => no, Err(problem) => yes }");
+    assert_eq!(zero_step, Value::Bool(true));
+
+    let excessive =
+        eval_vm("choose std.iter.range(0, 1000001, 1) { Ok(stream) => no, Err(problem) => yes }");
+    assert_eq!(excessive, Value::Bool(true));
+}
+
+#[test]
 fn typed_tcp_standard_library_uses_bounded_timeouts() {
     use std::io::Write as _;
 
@@ -758,8 +3110,1267 @@ fn typed_tcp_standard_library_uses_bounded_timeouts() {
 }
 
 #[test]
+fn tcp_framing_reads_exact_bytes_without_consuming_the_next_message() {
+    use std::io::Write as _;
+
+    for vm in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind framing test: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"+OK\r\nhelloNEXT\r\n").unwrap();
+        });
+        let source = format!(
+            r#"
+define framed() gives Result<String, String> needs Network {{
+    using stream = std.net.connect("127.0.0.1", {port}, 2.0) or give {{
+        keep line = std.net.read_line(stream, 64, 2.0) or give
+        assert(line == "+OK", "line framing")
+        keep body = std.net.read_exact_bytes(stream, 5, 2.0) or give
+        keep text = std.bytes.to_string(body) or give
+        keep next = std.net.read_line(stream, 64, 2.0) or give
+        assert(next == "NEXT", "next frame remains")
+        give ok(text)
+    }}
+}}
+framed()
+"#
+        );
+        let result = if vm {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Ok(Arc::new(Value::String("hello".into()))));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn official_redis_decodes_recursive_arrays_without_frame_overread() {
+    use std::io::Write as _;
+
+    let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
+    for vm in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind Redis framing test: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"*3\r\n+OK\r\n:42\r\n$5\r\nhello\r\n+NEXT\r\n")
+                .unwrap();
+        });
+        let source = format!(
+            r#"{redis}
+define probe() gives Result<Int, String> needs Network {{
+    using stream = connect("127.0.0.1", {port}, 2.0) or give {{
+        keep first = receive(stream, 2.0, 1024) or give
+        keep count = choose first {{
+            Array(items) => len(items),
+            Text(text) => -1,
+            Error(problem) => -1,
+            Integer(number) => -1,
+            Boolean(value) => -1,
+            Double(number) => -1,
+            BigNumber(number) => -1,
+            Bulk(data) => -1,
+            BlobError(data) => -1,
+            Verbatim(data) => -1,
+            Map(entries) => -1,
+            Set(values) => -1,
+            Push(values) => -1,
+            Null => -1
+        }}
+        keep second = receive(stream, 2.0, 1024) or give
+        keep next = choose second {{
+            Text(text) => text == "NEXT",
+            Error(problem) => no,
+            Integer(number) => no,
+            Boolean(value) => no,
+            Double(number) => no,
+            BigNumber(number) => no,
+            Bulk(data) => no,
+            BlobError(data) => no,
+            Verbatim(data) => no,
+            Array(items) => no,
+            Map(entries) => no,
+            Set(values) => no,
+            Push(values) => no,
+            Null => no
+        }}
+        when !next {{ give ok(-1) }}
+        give ok(count)
+    }}
+}}
+choose probe() {{ Ok(value) => value, Err(problem) => -2 }}
+"#
+        );
+        let result = if vm {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Int(3));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn official_redis_authenticates_and_pipelines_without_frame_loss() {
+    use std::io::{Read as _, Write as _};
+
+    let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
+    for vm in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind Redis pipeline test: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let auth = b"*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\n";
+            let mut request = vec![0; auth.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, auth);
+            stream.write_all(b"+OK\r\n").unwrap();
+            let pipeline = b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+            request.resize(pipeline.len(), 0);
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, pipeline);
+            stream.write_all(b"+PONG\r\n$5\r\nvalue\r\n").unwrap();
+        });
+        let source = format!(
+            r#"{redis}
+define probe() gives Result<String, String> needs Network {{
+    keep opened = open("127.0.0.1", {port}, 2.0) or give
+    keep empty = pool(2) or give
+    keep stored = pool_add(empty, opened) or give
+    keep leased = pool_take(stored) or give
+    keep authenticated = authenticate(leased.connection, "", "secret", 2.0, 1024) or give
+    keep responses = pipeline(leased.connection, [["PING"], ["GET", "key"]], 2.0, 1024) or give
+    keep pong = choose responses[0] {{
+        Text(message) => message == "PONG",
+        Error(problem) => no,
+        Integer(number) => no,
+        Boolean(flag) => no,
+        Double(number) => no,
+        BigNumber(number) => no,
+        Bulk(data) => no,
+        BlobError(data) => no,
+        Verbatim(data) => no,
+        Array(values) => no,
+        Map(entries) => no,
+        Set(values) => no,
+        Push(values) => no,
+        Null => no
+    }}
+    keep value = choose responses[1] {{
+        Bulk(data) => data == std.bytes.from_string("value"),
+        Text(message) => no,
+        Error(problem) => no,
+        Integer(number) => no,
+        Boolean(flag) => no,
+        Double(number) => no,
+        BigNumber(number) => no,
+        Array(values) => no,
+        BlobError(data) => no,
+        Verbatim(data) => no,
+        Map(entries) => no,
+        Set(values) => no,
+        Push(values) => no,
+        Null => no
+    }}
+    close(leased.connection) or give
+    when pong and value and len(leased.pool.idle) == 0 {{ give ok(std.int.format(len(responses))) }}
+    give ok("invalid responses")
+}}
+choose probe() {{ Ok(value) => value, Err(problem) => problem }}
+"#
+        );
+        let result = if vm {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::String("2".into()));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn official_redis_secure_connection_verifies_certificates() {
+    use std::io::{Read as _, Write as _};
+
+    let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
+    for vm in [false, true] {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let certificate_pem = cert.pem();
+        let certificate = cert.der().clone();
+        let private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()),
+        );
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap();
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind secure Redis test: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, stream);
+            let expected = b"*1\r\n$4\r\nPING\r\n";
+            let mut request = vec![0; expected.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, expected);
+            stream.write_all(b"+PONG\r\n").unwrap();
+        });
+        let root = serde_json::to_string(&certificate_pem).unwrap();
+        let source = format!(
+            r#"{redis}
+define probe() gives Result<Bool, String> needs Network {{
+    keep options = std.map.set(std.web.tls_options(), "additional_root_pem", {root})
+    keep opened = open_secure("localhost", {port}, 3.0, options) or give
+    keep responses = pipeline(opened, [["PING"]], 3.0, 1024) or give
+    close(opened) or give
+    give ok(choose responses[0] {{
+        Text(message) => message == "PONG",
+        Error(problem) => no,
+        Integer(number) => no,
+        Boolean(flag) => no,
+        Double(number) => no,
+        BigNumber(number) => no,
+        Bulk(data) => no,
+        BlobError(data) => no,
+        Verbatim(data) => no,
+        Array(values) => no,
+        Map(entries) => no,
+        Set(values) => no,
+        Push(values) => no,
+        Null => no
+    }})
+}}
+choose probe() {{ Ok(value) => value, Err(problem) => no }}
+"#
+        );
+        let result = if vm {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Bool(true));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn official_redis_follows_bounded_moved_and_ask_redirects() {
+    use std::io::{Read as _, Write as _};
+
+    let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
+    for vm in [false, true] {
+        for kind in ["MOVED", "ASK"] {
+            let first = match std::net::TcpListener::bind("127.0.0.1:0") {
+                Ok(listener) => listener,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("cannot bind Redis redirect source: {error}"),
+            };
+            let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let first_port = first.local_addr().unwrap().port();
+            let second_port = second.local_addr().unwrap().port();
+            let kind_owned = kind.to_string();
+            let first_server = std::thread::spawn(move || {
+                let (mut stream, _) = first.accept().unwrap();
+                let ping = b"*1\r\n$4\r\nPING\r\n";
+                let mut request = vec![0; ping.len()];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(request, ping);
+                write!(stream, "-{kind_owned} 42 127.0.0.1:{second_port}\r\n").unwrap();
+            });
+            let ask = kind == "ASK";
+            let second_server = std::thread::spawn(move || {
+                let (mut stream, _) = second.accept().unwrap();
+                if ask {
+                    let asking = b"*1\r\n$6\r\nASKING\r\n";
+                    let mut request = vec![0; asking.len()];
+                    stream.read_exact(&mut request).unwrap();
+                    assert_eq!(request, asking);
+                    stream.write_all(b"+OK\r\n").unwrap();
+                }
+                let ping = b"*1\r\n$4\r\nPING\r\n";
+                let mut request = vec![0; ping.len()];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(request, ping);
+                stream.write_all(b"+PONG\r\n").unwrap();
+            });
+            let source = format!(
+                r#"{redis}
+define probe() gives Result<Bool, String> needs Network {{
+    keep configured = client("127.0.0.1", {first_port}, "", "", no, std.web.tls_options(), 2.0, 1024, 2) or give
+    keep outcome = execute(configured, ["PING"]) or give
+    give ok(choose outcome.response {{
+        Text(message) => message == "PONG",
+        Error(problem) => no,
+        Integer(number) => no,
+        Boolean(flag) => no,
+        Double(number) => no,
+        BigNumber(number) => no,
+        Bulk(data) => no,
+        BlobError(data) => no,
+        Verbatim(data) => no,
+        Array(values) => no,
+        Map(entries) => no,
+        Set(values) => no,
+        Push(values) => no,
+        Null => no
+    }})
+}}
+choose probe() {{ Ok(value) => value, Err(problem) => no }}
+"#
+            );
+            let result = if vm {
+                eval_vm(&source)
+            } else {
+                eval_tree(&source)
+            };
+            assert_eq!(result, Value::Bool(true), "{kind} in VM={vm}");
+            first_server.join().unwrap();
+            second_server.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn official_redis_decodes_bounded_resp3_aggregates() {
+    use std::io::Write as _;
+
+    let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
+    for vm in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind RESP3 test: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(
+                b"*9\r\n#t\r\n,1.5\r\n(123456789012345678901\r\n!3\r\nERR\r\n=9\r\ntxt:hello\r\n%1\r\n+key\r\n:1\r\n~2\r\n+a\r\n+b\r\n>2\r\n+message\r\n+payload\r\n_\r\n+NEXT\r\n",
+            )
+            .unwrap();
+        });
+        let source = format!(
+            r#"{redis}
+define probe() gives Result<Int, String> needs Network {{
+    keep opened = open("127.0.0.1", {port}, 2.0) or give
+    keep first = receive_connection(opened, 2.0, 4096) or give
+    keep count = choose first {{
+        Array(values) => len(values),
+        Text(value) => -1, Error(value) => -1, Integer(value) => -1,
+        Boolean(value) => -1, Double(value) => -1, BigNumber(value) => -1,
+        Bulk(value) => -1, BlobError(value) => -1, Verbatim(value) => -1,
+        Map(value) => -1, Set(value) => -1, Push(value) => -1, Null => -1
+    }}
+    keep second = receive_connection(opened, 2.0, 4096) or give
+    keep framed = choose second {{
+        Text(value) => value == "NEXT",
+        Error(value) => no, Integer(value) => no, Boolean(value) => no,
+        Double(value) => no, BigNumber(value) => no, Bulk(value) => no,
+        BlobError(value) => no, Verbatim(value) => no, Array(value) => no,
+        Map(value) => no, Set(value) => no, Push(value) => no, Null => no
+    }}
+    close(opened)
+    when framed {{ give ok(count) }}
+    give ok(-1)
+}}
+choose probe() {{ Ok(value) => value, Err(problem) => -2 }}
+"#
+        );
+        let result = if vm {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Int(9));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires NIVREN_REDIS_PORT pointing at a live Redis release"]
+fn official_redis_live_release_matrix() {
+    let port = std::env::var("NIVREN_REDIS_PORT")
+        .expect("NIVREN_REDIS_PORT is required")
+        .parse::<u16>()
+        .expect("NIVREN_REDIS_PORT must be a port");
+    let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
+    let source = format!(
+        r#"{redis}
+define probe() gives Result<Bool, String> needs Network {{
+    keep configured = client("127.0.0.1", {port}, "", "", no, std.web.tls_options(), 3.0, 65536, 2) or give
+    keep hello = execute(configured, ["HELLO", "3"]) or give
+    keep hello_ok = choose hello.response {{
+        Map(entries) => len(entries) > 0,
+        Text(value) => no, Error(value) => no, Integer(value) => no,
+        Boolean(value) => no, Double(value) => no, BigNumber(value) => no,
+        Bulk(value) => no, BlobError(value) => no, Verbatim(value) => no,
+        Array(value) => no, Set(value) => no, Push(value) => no, Null => no
+    }}
+    keep stored = execute(hello.client, ["SET", "nivren:matrix", "edition3"]) or give
+    keep fetched = execute(stored.client, ["GET", "nivren:matrix"]) or give
+    keep value_ok = choose fetched.response {{
+        Bulk(value) => value == std.bytes.from_string("edition3"),
+        Text(value) => no, Error(value) => no, Integer(value) => no,
+        Boolean(value) => no, Double(value) => no, BigNumber(value) => no,
+        BlobError(value) => no, Verbatim(value) => no, Array(value) => no,
+        Map(value) => no, Set(value) => no, Push(value) => no, Null => no
+    }}
+    close(fetched.client.connection)
+    give ok(hello_ok and value_ok)
+}}
+choose probe() {{ Ok(value) => value, Err(problem) => no }}
+"#
+    );
+    assert_eq!(eval_tree(&source), Value::Bool(true));
+    assert_eq!(eval_vm(&source), Value::Bool(true));
+}
+
+#[test]
+fn tcp_partial_writes_make_backpressure_and_progress_explicit() {
+    use std::io::Read as _;
+
+    for bytecode in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = [0; 4];
+            stream.read_exact(&mut bytes).unwrap();
+            bytes
+        });
+        let source = format!(
+            r#"
+define send() gives Result<Int, String> needs Network {{
+    keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
+    using connection = stream {{
+        give std.net.write_some(connection, "abcdefgh", 4, 2.0)
+    }}
+}}
+choose send() {{ Ok(written) => written, Err(problem) => -1 }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Int(4));
+        assert_eq!(server.join().unwrap(), *b"abcd");
+    }
+}
+
+#[test]
+fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
+    use std::io::Write as _;
+
+    for bytecode in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            stream.write_all(b"ready").unwrap();
+        });
+        let source = format!(
+            r#"
+define probe() gives Result<Bool, String> needs Network {{
+    keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
+    using connection = stream {{
+        give std.net.ready(connection, "read", 2.0)
+    }}
+}}
+choose probe() {{ Ok(ready) => ready, Err(problem) => no }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Bool(true));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn tcp_reactor_selects_many_streams_and_drives_bounded_adapters() {
+    use std::io::{Read as _, Write as _};
+
+    for bytecode in [false, true] {
+        let first_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let first_port = first_listener.local_addr().unwrap().port();
+        let second_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let second_port = second_listener.local_addr().unwrap().port();
+        let first_server = std::thread::spawn(move || {
+            let (mut stream, _) = first_listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            stream.write_all(b"late").unwrap();
+        });
+        let second_server = std::thread::spawn(move || {
+            let (mut stream, _) = second_listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            stream.write_all(b"early").unwrap();
+            let mut acknowledgement = [0; 3];
+            stream.read_exact(&mut acknowledgement).unwrap();
+            acknowledgement
+        });
+        let source = format!(
+            r#"
+define exchange() gives Result<Int, String> needs Network {{
+    keep first_opened = std.net.connect("127.0.0.1", {first_port}, 2.0) or give
+    using first = first_opened {{
+        keep second_opened = std.net.connect("127.0.0.1", {second_port}, 2.0) or give
+        using second = second_opened {{
+            keep selected = std.net.ready_any([first, second], "read", 2.0) or give
+            keep index = selected ?? -1
+            keep message = std.net.read_ready(second, 5, 2.0) or give
+            keep written = std.net.write_ready(second, "ack", 1, 2.0) or give
+            when message == "early" {{ give ok(index) }}
+            give ok(-2)
+        }}
+    }}
+}}
+choose exchange() {{ Ok(index) => index, Err(problem) => -3 }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Int(1));
+        assert_eq!(second_server.join().unwrap(), *b"ack");
+        first_server.join().unwrap();
+    }
+}
+
+#[test]
+fn web_requests_are_bounded_typed_and_preserve_status_headers_and_body() {
+    use std::io::{Read as _, Write as _};
+
+    for bytecode in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind loopback test listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).unwrap();
+            request.truncate(read);
+            stream
+                .write_all(
+                    b"HTTP/1.1 418 Teapot\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\nnivren",
+                )
+                .unwrap();
+            request
+        });
+        let source = format!(
+            r#"
+keep headers = std.map.single("X-Nivren", "Edition3")
+keep response = std.web.request("POST", "http://127.0.0.1:{port}/echo", headers, "hello", 2.0, 1024)
+choose response {{
+    Ok(data) => (std.map.get(data, "status") ?? "missing") + ":" + (std.map.get(data, "body") ?? "missing") + ":" + (std.map.get(data, "header:content-type") ?? "missing"),
+    Err(problem) => problem
+}}
+"#
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::String("418:nivren:text/plain".into()));
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(request.starts_with("POST /echo HTTP/1.1\r\n"));
+        assert!(request.contains("X-Nivren: Edition3\r\n"));
+        assert!(request.ends_with("\r\n\r\nhello"));
+    }
+
+    assert!(
+        nivren::check(
+            "std.web.request(\"GET\", \"http://localhost\", std.web.headers(), \"\", 1.0, 1024)"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn official_trace_exports_bounded_otlp_http_json_in_both_engines() {
+    use std::io::{Read as _, Write as _};
+
+    let trace = fs::read_to_string("packages/nivren_trace/src/main.niv").unwrap();
+    for bytecode in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind OTLP test listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = vec![0; 8192];
+            let read = stream.read(&mut request).unwrap();
+            request.truncate(read);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let source = format!(
+            r#"{trace}
+define send() gives Result<String, String> needs Network {{
+    keep value = context("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", yes) or give
+    keep attribute = otlp_attribute("service.name", "nivren") or give
+    keep span = otlp_span(value, "request", "100", "250", [attribute]) or give
+    give export_otlp_json("http://127.0.0.1:{port}/v1/traces", std.web.headers(), span, 2.0)
+}}
+choose send() {{ Ok(status) => status, Err(problem) => problem }}
+"#
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::String("200".into()));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /v1/traces HTTP/1.1\r\n"));
+        assert!(request.contains("Content-Type: application/json\r\n"));
+        assert!(request.contains("\"resourceSpans\""));
+        assert!(request.contains("\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\""));
+        assert!(request.ends_with("}]}]}]}"));
+    }
+}
+
+#[test]
+fn url_components_are_strict_bounded_and_unicode_safe_in_both_engines() {
+    let source = r#"
+define roundtrip() gives Result<Bool, String> {
+    keep encoded = std.web.encode_component("Nivren / 🜁 +") or give
+    assert(encoded == "Nivren%20%2F%20%F0%9F%9C%81%20%2B", "RFC 3986 component")
+    keep decoded = std.web.decode_component(encoded) or give
+    keep plus = std.web.decode_component("a+b") or give
+    give ok(decoded == "Nivren / 🜁 +" and plus == "a+b")
+}
+roundtrip()
+"#;
+    assert_eq!(eval_tree(source), Value::Ok(Arc::new(Value::Bool(true))));
+    assert_eq!(eval_vm(source), Value::Ok(Arc::new(Value::Bool(true))));
+    assert_eq!(
+        eval_vm(
+            "choose std.web.decode_component(\"%GG\") { Ok(value) => no, Err(problem) => yes }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn websocket_standard_library_exchanges_bounded_text_in_both_engines() {
+    use std::io::Read as _;
+
+    for bytecode in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind WebSocket listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = vec![];
+            while !bytes.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+            }
+            let request = String::from_utf8(bytes).unwrap();
+            let mut lines = request[..request.len() - 4].split("\r\n");
+            assert_eq!(lines.next().unwrap(), "GET /echo HTTP/1.1");
+            let headers = lines
+                .map(|line| {
+                    let (name, value) = line.split_once(':').unwrap();
+                    (name.to_ascii_lowercase(), value.trim().to_string())
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut socket =
+                nivren::websocket::WebSocket::accept(Arc::new(Mutex::new(stream)), "GET", &headers)
+                    .unwrap();
+            assert_eq!(socket.receive_text(1024).unwrap(), "hello");
+            socket.send_text("echo:hello").unwrap();
+        });
+        let source = format!(
+            r#"
+define exchange() gives Result<String, String> needs Network {{
+    keep opened = std.web.websocket_connect("127.0.0.1", {port}, "/echo", 2.0) or give
+    using socket = opened {{
+        keep sent = std.web.websocket_send(socket, "hello") or give
+        give std.web.websocket_receive(socket, 1024)
+    }}
+}}
+choose exchange() {{ Ok(message) => message, Err(problem) => problem }}
+"#
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::String("echo:hello".into()));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn secure_websocket_listeners_serve_verified_tls_in_both_engines() {
+    for bytecode in [false, true] {
+        let reservation = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot reserve secure WebSocket port: {error}"),
+        };
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let certificate_pem = cert.pem();
+        let private_key_pem = key_pair.serialize_pem();
+        let trusted_certificate = cert.der().clone();
+        let rcgen::CertifiedKey {
+            cert: client_cert,
+            key_pair: client_key,
+        } = rcgen::generate_simple_self_signed(vec!["nivren-client".into()]).unwrap();
+        let client_ca_pem = client_cert.pem();
+        let client_certificate = client_cert.der().clone();
+        let client_private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(client_key.serialize_der()),
+        );
+        let client = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let stream = loop {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("cannot connect to secure Nivren listener: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(trusted_certificate).unwrap();
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(vec![client_certificate], client_private_key)
+                .unwrap();
+            let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+            let connection = rustls::ClientConnection::new(Arc::new(config), server_name).unwrap();
+            let stream = rustls::StreamOwned::new(connection, stream);
+            let mut socket =
+                nivren::websocket::WebSocket::connect_tls(stream, "localhost", "/secure").unwrap();
+            socket.send_text("encrypted hello").unwrap();
+            assert_eq!(socket.receive_text(1024).unwrap(), "secure:encrypted hello");
+        });
+        let certificate_literal = serde_json::to_string(&certificate_pem).unwrap();
+        let key_literal = serde_json::to_string(&private_key_pem).unwrap();
+        let client_ca_literal = serde_json::to_string(&client_ca_pem).unwrap();
+        let source = format!(
+            r#"
+define serve() gives Result<String, String> needs Network {{
+    keep auth_policy = std.map.set(std.web.tls_options(), "client_auth", "required")
+    keep options = std.map.set(auth_policy, "client_ca_pem", {client_ca_literal})
+    keep opened = std.web.websocket_secure_listen("127.0.0.1", {port}, {certificate_literal}, {key_literal}, options) or give
+    using listener = opened {{
+        keep accepted = std.web.websocket_secure_accept(listener, 3.0) or give
+        using socket = accepted {{
+            keep message = std.web.websocket_receive(socket, 1024) or give
+            keep sent = std.web.websocket_send(socket, "secure:" + message) or give
+            give ok(message)
+        }}
+    }}
+}}
+choose serve() {{ Ok(message) => message, Err(problem) => problem }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::String("encrypted hello".into()));
+        client.join().unwrap();
+    }
+}
+
+#[test]
+fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
+    for bytecode in [false, true] {
+        let rcgen::CertifiedKey {
+            cert: server_cert,
+            key_pair: server_key,
+        } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let server_certificate_pem = server_cert.pem();
+        let server_certificate = server_cert.der().clone();
+        let server_private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()),
+        );
+        let rcgen::CertifiedKey {
+            cert: client_cert,
+            key_pair: client_key,
+        } = rcgen::generate_simple_self_signed(vec!["nivren-client".into()]).unwrap();
+        let client_certificate_pem = client_cert.pem();
+        let client_private_key_pem = client_key.serialize_pem();
+        let mut client_roots = rustls::RootCertStore::empty();
+        client_roots.add(client_cert.der().clone()).unwrap();
+        let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .unwrap();
+        let server_config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(vec![server_certificate], server_private_key)
+            .unwrap();
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind mTLS WebSocket listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+            let stream = rustls::StreamOwned::new(connection, stream);
+            let mut socket = nivren::websocket::WebSocket::accept_tls_request(stream).unwrap();
+            assert_eq!(socket.receive_text(1024).unwrap(), "client identity");
+            socket.send_text("accepted identity").unwrap();
+        });
+        let server_root_literal = serde_json::to_string(&server_certificate_pem).unwrap();
+        let client_certificate_literal = serde_json::to_string(&client_certificate_pem).unwrap();
+        let client_key_literal = serde_json::to_string(&client_private_key_pem).unwrap();
+        let source = format!(
+            r#"
+define exchange() gives Result<String, String> needs Network {{
+    keep roots = std.map.set(std.web.tls_options(), "additional_root_pem", {server_root_literal})
+    keep identity = std.map.set(roots, "client_certificate_pem", {client_certificate_literal})
+    keep policy = std.map.set(identity, "client_private_key_pem", {client_key_literal})
+    keep opened = std.web.websocket_secure_connect("localhost", {port}, "/mutual", 3.0, policy) or give
+    using socket = opened {{
+        keep sent = std.web.websocket_send(socket, "client identity") or give
+        give std.web.websocket_receive(socket, 1024)
+    }}
+}}
+choose exchange() {{ Ok(message) => message, Err(problem) => problem }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::String("accepted identity".into()));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn tcp_listeners_accept_bounded_connections_and_close_with_scope() {
+    use std::io::{Read as _, Write as _};
+
+    for bytecode in [false, true] {
+        let reservation = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot reserve loopback port: {error}"),
+        };
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let client = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut stream = loop {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("cannot connect to Nivren listener: {error}"),
+                }
+            };
+            stream.write_all(b"ping").unwrap();
+            let mut reply = [0; 4];
+            stream.read_exact(&mut reply).unwrap();
+            reply
+        });
+        let source = format!(
+            r#"
+define serve(listener: TcpListener) gives Result<Int, String> needs Network {{
+    using server = listener {{
+        keep accepted = std.net.accept(server, 2.0)
+        using connection = accepted or give {{
+            keep request = std.net.read(connection, 4) or give
+            keep sent = std.net.write(connection, "pong") or give
+            give ok(len(request))
+        }}
+    }}
+}}
+keep opened = std.net.listen("127.0.0.1", {port})
+choose opened {{ Ok(listener) => serve(listener), Err(problem) => err(problem) }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(result, Value::Ok(Arc::new(Value::Int(4))));
+        assert_eq!(client.join().unwrap(), *b"pong");
+    }
+}
+
+#[test]
+fn tcp_line_iterators_are_lazy_bounded_and_recover_after_oversized_frames() {
+    use std::io::Write as _;
+
+    for bytecode in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind TCP iterator listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"one\r\n123456\r\nthree\r\n").unwrap();
+        });
+        let source = format!(
+            r#"
+define consume() gives Result<Bool, String> needs Network {{
+    keep opened = std.net.connect("127.0.0.1", {port}, 2.0) or give
+    using connection = opened {{
+        keep lines = std.iter.tcp_lines(connection, 5, 2.0) or give
+        keep first = std.iter.next(lines) ?? err("missing first line")
+        keep oversized = std.iter.next(lines) ?? err("missing oversized line")
+        keep third = std.iter.next(lines) ?? err("missing third line")
+        keep ended = std.iter.next(lines)
+        keep first_ok = choose first {{ Ok(value) => value == "one", Err(problem) => no }}
+        keep overflow_ok = choose oversized {{ Ok(value) => no, Err(problem) => yes }}
+        keep third_ok = choose third {{ Ok(value) => value == "three", Err(problem) => no }}
+        give ok(first_ok and overflow_ok and third_ok and ended == none)
+    }}
+}}
+choose consume() {{ Ok(value) => value, Err(problem) => no }}
+"#
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::Bool(true));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn web_servers_parse_bounded_requests_and_write_managed_responses() {
+    use std::io::{Read as _, Write as _};
+
+    for bytecode in [false, true] {
+        let reservation = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot reserve loopback port: {error}"),
+        };
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let client = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut stream = loop {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("cannot connect to Nivren web server: {error}"),
+                }
+            };
+            stream
+                .write_all(
+                    b"POST /items HTTP/1.1\r\nHost: localhost\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+        let source = format!(
+            r#"
+define serve(listener: TcpListener) gives Result<String, String> needs Network {{
+    using server = listener {{
+        keep accepted = std.net.accept(server, 2.0)
+        using connection = accepted or give {{
+            keep request = std.web.read_request(connection, 1024) or give
+            keep path = std.map.get(request, "path") ?? ""
+            keep body = std.map.get(request, "body") ?? ""
+            keep headers = std.map.single("Content-Type", "text/plain")
+            keep sent = std.web.respond(connection, 201, headers, "created") or give
+            give ok(path + ":" + body)
+        }}
+    }}
+}}
+keep opened = std.net.listen("127.0.0.1", {port})
+choose opened {{ Ok(listener) => serve(listener), Err(problem) => err(problem) }}
+"#
+        );
+        let result = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(
+            result,
+            Value::Ok(Arc::new(Value::String("/items:hello".into())))
+        );
+        let response = client.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+        assert!(response.contains("Content-Type: text/plain\r\n"));
+        assert!(response.ends_with("\r\n\r\ncreated"));
+    }
+}
+
+#[test]
+fn using_scopes_close_resources_on_normal_and_early_return_paths() {
+    use std::io::Read as _;
+
+    for (early_return, bytecode) in [(false, false), (false, true), (true, false), (true, true)] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind loopback test listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut received = vec![];
+            stream.read_to_end(&mut received).unwrap();
+            received
+        });
+        let function = if early_return {
+            "define finish(stream: TcpStream) gives Int needs Network { using socket = stream { give 7 } }"
+        } else {
+            "define finish(stream: TcpStream) gives Int needs Network { using socket = stream { keep sent = std.net.write(socket, \"closed\") none } give 7 }"
+        };
+        let source = format!(
+            "{function} keep opened = std.net.connect(\"127.0.0.1\", {port}, 2.0) choose opened {{ Ok(stream) => finish(stream), Err(problem) => 0 }}"
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::Int(7));
+        let received = server.join().unwrap();
+        if !early_return {
+            assert_eq!(received, b"closed");
+        }
+    }
+
+    assert!(nivren::check("using value = 42 { value }").is_err());
+    let missing = nivren::check(
+        "define finish(stream: TcpStream) gives Null { using socket = stream { none } }",
+    )
+    .unwrap_err();
+    assert!(
+        missing
+            .iter()
+            .any(|error| error.message.contains("needs Network"))
+    );
+}
+
+#[test]
+fn using_scopes_close_bounded_file_handles_in_both_engines() {
+    let directory = module_fixture("file-resources");
+    for (name, bytecode) in [("tree.txt", false), ("vm.txt", true)] {
+        let path = directory.join(name);
+        let source = format!(
+            r#"
+define save(path: String) gives Result<Int, String> needs FileWrite {{
+    keep opened = std.files.open_write(path)
+    using file = opened or give {{
+        keep written = std.files.write_open(file, "nivren") or give
+        give ok(7)
+    }}
+}}
+save("{}")
+"#,
+            path.display()
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::Ok(Arc::new(Value::Int(7))));
+        assert_eq!(fs::read_to_string(path).unwrap(), "nivren");
+    }
+
+    let readable = directory.join("read.txt");
+    fs::write(&readable, "bounded").unwrap();
+    let source = format!(
+        r#"
+define load(path: String) gives Result<String, String> needs FileRead {{
+    keep opened = std.files.open_read(path)
+    using file = opened or give {{
+        give std.files.read_open(file, 64)
+    }}
+}}
+load("{}")
+"#,
+        readable.display()
+    );
+    assert_eq!(
+        eval_vm(&source),
+        Value::Ok(Arc::new(Value::String("bounded".into())))
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cross_resource_failure_stress_closes_files_and_tcp_streams_in_both_engines() {
+    let directory = module_fixture("cross-resource-stress");
+    let path = directory.join("record.txt");
+    fs::write(&path, "bounded").unwrap();
+    for bytecode in [false, true] {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("cannot bind resource stress listener: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for _ in 0..64 {
+                let (stream, _) = listener.accept().unwrap();
+                drop(stream);
+            }
+        });
+        let source = format!(
+            r#"
+define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
+    change index = 0
+    repeat index < 64 {{
+        keep opened_file = std.files.open_read(path) or give
+        using file = opened_file {{
+            keep closed = std.files.close(file) or give
+            keep rejected = choose std.files.read_open(file, 1) {{ Ok(value) => no, Err(problem) => yes }}
+            when !rejected {{ give err("closed file accepted a read") }}
+        }}
+        keep opened_stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
+        using connection = opened_stream {{
+            keep rejected = choose std.net.read_exact_bytes(connection, 1, 2.0) {{ Ok(value) => no, Err(problem) => yes }}
+            when !rejected {{ give err("closed peer produced an exact byte") }}
+        }}
+        index = index + 1
+    }}
+    give ok(index)
+}}
+stress("{}")
+"#,
+            path.display()
+        );
+        let value = if bytecode {
+            eval_vm(&source)
+        } else {
+            eval_tree(&source)
+        };
+        assert_eq!(value, Value::Ok(Arc::new(Value::Int(64))));
+        server.join().unwrap();
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn async_files_use_bounded_executor_tasks_in_both_engines() {
+    let directory = module_fixture("async-files");
+    let path = directory.join("message.txt");
+    let path = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let source = format!(
+        r#"
+define roundtrip() gives Result<String, String> needs FileRead, FileWrite, Task {{
+    keep writing = std.files.write_async("{path}", "async nivren") or give
+    keep written = wait writing or give
+    keep reading = std.files.read_async("{path}", 1024) or give
+    give wait reading
+}}
+choose roundtrip() {{ Ok(contents) => contents, Err(problem) => problem }}
+"#
+    );
+    assert_eq!(eval_tree(&source), Value::String("async nivren".into()));
+    assert_eq!(eval_vm(&source), Value::String("async nivren".into()));
+    assert!(nivren::check("std.files.read_async(\"file\", 0)").is_ok());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn structured_tasks_cancel_and_exchange_channel_values() {
-    let source = "keep channel = std.channel.create(1); define producer() gives Int { keep sent = std.channel.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.task.spawn(producer); keep received = std.channel.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.task.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
+    let source = "keep channel = std.channel.create(1); define producer() gives Int needs Channel { keep sent = std.channel.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.task.spawn(producer); keep received = std.channel.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.task.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
     assert_eq!(eval_vm(source), Value::Int(42));
 
     let cancellation = "define forever() gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.task.spawn(forever); std.task.cancel(task); keep result = std.task.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
@@ -857,6 +4468,125 @@ fn runtime_metrics_cover_nested_bytecode_and_operations() {
 }
 
 #[test]
+fn structured_log_events_are_machine_readable_and_capability_checked() {
+    let directory = module_fixture("structured-log");
+    let source = directory.join("event.niv");
+    fs::write(
+        &source,
+        "std.log.event(\"info\", \"started\", std.map.single(\"request\", \"42\"))",
+    )
+    .unwrap();
+    let source_text = source.display().to_string();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["run", &source_text])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let event: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(event["level"], "info");
+    assert_eq!(event["message"], "started");
+    assert_eq!(event["fields"]["request"], "42");
+
+    let missing = nivren::check(
+        "define emit() gives Null { give std.log.event(\"info\", \"x\", std.map.single(\"key\", \"value\")) }",
+    )
+    .unwrap_err();
+    assert!(
+        missing
+            .iter()
+            .any(|error| error.message.contains("needs Log"))
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
+    let directory = module_fixture("observability-reports");
+    let healthy = directory.join("healthy.niv");
+    let failing = directory.join("failing.niv");
+    let profile = directory.join("profile.json");
+    let crash = directory.join("crash.json");
+    fs::write(&healthy, "keep answer = 6 * 7; answer").unwrap();
+    fs::write(
+        &failing,
+        "define secret() gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
+    )
+    .unwrap();
+    let niv = env!("CARGO_BIN_EXE_niv");
+    let output = std::process::Command::new(niv)
+        .args([
+            "profile",
+            "--json",
+            profile.to_str().unwrap(),
+            healthy.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&profile).unwrap()).unwrap();
+    assert_eq!(report["schema"], "org.nivren.observation.v1");
+    assert_eq!(report["kind"], "profile");
+    assert!(report["instructions"].as_u64().unwrap() > 0);
+
+    let output = std::process::Command::new(niv)
+        .args([
+            "run",
+            "--crash-report",
+            crash.to_str().unwrap(),
+            failing.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let bytes = fs::read(&crash).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(report["schema"], "org.nivren.crash.v1");
+    assert_eq!(report["program"], "failing.niv");
+    assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE-SOURCE"));
+    assert!(!String::from_utf8_lossy(&bytes).contains(directory.to_str().unwrap()));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_snapshot_tests_require_explicit_review_and_acceptance() {
+    let directory = module_fixture("snapshot-tests");
+    let source = directory.join("answer_test.niv");
+    fs::write(&source, "6 * 7").unwrap();
+    let niv = env!("CARGO_BIN_EXE_niv");
+    let path = directory.to_str().unwrap();
+    let missing = std::process::Command::new(niv)
+        .args(["test", "--snapshots", path])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    let accepted = std::process::Command::new(niv)
+        .args(["test", "--accept-snapshots", path])
+        .output()
+        .unwrap();
+    assert!(accepted.status.success());
+    assert_eq!(
+        fs::read_to_string(format!("{}.snap", source.display())).unwrap(),
+        "42\n"
+    );
+    let verified = std::process::Command::new(niv)
+        .args(["test", "--snapshots", path])
+        .output()
+        .unwrap();
+    assert!(verified.status.success());
+    fs::write(&source, "7 * 7").unwrap();
+    let changed = std::process::Command::new(niv)
+        .args(["test", "--snapshots", path])
+        .output()
+        .unwrap();
+    assert!(!changed.status.success());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn debugger_hook_steps_source_and_exposes_user_variables() {
     let source = "keep answer = 42;\nanswer + 1";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
@@ -905,6 +4635,14 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
     nivren::package::publish(&first, &registry).unwrap();
     let fetched = nivren::package::fetch("sample", "1.2.3", &registry).unwrap();
     assert_eq!(fetched, first);
+    assert_eq!(
+        nivren::package::search("amp", &registry).unwrap(),
+        vec![nivren::package::SearchResult {
+            name: "sample".into(),
+            versions: vec!["1.2.3".into()],
+        }]
+    );
+    assert!(nivren::package::search("../", &registry).is_err());
     let destination = project.with_file_name(format!(
         "nivren-package-extracted-{}-{:?}",
         std::process::id(),
@@ -928,6 +4666,207 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
     fs::remove_dir_all(project).unwrap();
     fs::remove_dir_all(registry).unwrap();
     fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn official_packages_test_document_publish_install_and_run_together() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let registry = module_fixture("official-package-registry");
+    let package_names = [
+        "nivren_aead",
+        "nivren_aws",
+        "nivren_columnar",
+        "nivren_compression",
+        "nivren_crypto",
+        "nivren_csv",
+        "nivren_discord",
+        "nivren_image",
+        "nivren_jwt",
+        "nivren_matrix",
+        "nivren_metrics",
+        "nivren_oidc",
+        "nivren_redis",
+        "nivren_routing",
+        "nivren_secrets",
+        "nivren_sql",
+        "nivren_stats",
+        "nivren_svg",
+        "nivren_testing",
+        "nivren_trace",
+        "nivren_validation",
+        "nivren_wav",
+    ];
+    for name in package_names {
+        let root = repository.join("packages").join(name);
+        let tested = Command::new(env!("CARGO_BIN_EXE_niv"))
+            .args(["test", root.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            tested.status.success(),
+            "official package {name} tests failed:\n{}",
+            String::from_utf8_lossy(&tested.stderr)
+        );
+        let manifest = nivren::project::Manifest::load(&root).unwrap();
+        let program =
+            nivren::modules::load_project(&manifest.root, &manifest.entry_path()).unwrap();
+        nivren::typecheck::check(&program).unwrap();
+        let docs = nivren::documentation::generate(&manifest.name, &manifest.version, &program);
+        assert!(docs.contains(name));
+        assert!(docs.contains("## Public API"));
+        let package = nivren::package::Package::build(&manifest).unwrap();
+        let first = package.encode().unwrap();
+        let second = nivren::package::Package::build(&manifest)
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(first, second);
+        nivren::package::publish(&first, &registry).unwrap();
+    }
+    let results = nivren::package::search("nivren", &registry).unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>(),
+        package_names
+    );
+
+    let consumer = module_fixture("official-package-consumer");
+    fs::create_dir_all(consumer.join("src")).unwrap();
+    fs::write(
+        consumer.join("niv.toml"),
+        "[package]\nname = \"official_consumer\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[dependencies]\nnivren_aead = \"1.0.0\"\nnivren_aws = \"1.0.0\"\nnivren_columnar = \"1.0.0\"\nnivren_compression = \"1.0.0\"\nnivren_csv = \"1.0.0\"\nnivren_crypto = \"1.0.0\"\nnivren_discord = \"1.0.0\"\nnivren_image = \"1.0.0\"\nnivren_jwt = \"1.0.0\"\nnivren_matrix = \"1.0.0\"\nnivren_metrics = \"1.0.0\"\nnivren_oidc = \"1.0.0\"\nnivren_redis = \"1.0.0\"\nnivren_routing = \"1.0.0\"\nnivren_secrets = \"1.0.0\"\nnivren_sql = \"1.0.0\"\nnivren_stats = \"1.0.0\"\nnivren_svg = \"1.0.0\"\nnivren_testing = \"1.0.0\"\nnivren_trace = \"1.0.0\"\nnivren_validation = \"1.0.0\"\nnivren_wav = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        consumer.join("src/main.niv"),
+        r#"
+use "@nivren_routing"
+use "@nivren_aead"
+use "@nivren_aws"
+use "@nivren_columnar"
+use "@nivren_testing"
+use "@nivren_validation"
+use "@nivren_discord"
+use "@nivren_image"
+use "@nivren_crypto"
+use "@nivren_compression"
+use "@nivren_csv"
+use "@nivren_secrets"
+use "@nivren_sql"
+use "@nivren_stats"
+use "@nivren_jwt"
+use "@nivren_matrix"
+use "@nivren_metrics"
+use "@nivren_oidc"
+use "@nivren_redis"
+use "@nivren_svg"
+use "@nivren_wav"
+use "@nivren_trace"
+
+keep health = nivren_routing.route("GET", "/health", "health")
+keep selected = nivren_routing.first_match([health], "GET", "/health")
+keep body = nivren_discord.message_body("hello")
+keep encoded = choose body { Ok(text) => text, Err(problem) => "" }
+keep crypto_ok = choose nivren_crypto.sign("secret", "hello") {
+    Ok(tag) => nivren_crypto.verify("secret", "hello", tag) == ok(yes),
+    Err(problem) => no,
+}
+keep sql_ok = choose nivren_sql.select("users", ["id"]) {
+    Ok(query) => query.text == "SELECT id FROM users",
+    Err(problem) => no,
+}
+keep redis_ok = nivren_redis.command(["PING"]) == ok("*1\r\n$4\r\nPING\r\n")
+keep compressed = nivren_compression.gzip_text("Nivren", 6)
+keep compression_ok = choose compressed { Ok(bytes) => nivren_compression.gunzip_text(bytes, 1024) == ok("Nivren"), Err(problem) => no }
+keep csv_rows = nivren_csv.decode("Nivren,1\r\n", ["name", "version"], 10)
+keep csv_ok = choose csv_rows { Ok(rows) => len(rows) == 1 and std.map.get(rows[0], "name") == "Nivren", Err(problem) => no }
+keep stats_ok = nivren_stats.mean([1.0, 2.0, 3.0]) == ok(2.0)
+keep jwt_secret = std.bytes.from_string("official package test secret")
+keep jwt_token = nivren_jwt.sign_hs256("{\"sub\":\"42\"}", jwt_secret)
+keep jwt_ok = choose jwt_token { Ok(token) => nivren_jwt.verify_hs256(token, jwt_secret) == ok("{\"sub\":\"42\"}"), Err(problem) => no }
+keep aws_signed = nivren_aws.sign_v4("GET", "/", "Action=ListUsers&Version=2010-05-08", "content-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z", "content-type;host;x-amz-date", "", "20150830T123600Z", "20150830", "us-east-1", "iam", "AKIDEXAMPLE", std.bytes.from_string("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"))
+keep aws_ok = choose aws_signed { Ok(value) => value.canonical_request_hash == "f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59", Err(problem) => no }
+keep matrix_value = nivren_matrix.matrix(1, 2, [2.0, 3.0])
+keep matrix_ok = choose matrix_value { Ok(value) => nivren_matrix.transpose(value).values == [2.0, 3.0], Err(problem) => no }
+keep columnar_value = nivren_columnar.table([nivren_columnar.Column.Ints(nivren_columnar.IntColumn("id", [1, 2]))])
+keep columnar_ok = choose columnar_value { Ok(value) => value.rows == 2, Err(problem) => no }
+keep svg_value = nivren_svg.canvas(16, 16)
+keep svg_ok = choose svg_value { Ok(value) => choose nivren_svg.render(value) { Ok(text) => text != "", Err(problem) => no }, Err(problem) => no }
+keep wav_value = nivren_wav.encode_pcm16(nivren_wav.Audio(48000, 1, [0, 42]))
+keep wav_ok = choose wav_value { Ok(bytes) => choose nivren_wav.decode_pcm16(bytes) { Ok(audio) => audio.samples == [0, 42], Err(problem) => no }, Err(problem) => no }
+keep image_pixels = std.bytes.from_values([255, 0, 0])
+keep image_ok = choose image_pixels { Ok(pixels) => choose nivren_image.image(1, 1, pixels) { Ok(value) => choose nivren_image.encode_ppm(value) { Ok(bytes) => nivren_image.decode_ppm(bytes) == ok(value), Err(problem) => no }, Err(problem) => no }, Err(problem) => no }
+keep metric_value = nivren_metrics.sample("nivren_ready", "Readiness", "gauge", 1.0, std.map.single("edition", "3"))
+keep metrics_ok = choose metric_value { Ok(value) => choose nivren_metrics.encode([value]) { Ok(text) => text != "", Err(problem) => no }, Err(problem) => no }
+keep trace_value = nivren_trace.parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+keep trace_ok = choose trace_value { Ok(value) => nivren_trace.traceparent(value) == ok("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), Err(problem) => no }
+keep oidc_ok = nivren_oidc.pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == ok("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+keep password_hash = nivren_secrets.hash_password_with_salt("secret", std.bytes.from_string("0123456789abcdef"))
+keep secrets_ok = choose password_hash { Ok(hash) => nivren_secrets.verify_password("secret", hash) == ok(yes), Err(problem) => no }
+keep aead_key = nivren_aead.import_key(std.bytes.from_string("0123456789abcdef0123456789abcdef"))
+keep aead_nonce = std.bytes.from_string("unique-nonce")
+keep aead_context = std.bytes.from_string("record:42")
+keep aead_ok = choose aead_key {
+    Ok(key) => choose nivren_aead.seal_with_nonce(key, aead_nonce, aead_context, std.bytes.from_string("Nivren")) {
+        Ok(value) => nivren_aead.unseal(key, aead_context, value) == ok(std.bytes.from_string("Nivren")),
+        Err(problem) => no,
+    },
+    Err(problem) => no,
+}
+keep checked = nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
+keep port = nivren_validation.range("port", 443, 1, 65535)
+choose checked {
+    Ok(value) => choose port { Ok(number) => number, Err(problem) => 0 },
+    Err(problem) => 0,
+}
+"#,
+    )
+    .unwrap();
+    let manifest = nivren::project::Manifest::load(&consumer).unwrap();
+    assert_eq!(
+        nivren::package::install_dependencies(&manifest, &registry).unwrap(),
+        22
+    );
+    let program = nivren::modules::load_project(&manifest.root, &manifest.entry_path()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new().run(&program).unwrap(),
+        Value::Int(443)
+    );
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&chunk)
+            .unwrap(),
+        Value::Int(443)
+    );
+
+    fs::remove_dir_all(registry).unwrap();
+    fs::remove_dir_all(consumer).unwrap();
+}
+
+#[test]
+fn official_image_codec_is_bounded_in_both_engines() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packages/nivren_image");
+    let program = nivren::modules::load_project(&root, &root.join("tests/core_test.niv")).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .with_instruction_limit(1_000_000)
+            .run(&program)
+            .unwrap(),
+        Value::Ok(Arc::new(Value::Bool(true)))
+    );
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .with_instruction_limit(1_000_000)
+            .run_bytecode(&chunk)
+            .unwrap(),
+        Value::Ok(Arc::new(Value::Bool(true)))
+    );
 }
 
 #[test]
@@ -956,6 +4895,66 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
     interpreter.set_jit_threshold(1);
     let error = interpreter.run_bytecode(&chunk).unwrap_err();
     assert!(error.message.contains("integer overflow"));
+}
+
+#[test]
+fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
+    let directory = module_fixture("native-aot");
+    fs::create_dir_all(directory.join("src")).unwrap();
+    fs::write(
+        directory.join("niv.toml"),
+        "[package]\nname = \"native-aot\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("src/main.niv"),
+        "define double(value: Int) gives Int { give value * 2 }\ndouble(21)",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["build", "--aot", directory.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let extension = if cfg!(windows) { "obj" } else { "o" };
+    let object = directory.join(format!("target/aot/double.{extension}"));
+    assert!(fs::metadata(&object).unwrap().len() > 64);
+
+    #[cfg(unix)]
+    {
+        let host = directory.join("host.c");
+        let executable = directory.join("host");
+        fs::write(
+            &host,
+            "#include <stdint.h>\nextern int64_t nivren_double(const int64_t*, uint8_t*);\nint main(void){int64_t a[1]={21};uint8_t o=0;return nivren_double(a,&o)==42&&o==0?0:1;}\n",
+        )
+        .unwrap();
+        let linked = std::process::Command::new("cc")
+            .args([
+                host.to_str().unwrap(),
+                object.to_str().unwrap(),
+                "-o",
+                executable.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            std::process::Command::new(executable)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -1088,6 +5087,14 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
     );
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
     assert!(response.ends_with(&package));
+    let response = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/search/trust HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        1,
+    );
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
     let response = nivren::registry_server::handle_request_for_test(
         b"GET /v1/packages/../root.pub HTTP/1.1\r\nHost: registry.test\r\n\r\n",
         &registry,

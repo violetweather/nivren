@@ -135,6 +135,16 @@ fn handle_request(
                 ),
             }
         }
+        ("GET", path) if path.starts_with("/v1/search/") => {
+            let query = &path["/v1/search/".len()..];
+            match crate::package::search(query, registry).and_then(|results| {
+                serde_json::to_vec(&results)
+                    .map_err(|error| server_error(format!("cannot encode search: {error}")))
+            }) {
+                Ok(body) => response(200, "OK", "application/json", &body),
+                Err(error) => response(400, "Bad Request", "text/plain", error.message.as_bytes()),
+            }
+        }
         ("GET", path) => match public_path(path) {
             Some((relative, content_type)) => match bounded_read(&registry.join(relative)) {
                 Ok(bytes) => response(200, "OK", content_type, &bytes),

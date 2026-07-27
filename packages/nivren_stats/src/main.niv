@@ -1,0 +1,52 @@
+define count_as_float(values: [Float]) gives Result<Float, String> {
+    give std.float.parse(std.int.format(len(values)))
+}
+
+define sum(values: [Float]) gives Float {
+    change total: Float = 0.0
+    each value within values { total = total + value }
+    give total
+}
+
+define mean(values: [Float]) gives Result<Float, String> {
+    when len(values) == 0 { give err("mean requires at least one value") }
+    keep count = count_as_float(values) or give
+    give ok(sum(values) / count)
+}
+
+define variance(values: [Float]) gives Result<Float, String> {
+    keep average = mean(values) or give
+    keep count = count_as_float(values) or give
+    change squares: Float = 0.0
+    each value within values {
+        keep difference = value - average
+        squares = squares + difference * difference
+    }
+    give ok(squares / count)
+}
+
+define minimum(values: [Float]) gives Result<Float, String> {
+    when len(values) == 0 { give err("minimum requires at least one value") }
+    change found = values[0]
+    each value within values { when value < found { found = value } }
+    give ok(found)
+}
+
+define maximum(values: [Float]) gives Result<Float, String> {
+    when len(values) == 0 { give err("maximum requires at least one value") }
+    change found = values[0]
+    each value within values { when value > found { found = value } }
+    give ok(found)
+}
+
+define normalize(values: [Float]) gives Result<[Float], String> {
+    keep low = minimum(values) or give
+    keep high = maximum(values) or give
+    keep width = high - low
+    when width == 0.0 { give err("normalize requires a nonzero range") }
+    change normalized: [Float] = []
+    each value within values { normalized = append(normalized, (value - low) / width) }
+    give ok(normalized)
+}
+
+expose { sum, mean, variance, minimum, maximum, normalize }

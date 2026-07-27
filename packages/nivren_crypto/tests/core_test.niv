@@ -1,0 +1,19 @@
+use "../src/main.niv"
+
+keep digest = main.fingerprint("Nivren")
+choose digest {
+    Ok(value) => assert(std.bytes.length(value) == 32, "SHA-256 digest width"),
+    Err(problem) => assert(no, problem),
+}
+
+keep valid = choose main.sign("secret", "message") {
+    Ok(value) => main.verify("secret", "message", value) == ok(yes),
+    Err(problem) => no,
+}
+assert(valid, "matching tag")
+
+keep invalid = choose main.sign("secret", "message") {
+    Ok(value) => main.verify("secret", "changed", value) == ok(no),
+    Err(problem) => no,
+}
+assert(invalid, "changed message")

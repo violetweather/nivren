@@ -1,19 +1,19 @@
 # Getting started with Nivren
 
-Nivren 0.10 is the Edition 2 beta. Use it to evaluate the new language and report problems, but do not run untrusted `.niv`, `.nivb`, or `.nivpkg` files yet.
+Nivren 0.10 is a pre-1.0 Edition 3 development build. The repository is intentionally not being published again until the full roadmap, documentation, installers, website, and validation gates agree.
 
-## Guided installation
+## Install a release build
 
-The guided installers detect your operating system and CPU, verify the official download, install a stable `niv` command, and offer to update PATH and install the VS Code extension.
+The guided installer selects the correct archive, verifies its checksum, installs `niv`, optionally updates your user PATH, and can install the VS Code extension.
 
-On macOS or Linux:
+macOS or Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSLO https://raw.githubusercontent.com/violetweather/nivren/main/install/install.sh
 sh install.sh
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/violetweather/nivren/main/install/install.ps1 -OutFile install.ps1
@@ -21,109 +21,84 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```
 
-Both installers are interactive by default. Use `--yes` on macOS/Linux or `-Yes` on Windows for an unattended installation with recommended choices. The scripts retain the complete release documentation under the per-user Nivren data directory.
+Use `--yes` on macOS/Linux or `-Yes` on Windows for recommended unattended choices. Until the next release is published, these URLs install the last public build rather than the local Edition 3 work described here.
 
-## Manual release archive
-
-Download the ZIP for your operating system and architecture together with `SHA256SUMS`. Verify the checksum and the GitHub build attestation before extracting it; see `docs/RELEASES.md` for the verification command.
-
-Each ZIP contains one directory with this layout:
-
-```text
-nivren-VERSION-PLATFORM/
-  bin/niv              # niv.exe on Windows
-  Cargo.lock
-  LICENSE
-  README.md
-  SECURITY.md
-  THIRD_PARTY.md
-  licenses/
-  spec/
-```
-
-On Linux or macOS, copy `bin/niv` into a directory already on `PATH`, such as a user-owned `~/.local/bin`, then open a new terminal:
-
-```sh
-install -d "$HOME/.local/bin"
-install -m 755 nivren-VERSION-PLATFORM/bin/niv "$HOME/.local/bin/niv"
-niv version
-```
-
-On Windows, create a user-owned folder such as `%LOCALAPPDATA%\Nivren\bin`, copy `bin\niv.exe` there, add that folder to your user `Path`, open a new terminal, and run:
-
-```powershell
-niv version
-```
-
-You can also run the executable directly from the extracted `bin` directory without installing it.
-
-## Run your first program
-
-Create `hello.niv`:
-
-```nivren
-keep language: String = "Nivren"
-keep values: [Int] = [2, 3, 5, 7]
-
-define sum(items: [Int]) gives Int {
-    change total: Int = 0
-    each value within items {
-        total = total + value
-    }
-    give total
-}
-
-show("Hello, " + language + "!")
-show(sum(values))
-```
-
-Check it without executing it, then run it:
-
-```sh
-niv check hello.niv
-niv run hello.niv
-```
-
-The program prints:
-
-```text
-Hello, Nivren!
-17
-```
-
-The same source is included as `examples/getting_started.niv` in the repository.
+The installer writes a private ownership marker before it will remove anything. Uninstall with `sh install.sh --uninstall` on macOS/Linux or `.\install.ps1 -Uninstall` on Windows. The Unix flow removes only its verified managed command link and the exact PATH block it recorded; both installers refuse an unmarked or unsafe root.
 
 ## Create a project
 
-A project has a strict `niv.toml` manifest and a source entry point:
-
 ```text
-hello-project/
-  niv.toml
-  src/main.niv
+niv new hello-nivren
+cd hello-nivren
+niv dev
+niv test
 ```
 
-Use this manifest:
+`niv new` creates the manifest, `src/main.niv`, and a first test. Replace the entry point with:
+
+```nivren
+define double(value: Int) gives Int { give value * 2 }
+define even(value: Int) gives Bool { give value % 2 == 0 }
+
+keep values = [1, 2, 3, 4]
+    through std.list.transform(double)
+    through std.list.select(even)
+
+show(values)
+```
+
+Run `niv ship` when the project is ready. It checks and builds the project, runs its tests, generates `target/doc/api.md`, creates a deterministic `.nivpkg`, and emits a directly executable standalone application under `target/`; it does not upload anything.
+
+## Add capabilities deliberately
+
+Effects are visible in source and authorized in the project manifest. For a file-reading program:
+
+```nivren
+define load(path: String) gives Result<String, String> needs FileRead {
+    give std.files.read(path)
+}
+
+define main() gives Result<Null, String> needs FileRead {
+    keep text = load("message.txt") or give
+    show(text)
+    give ok(none)
+}
+
+main()
+```
+
+Add this to `niv.toml`:
 
 ```toml
-[package]
-name = "hello-project"
-version = "0.1.0"
-entry = "src/main.niv"
+[capabilities]
+FileRead = "path:./data"
 
-[dependencies]
+[limits]
+instructions = "1000000"
+memory_bytes = "67108864"
 ```
 
-Place the first program in `src/main.niv`, then run these commands from `hello-project`:
+A missing `needs` is a check error. A missing or out-of-scope manifest grant is a runtime denial. `FileRead`/`FileWrite` and native libraries accept `path:` scopes; `Network` accepts exact or wildcard host alternatives plus an optional HTTP method constraint, such as `host:api.example.com,*.cdn.example.com;method:GET,POST`; `Environment` accepts `name:` or `prefix:`; `Process` accepts command alternatives plus an optional exact first argument, such as `command:git;arg0:status`; native host handles accept exact `kind:`. Every composed clause must pass. `allow` deliberately authorizes the whole capability. Shared instruction and memory budgets stop runaway work and are also applied by project tests, debugging, profiling, coverage, inspection, tasks, and standalone applications.
 
-```sh
-niv check .
-niv run .
-niv build .
+## Build a service
+
+`examples/web_server.niv` shows the complete bounded server path: `std.net.listen`, a `using`-owned listener, deadline-bound `accept`, `std.web.read_request`, and managed `std.web.respond`. `examples/api_client.niv` uses the general certificate-verified request API, while `examples/discord_bot.niv` is an explained real-world integration.
+
+## Embed Nivren
+
+Release archives include a shared library, static library, and `nivren.h`. ABI version 2 can check, format, compile, or run UTF-8 source. `nivren_run_host_utf8` adds an owned callback/free pair exposed through the `Native` capability; `nivren_run_async_utf8` adds cooperative cancellation, one owned completion, and an event-loop wake callback. `niv bindgen c schema.niv output.h` derives deterministic C11/C++17 data views from checked shapes and choices. Rust build tools and editors can use `nivren::compiler::Compiler`, whose facade version is independent of internal modules. See `docs/EMBEDDING.md` for ownership and lifecycle rules.
+
+Programs that need an existing C library can use `std.native.open(path)` inside a function that declares `needs Native`, keep the opaque `NativeLibrary` inside `using`, and call a bounded primitive signature with `std.native.call_int` or `call_float`. A project can replace unrestricted `Native = "allow"` with a `path:` grant for the library location. This boundary deliberately trusts the library and selected export signature.
+
+## Add a dependency
+
+```text
+niv add text_utils 1.2.3
+niv install /path/to/registry
 ```
 
-The build creates a portable verified bytecode bundle under `target/`. The complete language guide is in `docs/LANGUAGE.md`; the Edition 2 specification in `spec/LANGUAGE-2.md` is normative when the two differ.
+Dependencies use exact versions and checksum-pinned lockfiles. Import the installed entry module with `use "@text_utils"`.
 
-## Editor support and help
+## Editor and help
 
-The VS Code extension provides highlighting, diagnostics, completion, and formatting. See the editor section in `README.md`. Run `niv help` for the complete command list and consult `SECURITY.md` before reporting a suspected vulnerability.
+The first-party VS Code extension provides Edition 3 highlighting, diagnostics, completion, and formatting through `niv lsp`. Run `niv help` for the complete command list. See `docs/LANGUAGE.md`, `docs/STANDARD_LIBRARY.md`, and the normative Edition 3 drafts in `spec/` next.

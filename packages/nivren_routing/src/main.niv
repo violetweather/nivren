@@ -1,0 +1,18 @@
+shape Route { method: String, path: String, name: String }
+
+define route(method: String, path: String, name: String) gives Route {
+    give Route(method, path, name)
+}
+
+define matches(candidate: Route, method: String, path: String) gives Bool {
+    give candidate.method == method and candidate.path == path
+}
+
+define first_match(routes: [Route], method: String, path: String) gives Route? {
+    each candidate within routes {
+        when matches(candidate, method, path) { give candidate }
+    }
+    give none
+}
+
+expose { Route, route, matches, first_match }

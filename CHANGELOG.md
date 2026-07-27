@@ -2,7 +2,37 @@
 
 ## Unreleased
 
-## 0.10.0-beta.5 — 2026-07-26
+- Added bounded Edition 3 HTTP clients and servers, closable TCP listeners, deterministic file handles, structured JSON values, scoped path/host grants, and shared memory budgets.
+- Added a versioned compiler facade and C ABI operations for check, format, compile, run, and capability-gated owned host callbacks.
+- Added standalone application executables, native shared/static libraries and header packaging, deterministic SPDX SBOMs, and reproducibility checks for native libraries.
+- Added opaque `NativeLibrary` resources with `std.native.open`, bounded primitive C ABI calls, deterministic `using` cleanup, path-scoped grants, and real shared-library tests in both execution engines.
+- Added intent-first correction hints, the Nivren style guide, a 17-case Edition 3 black-box corpus, and type-checked API client, Discord, typed streaming JSON, native-host, and web-server examples.
+- Added shape- and choice-derived strict JSON codecs, bounded typed NDJSON streaming, lossless exact-number serialization, recursive schema validation, and bytecode v3 schema metadata.
+- Added deterministic `niv bindgen c` shape/choice views and C ABI v2 asynchronous completion, cooperative cancellation, joinable handles, and event-loop wake callbacks, with C11/C++17 compilation tests.
+- Replaced task completion, deadline, and race polling with a shared cross-platform condition-driven runtime event loop.
+- Added certificate-verified secure WebSockets plus safe TLS policy for protocol floors, bounded ALPN, and additional PEM roots without a verification-bypass mode.
+- Added `std.net.write_some` for deadline-bounded partial writes with explicit byte progress and backpressure.
+- Added `std.net.ready` using the tier-one OS readiness reactor for readable/writable deadlines without sleep-based retry loops.
+- Added bounded executor-backed `std.files.read_async` and `write_async` tasks with queue backpressure, cancellation checkpoints, event-loop wakes, and 16 MiB limits.
+- Added safe deterministic shape/choice schema reflection, compiler facade v2 generation, and LSP discovery for schema tooling.
+- Added typed single-pass `Iterator<T>` values with bounded transform/select/take/skip/next/collect adapters, transitive callback effects, and `each` integration.
+- Added bounded generic `Transaction<K,V>` resources with staged map updates, explicit commit/rollback, idempotent close, memory charging, and automatic rollback through `using`.
+- Added explicit-endian fixed-width binary encoders, zero-copy bounded offset decoders, and 16 MiB immutable byte concatenation.
+- Added cursor-only lazy numeric range iterators with directional steps, exact bounds, and dual-engine single-pass behavior.
+- Added bounded SHA-256 and HMAC-SHA-256 primitives with constant-time verification plus the integration-tested official `nivren_crypto` package.
+- Added the first five official packages with entry API documentation, byte-identical builds, immutable-registry publication, clean locked installation, combined dual-engine consumption, and a synchronized website catalog.
+- Added static user marker protocols with explicit `adopt Protocol for Type`, sealed built-ins, duplicate-adoption rejection, and module-qualified coherence across constrained package APIs.
+- Added bounded typed `std.text.concat` and the official `nivren_sql` package for validated identifiers, ordered parameters, and injection-resistant placeholder construction.
+- Added explicit bounded `std.int.parse` and canonical `std.int.format` conversion for protocol and data-format implementations.
+- Added a capability-visible Redis client with bounded RESP2/RESP3 framing, raw verified TLS, ACL/password AUTH, pipelining, functional pools, MOVED/ASK Cluster redirects, and a dual-engine live matrix across Redis 6.2 through 8.8.
+
+- Began the Edition 3 capability program without publishing it: checked `needs`, manifest capability grants, preferred `files`/`web`/`tasks` namespaces, typed `or give`, `through`, `using`, and `start`/`wait`/`together`/`race`.
+- Added inferred generic functions, sealed protocol constraints, higher-order list algorithms, immutable `Bytes`, and persistent insertion-ordered `Map`/`Set` values.
+- Added `niv new`, `niv add`, `niv dev`, and `niv ship`, deterministic manifest rendering, structured JSON log events, instruction budgets, call-depth limits, and consistent project policy in run/test/debug/profile/coverage.
+- Versioned bytecode to v3 for verified resource, failure-propagation, and shape-schema operations; added Edition 3 language, standard-library, bytecode, and black-box conformance drafts.
+- Replaced the obsolete Edition 2 release clock with an explicit machine blocker until the entire capability audit is complete and a new Edition 3 freeze begins.
+
+## 0.10.0-beta.6 — 2026-07-26
 
 - Established Nivren Edition 2 with the distinctive `keep`, `change`, `define`, `gives`, `give`, `when`, `otherwise`, `repeat`, `each`, `within`, `shape`, `choice`, `choose`, `use`, `expose`, `yes`, `no`, `none`, and `show` vocabulary.
 - Removed the earlier TypeScript-like prototype spellings and the migration command; Nivren had no users requiring source compatibility.

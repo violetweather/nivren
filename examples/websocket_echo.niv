@@ -1,0 +1,20 @@
+define echo_once(listener: TcpListener) gives Result<Null, String> needs Network {
+    using server = listener {
+        keep accepted = std.net.accept(server, 30.0)
+        using connection = accepted or give {
+            keep request = std.web.read_request(connection, 65536) or give
+            keep upgraded = std.web.websocket_accept(connection, request)
+            using socket = upgraded or give {
+                keep message = std.web.websocket_receive(socket, 1048576) or give
+                keep sent = std.web.websocket_send(socket, "Nivren heard: " + message) or give
+                give ok(none)
+            }
+        }
+    }
+}
+
+keep opened = std.net.listen("127.0.0.1", 8080)
+choose opened {
+    Ok(listener) => echo_once(listener),
+    Err(problem) => err(problem)
+}

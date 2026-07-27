@@ -1,0 +1,4 @@
+[package]
+name = "nivren_routing"
+version = "1.0.0"
+entry = "src/main.niv"

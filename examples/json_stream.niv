@@ -1,0 +1,10 @@
+shape Event { id: Int, kind: String }
+
+define first_event(path: String) gives Result<Event?, String> needs FileRead {
+    keep opened = std.files.open_read(path) or give
+    using file = opened {
+        give std.json.read_next_as(Event, file, 65536)
+    }
+}
+
+first_event("events.ndjson")

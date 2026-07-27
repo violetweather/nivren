@@ -1,0 +1,13 @@
+use "../src/main.niv"
+
+define works() gives Result<Bool, String> {
+    keep left = main.matrix(2, 2, [1.0, 2.0, 3.0, 4.0]) or give
+    keep right = main.matrix(2, 2, [5.0, 6.0, 7.0, 8.0]) or give
+    keep product = main.multiply(left, right) or give
+    assert(main.at(product, 0, 0) == ok(19.0), "matrix product")
+    assert(main.transpose(left).values == [1.0, 3.0, 2.0, 4.0], "matrix transpose")
+    assert(main.matrix(2, 3, [1.0]) != ok(left), "invalid dimensions rejected")
+    give ok(yes)
+}
+
+works()

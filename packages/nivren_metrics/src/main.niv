@@ -1,0 +1,62 @@
+shape Sample { name: String, help: String, kind: String, value: Float, labels: Map<String, String> }
+
+define join(left: String, right: String) gives Result<String, String> { give std.text.concat(left, right) }
+
+define escape(value: String, help: Bool) gives Result<String, String> {
+    when len(value) > 65536 { give err("metric text exceeds 64 KiB") }
+    change output = ""
+    each character within value {
+        change escaped = character
+        when character == "\\" { escaped = "\\\\" }
+        when character == "\n" { escaped = "\\n" }
+        when character == "\"" and !help { escaped = "\\\"" }
+        output = join(output, escaped) or give
+    }
+    give ok(output)
+}
+
+define sample(name: String, help: String, kind: String, value: Float, labels: Map<String, String>) gives Result<Sample, String> {
+    when name == "" or len(name) > 1024 { give err("metric name must contain 1 through 1024 characters") }
+    when kind != "counter" and kind != "gauge" { give err("metric kind must be counter or gauge") }
+    when std.map.length(labels) > 128 { give err("metric sample exceeds 128 labels") }
+    give ok(Sample(name, help, kind, value, labels))
+}
+
+define encode(samples: [Sample]) gives Result<String, String> {
+    when len(samples) > 100000 { give err("metric export exceeds 100000 samples") }
+    change output = ""
+    each item within samples {
+        keep safe_help = escape(item.help, yes) or give
+        output = join(output, "# HELP ") or give
+        output = join(output, item.name) or give
+        output = join(output, " ") or give
+        output = join(output, safe_help) or give
+        output = join(output, "\n# TYPE ") or give
+        output = join(output, item.name) or give
+        output = join(output, " ") or give
+        output = join(output, item.kind) or give
+        output = join(output, "\n") or give
+        output = join(output, item.name) or give
+        keep keys = std.map.keys(item.labels)
+        when len(keys) > 0 {
+            output = join(output, "{") or give
+            change index = 0
+            each key within keys {
+                when index > 0 { output = join(output, ",") or give }
+                keep safe = escape(std.map.get(item.labels, key) ?? "", no) or give
+                output = join(output, key) or give
+                output = join(output, "=\"") or give
+                output = join(output, safe) or give
+                output = join(output, "\"") or give
+                index = index + 1
+            }
+            output = join(output, "}") or give
+        }
+        output = join(output, " ") or give
+        output = join(output, std.float.format(item.value) or give) or give
+        output = join(output, "\n") or give
+    }
+    give ok(output)
+}
+
+expose { Sample, sample, encode }

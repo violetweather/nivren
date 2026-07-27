@@ -1,0 +1,59 @@
+shape Audio { sample_rate: Int, channels: Int, samples: [Int] }
+
+define join(left: Bytes, right: Bytes) gives Result<Bytes, String> { give std.binary.concat(left, right) }
+
+define encode_pcm16(value: Audio) gives Result<Bytes, String> {
+    when value.sample_rate < 8000 or value.sample_rate > 384000 { give err("sample rate must be 8000 through 384000") }
+    when value.channels < 1 or value.channels > 32 { give err("channel count must be 1 through 32") }
+    when len(value.samples) > 8000000 { give err("audio exceeds eight million samples") }
+    when len(value.samples) % value.channels != 0 { give err("sample count must contain complete frames") }
+    keep channels = std.u16.from_int(value.channels) or give
+    keep sample_rate = std.u32.from_int(value.sample_rate) or give
+    keep byte_rate = std.u32.from_int(value.sample_rate * value.channels * 2) or give
+    keep block_align = std.u16.from_int(value.channels * 2) or give
+    keep data_size = std.u32.from_int(len(value.samples) * 2) or give
+    keep riff_size = std.u32.from_int(36 + len(value.samples) * 2) or give
+    change output = std.bytes.from_string("RIFF")
+    output = join(output, std.binary.u32_le(riff_size)) or give
+    output = join(output, std.bytes.from_string("WAVEfmt ")) or give
+    output = join(output, std.binary.u32_le(std.u32.from_int(16) or give)) or give
+    output = join(output, std.binary.u16_le(std.u16.from_int(1) or give)) or give
+    output = join(output, std.binary.u16_le(channels)) or give
+    output = join(output, std.binary.u32_le(sample_rate)) or give
+    output = join(output, std.binary.u32_le(byte_rate)) or give
+    output = join(output, std.binary.u16_le(block_align)) or give
+    output = join(output, std.binary.u16_le(std.u16.from_int(16) or give)) or give
+    output = join(output, std.bytes.from_string("data")) or give
+    output = join(output, std.binary.u32_le(data_size)) or give
+    each sample within value.samples {
+        keep fixed = std.i16.from_int(sample) or give
+        output = join(output, std.binary.i16_le(fixed)) or give
+    }
+    give ok(output)
+}
+
+define decode_pcm16(source: Bytes) gives Result<Audio, String> {
+    when std.bytes.length(source) < 44 { give err("WAV input is shorter than its PCM header") }
+    keep riff = std.bytes.to_string(std.bytes.slice(source, 0, 4) or give) or give
+    keep wave = std.bytes.to_string(std.bytes.slice(source, 8, 12) or give) or give
+    keep format = std.bytes.to_string(std.bytes.slice(source, 12, 16) or give) or give
+    keep data = std.bytes.to_string(std.bytes.slice(source, 36, 40) or give) or give
+    when riff != "RIFF" or wave != "WAVE" or format != "fmt " or data != "data" { give err("WAV must use the canonical PCM layout") }
+    keep encoding = std.u16.to_int(std.binary.read_u16_le(source, 20) or give) or give
+    keep channels = std.u16.to_int(std.binary.read_u16_le(source, 22) or give) or give
+    keep sample_rate = std.u32.to_int(std.binary.read_u32_le(source, 24) or give) or give
+    keep bits = std.u16.to_int(std.binary.read_u16_le(source, 34) or give) or give
+    keep data_size = std.u32.to_int(std.binary.read_u32_le(source, 40) or give) or give
+    when encoding != 1 or bits != 16 { give err("WAV must contain signed 16-bit PCM") }
+    when data_size % 2 != 0 or 44 + data_size != std.bytes.length(source) { give err("WAV data size does not match its payload") }
+    when data_size > 16000000 { give err("WAV payload exceeds 16 MiB") }
+    change samples: [Int] = []
+    change offset = 44
+    repeat offset < std.bytes.length(source) {
+        samples = append(samples, std.i16.to_int(std.binary.read_i16_le(source, offset) or give) or give)
+        offset = offset + 2
+    }
+    give ok(Audio(sample_rate, channels, samples))
+}
+
+expose { Audio, encode_pcm16, decode_pcm16 }

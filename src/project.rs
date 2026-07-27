@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,10 @@ pub struct Manifest {
     pub version: String,
     pub entry: PathBuf,
     pub dependencies: BTreeMap<String, String>,
+    pub capabilities: BTreeSet<String>,
+    pub capability_scopes: BTreeMap<String, String>,
+    pub instruction_limit: Option<u64>,
+    pub memory_limit: Option<u64>,
 }
 
 impl Manifest {
@@ -31,7 +35,7 @@ impl Manifest {
             .unwrap_or(Path::new("."))
             .canonicalize()
             .map_err(|error| project_error(format!("cannot resolve project: {error}"), 1))?;
-        let source = fs::read_to_string(&manifest_path).map_err(|error| {
+        let source = crate::source_io::read_to_string(&manifest_path).map_err(|error| {
             project_error(
                 format!("cannot read {}: {error}", manifest_path.display()),
                 1,
@@ -44,6 +48,10 @@ impl Manifest {
         let mut section = String::new();
         let mut values = BTreeMap::new();
         let mut dependencies = BTreeMap::new();
+        let mut capabilities = BTreeSet::new();
+        let mut capability_scopes = BTreeMap::new();
+        let mut instruction_limit = None;
+        let mut memory_limit = None;
         for (index, raw_line) in source.lines().enumerate() {
             let line_number = index + 1;
             let line = raw_line.split('#').next().unwrap_or("").trim();
@@ -52,7 +60,10 @@ impl Manifest {
             }
             if line.starts_with('[') && line.ends_with(']') {
                 section = line[1..line.len() - 1].trim().to_string();
-                if !matches!(section.as_str(), "package" | "dependencies") {
+                if !matches!(
+                    section.as_str(),
+                    "package" | "dependencies" | "capabilities" | "limits"
+                ) {
                     return Err(project_error(
                         format!("unknown manifest section [{section}]"),
                         line_number,
@@ -60,9 +71,12 @@ impl Manifest {
                 }
                 continue;
             }
-            if !matches!(section.as_str(), "package" | "dependencies") {
+            if !matches!(
+                section.as_str(),
+                "package" | "dependencies" | "capabilities" | "limits"
+            ) {
                 return Err(project_error(
-                    "manifest values must be inside [package] or [dependencies]",
+                    "manifest values must be inside [package], [dependencies], [capabilities], or [limits]",
                     line_number,
                 ));
             }
@@ -86,7 +100,7 @@ impl Manifest {
                         line_number,
                     ));
                 }
-            } else {
+            } else if section == "dependencies" {
                 if !valid_dependency_name(key) {
                     return Err(project_error(
                         "dependency names must be valid Nivren identifiers",
@@ -102,6 +116,86 @@ impl Manifest {
                 if dependencies.insert(key.to_string(), value).is_some() {
                     return Err(project_error(
                         format!("duplicate dependency '{key}'"),
+                        line_number,
+                    ));
+                }
+            } else if section == "capabilities" {
+                if !known_capability(key) {
+                    return Err(project_error(
+                        format!("unknown capability '{key}'"),
+                        line_number,
+                    ));
+                }
+                let valid_grant = value == "allow"
+                    || matches!(key, "FileRead" | "FileWrite")
+                        && value
+                            .strip_prefix("path:")
+                            .is_some_and(|scope| !scope.is_empty())
+                    || key == "Network" && valid_composed_scope(&value, "host", &["method"])
+                    || key == "Environment"
+                        && (value
+                            .strip_prefix("name:")
+                            .is_some_and(|scope| !scope.is_empty())
+                            || value
+                                .strip_prefix("prefix:")
+                                .is_some_and(|scope| !scope.is_empty()))
+                    || key == "Process" && valid_composed_scope(&value, "command", &["arg0"])
+                    || key == "Native"
+                        && (value
+                            .strip_prefix("path:")
+                            .is_some_and(|scope| !scope.is_empty())
+                            || value
+                                .strip_prefix("kind:")
+                                .is_some_and(|scope| !scope.is_empty()));
+                if !valid_grant {
+                    return Err(project_error(
+                        format!(
+                            "capability '{key}' must be \"allow\"{}",
+                            match key {
+                                "FileRead" | "FileWrite" =>
+                                    " or a path scope such as \"path:./data\"",
+                                "Network" =>
+                                    " or a host/method scope such as \"host:api.example.com,*.cdn.example.com;method:GET,POST\"",
+                                "Environment" =>
+                                    " or a name/prefix scope such as \"name:HOME\" or \"prefix:NIVREN_\"",
+                                "Process" =>
+                                    " or a command/first-argument scope such as \"command:git;arg0:status\"",
+                                "Native" =>
+                                    " or a path/kind scope such as \"path:./native\" or \"kind:database\"",
+                                _ => "",
+                            }
+                        ),
+                        line_number,
+                    ));
+                }
+                if !capabilities.insert(key.to_string()) {
+                    return Err(project_error(
+                        format!("duplicate capability '{key}'"),
+                        line_number,
+                    ));
+                }
+                if value != "allow" {
+                    capability_scopes.insert(key.to_string(), value);
+                }
+            } else {
+                if !matches!(key, "instructions" | "memory_bytes") {
+                    return Err(project_error(format!("unknown limit '{key}'"), line_number));
+                }
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        project_error(format!("{key} must be a positive integer"), line_number)
+                    })?;
+                let slot = if key == "instructions" {
+                    &mut instruction_limit
+                } else {
+                    &mut memory_limit
+                };
+                if slot.replace(parsed).is_some() {
+                    return Err(project_error(
+                        format!("duplicate limit '{key}'"),
                         line_number,
                     ));
                 }
@@ -142,11 +236,70 @@ impl Manifest {
             version,
             entry,
             dependencies,
+            capabilities,
+            capability_scopes,
+            instruction_limit,
+            memory_limit,
         })
     }
 
     pub fn entry_path(&self) -> PathBuf {
         self.root.join(&self.entry)
+    }
+
+    pub fn add_dependency(&mut self, name: &str, version: &str) -> Result<(), NivError> {
+        if !valid_dependency_name(name) {
+            return Err(project_error(
+                "dependency names must be valid Nivren identifiers",
+                1,
+            ));
+        }
+        if name == self.name {
+            return Err(project_error("a package cannot depend on itself", 1));
+        }
+        if !valid_version(version) {
+            return Err(project_error(
+                format!("dependency '{name}' must use an exact major.minor.patch version"),
+                1,
+            ));
+        }
+        self.dependencies.insert(name.into(), version.into());
+        Ok(())
+    }
+
+    pub fn source(&self) -> String {
+        let mut output = format!(
+            "[package]\nname = \"{}\"\nversion = \"{}\"\nentry = \"{}\"\n",
+            self.name,
+            self.version,
+            self.entry.to_string_lossy()
+        );
+        if !self.dependencies.is_empty() {
+            output.push_str("\n[dependencies]\n");
+            for (name, version) in &self.dependencies {
+                output.push_str(&format!("{name} = \"{version}\"\n"));
+            }
+        }
+        if !self.capabilities.is_empty() {
+            output.push_str("\n[capabilities]\n");
+            for capability in &self.capabilities {
+                let grant = self
+                    .capability_scopes
+                    .get(capability)
+                    .map_or("allow", String::as_str);
+                output.push_str(&format!("{capability} = \"{grant}\"\n"));
+            }
+        }
+        if self.instruction_limit.is_some() || self.memory_limit.is_some() {
+            output.push_str("\n[limits]\n");
+            if let Some(instructions) = self.instruction_limit {
+                output.push_str(&format!("instructions = \"{instructions}\"\n"));
+            }
+            if let Some(memory) = self.memory_limit {
+                output.push_str(&format!("memory_bytes = \"{memory}\"\n"));
+            }
+        }
+        output
     }
 
     pub fn lockfile(&self) -> String {
@@ -181,6 +334,18 @@ impl Manifest {
             hash_part(&mut digest, name.as_bytes());
             hash_part(&mut digest, version.as_bytes());
         }
+        for capability in &self.capabilities {
+            hash_part(&mut digest, capability.as_bytes());
+            if let Some(scope) = self.capability_scopes.get(capability) {
+                hash_part(&mut digest, scope.as_bytes());
+            }
+        }
+        if let Some(instructions) = self.instruction_limit {
+            hash_part(&mut digest, &instructions.to_le_bytes());
+        }
+        if let Some(memory) = self.memory_limit {
+            hash_part(&mut digest, &memory.to_le_bytes());
+        }
         for file in files {
             let relative = file
                 .strip_prefix(&self.root)
@@ -188,7 +353,7 @@ impl Manifest {
             let relative = relative
                 .to_str()
                 .ok_or_else(|| project_error("source path is not valid UTF-8", 1))?;
-            let contents = fs::read(&file).map_err(|error| {
+            let contents = crate::source_io::read(&file).map_err(|error| {
                 project_error(format!("cannot read {}: {error}", file.display()), 1)
             })?;
             hash_part(&mut digest, relative.as_bytes());
@@ -201,6 +366,40 @@ impl Manifest {
         }
         Ok(output)
     }
+}
+
+fn known_capability(name: &str) -> bool {
+    matches!(
+        name,
+        "FileRead"
+            | "FileWrite"
+            | "Environment"
+            | "Time"
+            | "Process"
+            | "Network"
+            | "Task"
+            | "Channel"
+            | "Log"
+            | "Random"
+            | "Native"
+    )
+}
+
+fn valid_composed_scope(value: &str, required: &str, optional: &[&str]) -> bool {
+    let mut seen = BTreeSet::new();
+    for clause in value.split(';') {
+        let Some((kind, choices)) = clause.split_once(':') else {
+            return false;
+        };
+        if (kind != required && !optional.contains(&kind))
+            || !seen.insert(kind)
+            || choices.is_empty()
+            || choices.split(',').any(str::is_empty)
+        {
+            return false;
+        }
+    }
+    seen.contains(required)
 }
 
 fn hash_part(digest: &mut Sha256, value: &[u8]) {

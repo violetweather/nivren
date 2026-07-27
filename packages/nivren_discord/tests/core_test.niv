@@ -1,0 +1,8 @@
+use "../src/main.niv"
+
+keep body = main.message_body("hello \"Nivren\"")
+assert(body == ok("{\"content\":\"hello \\\"Nivren\\\"\"}"), "message JSON should escape content")
+
+keep headers = main.bot_headers("secret")
+assert(std.map.get(headers, "Authorization") == "Bot secret", "authorization header")
+assert(std.map.get(headers, "Content-Type") == "application/json", "content type")
