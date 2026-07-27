@@ -72,7 +72,7 @@ jobs:
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
           $root = Join-Path $env:RUNNER_TEMP "nivren-uninstall-root"
           New-Item -ItemType Directory -Force (Join-Path $root "bin") | Out-Null
-          Set-Content -NoNewline (Join-Path $root ".nivren-install-root") "nivren-managed-root-v1"
+          Set-Content -LiteralPath (Join-Path $root ".nivren-install-root") -Value "nivren-managed-root-v1" -NoNewline
           & "install/install.ps1" -Uninstall -InstallRoot $root
           if (Test-Path $root) { throw "uninstaller left its managed root behind" }
       - name: Test release source

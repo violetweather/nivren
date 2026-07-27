@@ -93,8 +93,8 @@ try {
     if (Test-Path $versionRoot) { Remove-Item -Recurse -Force $versionRoot }
     Move-Item $staging $versionRoot
     Copy-Item (Join-Path $versionRoot "bin\niv.exe") (Join-Path $binDir "niv.exe") -Force
-    Set-Content -NoNewline (Join-Path $InstallRoot "current-version") $Version
-    Set-Content -NoNewline (Join-Path $InstallRoot ".nivren-install-root") "nivren-managed-root-v1"
+    Set-Content -LiteralPath (Join-Path $InstallRoot "current-version") -Value $Version -NoNewline
+    Set-Content -LiteralPath (Join-Path $InstallRoot ".nivren-install-root") -Value "nivren-managed-root-v1" -NoNewline
 
     $addPath = -not $NoPath
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
