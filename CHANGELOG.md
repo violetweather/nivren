@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Generalized compact bytecode call frames beyond integer-only functions, pre-resolved local loads/stores/definitions to lexical slot indices, specialized VM integer operations, and indexed shape fields for constant-time property access; added lexical-shadowing and record-workload regression coverage.
 - Reduced bytecode function-call and loop overhead with borrowed operand-stack arguments, compact integer function/root frames, lock-free finalized JIT dispatch, and inline native argument buffers; added persistence, concurrency, high-arity, recursion, and benchmark regression coverage.
 - Added bounded Edition 3 HTTP clients and servers, closable TCP listeners, deterministic file handles, structured JSON values, scoped path/host grants, and shared memory budgets.
 - Added a versioned compiler facade and C ABI operations for check, format, compile, run, and capability-gated owned host callbacks.

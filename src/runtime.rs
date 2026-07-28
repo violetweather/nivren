@@ -415,14 +415,20 @@ pub struct Function {
     params: Vec<String>,
     body: FunctionBody,
     closure: Env,
-    fast_slots: Option<Arc<HashMap<String, usize>>>,
+    fast_slots: Option<Arc<FastSlotPlan>>,
     #[cfg(feature = "host-runtime")]
     jit: JitState,
 }
 
 struct FastFrame {
-    slots_by_name: Arc<HashMap<String, usize>>,
+    plan: Option<Arc<FastSlotPlan>>,
     slots: Vec<FastBinding>,
+}
+
+struct FastSlotPlan {
+    slots_by_name: HashMap<String, usize>,
+    instruction_slots: Vec<Option<usize>>,
+    slot_count: usize,
 }
 
 struct FastBinding {
@@ -432,7 +438,7 @@ struct FastBinding {
 }
 
 struct FastRootSlots {
-    slots_by_name: Arc<HashMap<String, usize>>,
+    plan: Arc<FastSlotPlan>,
     persistent: Vec<String>,
 }
 
@@ -466,12 +472,14 @@ type HostCallback = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sy
 pub struct RecordType {
     name: String,
     fields: Vec<(String, String)>,
+    field_indices: Arc<HashMap<String, usize>>,
     catalog: BTreeMap<String, Vec<(String, String)>>,
     choices: BTreeMap<String, Vec<(String, bool)>>,
 }
 pub struct RecordValue {
     type_name: String,
     fields: Vec<(String, Value)>,
+    field_indices: Arc<HashMap<String, usize>>,
 }
 
 pub enum ManagedFile {
@@ -1110,13 +1118,13 @@ impl Interpreter {
         });
         if let Some(plan) = &root_slots {
             self.fast_frames.push(FastFrame {
-                slots_by_name: plan.slots_by_name.clone(),
+                plan: Some(plan.plan.clone()),
                 slots: std::iter::repeat_with(|| FastBinding {
                     value: Value::Null,
                     mutable: false,
                     defined: false,
                 })
-                .take(plan.slots_by_name.len())
+                .take(plan.plan.slot_count)
                 .collect(),
             });
         }
@@ -1125,7 +1133,7 @@ impl Interpreter {
             let frame = self.fast_frames.pop().unwrap();
             let mut environment = self.environment.lock().unwrap();
             for name in &plan.persistent {
-                let slot = plan.slots_by_name[name];
+                let slot = plan.plan.slots_by_name[name];
                 let binding = &frame.slots[slot];
                 if binding.defined {
                     environment.values.insert(
@@ -1407,6 +1415,7 @@ impl Interpreter {
                 let choices = choice_catalog(&self.environment);
                 let value = Value::RecordType(Arc::new(RecordType {
                     name: type_name,
+                    field_indices: record_field_indices(&record_fields),
                     fields: record_fields,
                     catalog,
                     choices,
@@ -1674,10 +1683,9 @@ impl Interpreter {
             },
             Expr::Get(object, name, span) => match evaluate_part!(self, object) {
                 Value::Record(record) => record
-                    .fields
-                    .iter()
-                    .find(|(field, _)| field == name)
-                    .map(|(_, value)| value.clone())
+                    .field_indices
+                    .get(name)
+                    .map(|index| record.fields[*index].1.clone())
                     .ok_or_else(|| {
                         NivError::new(
                             format!("{} has no field '{name}'", record.type_name),
@@ -1945,6 +1953,7 @@ impl Interpreter {
                 check_arity(&record.name, record.fields.len(), arguments.len(), span)?;
                 Ok(Value::Record(Arc::new(RecordValue {
                     type_name: record.name.clone(),
+                    field_indices: record.field_indices.clone(),
                     fields: record
                         .fields
                         .iter()
@@ -2030,70 +2039,78 @@ impl Interpreter {
                 }
             }
         }
-        let fast_slots = function.fast_slots.as_ref().filter(|_| {
-            self.debug_hook.is_none()
-                && self.metrics.is_none()
-                && arguments.iter().all(|value| matches!(value, Value::Int(_)))
-        });
-        let result = if let (Some(slots_by_name), FunctionBody::Bytecode(body)) =
-            (fast_slots, &function.body)
-        {
-            let mut slots = std::iter::repeat_with(|| FastBinding {
-                value: Value::Null,
-                mutable: false,
-                defined: false,
-            })
-            .take(slots_by_name.len())
-            .collect::<Vec<_>>();
-            for (name, value) in function.params.iter().zip(arguments) {
-                let slot = slots_by_name[name];
-                slots[slot] = FastBinding {
-                    value: value.clone(),
+        let fast_slots = function
+            .fast_slots
+            .as_ref()
+            .filter(|_| self.debug_hook.is_none() && self.metrics.is_none());
+        let result =
+            if let (Some(slot_plan), FunctionBody::Bytecode(body)) = (fast_slots, &function.body) {
+                let mut slots = std::iter::repeat_with(|| FastBinding {
+                    value: Value::Null,
                     mutable: false,
-                    defined: true,
-                };
-            }
-            self.fast_frames.push(FastFrame {
-                slots_by_name: slots_by_name.clone(),
-                slots,
-            });
-            let previous = std::mem::replace(&mut self.environment, function.closure.clone());
-            self.roots.push(previous.clone());
-            let execution = self.execute_chunk(body);
-            self.roots.pop();
-            self.environment = previous;
-            self.fast_frames.pop();
-            execution.map(|flow| match flow {
-                VmFlow::Continue(value) | VmFlow::Return(value) => value,
-            })
-        } else {
-            let environment = self.child_scope(function.closure.clone());
-            for (name, value) in function.params.iter().zip(arguments) {
-                environment.lock().unwrap().values.insert(
-                    name.clone(),
-                    Binding {
+                    defined: false,
+                })
+                .take(slot_plan.slot_count)
+                .collect::<Vec<_>>();
+                for (name, value) in function.params.iter().zip(arguments) {
+                    let slot = slot_plan.slots_by_name[name];
+                    slots[slot] = FastBinding {
                         value: value.clone(),
                         mutable: false,
-                    },
-                );
-            }
-            (|| match &function.body {
-                FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
-                    Flow::Continue(_) => Ok(Value::Null),
-                    Flow::Return(value) => Ok(value),
-                },
-                FunctionBody::Bytecode(body) => {
-                    let previous = std::mem::replace(&mut self.environment, environment);
-                    self.roots.push(previous.clone());
-                    let execution = self.execute_chunk(body);
-                    self.roots.pop();
-                    self.environment = previous;
-                    execution.map(|flow| match flow {
-                        VmFlow::Continue(value) | VmFlow::Return(value) => value,
-                    })
+                        defined: true,
+                    };
                 }
-            })()
-        };
+                self.fast_frames.push(FastFrame {
+                    plan: Some(slot_plan.clone()),
+                    slots,
+                });
+                let previous = std::mem::replace(&mut self.environment, function.closure.clone());
+                self.roots.push(previous.clone());
+                let execution = self.execute_chunk(body);
+                self.roots.pop();
+                self.environment = previous;
+                self.fast_frames.pop();
+                execution.map(|flow| match flow {
+                    VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                })
+            } else {
+                let environment = self.child_scope(function.closure.clone());
+                for (name, value) in function.params.iter().zip(arguments) {
+                    environment.lock().unwrap().values.insert(
+                        name.clone(),
+                        Binding {
+                            value: value.clone(),
+                            mutable: false,
+                        },
+                    );
+                }
+                (|| match &function.body {
+                    FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
+                        Flow::Continue(_) => Ok(Value::Null),
+                        Flow::Return(value) => Ok(value),
+                    },
+                    FunctionBody::Bytecode(body) => {
+                        let previous = std::mem::replace(&mut self.environment, environment);
+                        self.roots.push(previous.clone());
+                        let isolate_fast_caller = !self.fast_frames.is_empty();
+                        if isolate_fast_caller {
+                            self.fast_frames.push(FastFrame {
+                                plan: None,
+                                slots: Vec::new(),
+                            });
+                        }
+                        let execution = self.execute_chunk(body);
+                        if isolate_fast_caller {
+                            self.fast_frames.pop();
+                        }
+                        self.roots.pop();
+                        self.environment = previous;
+                        execution.map(|flow| match flow {
+                            VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                        })
+                    }
+                })()
+            };
         self.call_depth -= 1;
         result.map_err(|error: NivError| {
             error.with_frame(function.name.clone(), span.line, span.column)
@@ -2348,20 +2365,31 @@ impl Interpreter {
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
-        if let Some(frame) = self.fast_frames.last()
-            && let Some(slot) = frame.slots_by_name.get(name)
-            && frame.slots[*slot].defined
-        {
-            return Some(frame.slots[*slot].value.clone());
-        }
         lookup(&self.environment, name)
     }
 
-    fn define_fast(&mut self, name: &str, value: Value, mutable: bool) -> bool {
+    fn load_fast(&self, instruction: usize) -> Option<Value> {
+        let frame = self.fast_frames.last()?;
+        let slot = frame
+            .plan
+            .as_ref()?
+            .instruction_slots
+            .get(instruction)
+            .copied()
+            .flatten()?;
+        frame.slots[slot]
+            .defined
+            .then(|| frame.slots[slot].value.clone())
+    }
+
+    fn define_fast(&mut self, instruction: usize, value: Value, mutable: bool) -> bool {
         let Some(frame) = self.fast_frames.last_mut() else {
             return false;
         };
-        let Some(slot) = frame.slots_by_name.get(name).copied() else {
+        let Some(plan) = frame.plan.as_ref() else {
+            return false;
+        };
+        let Some(slot) = plan.instruction_slots.get(instruction).copied().flatten() else {
             return false;
         };
         frame.slots[slot] = FastBinding {
@@ -2372,11 +2400,20 @@ impl Interpreter {
         true
     }
 
-    fn assign_fast(&mut self, name: &str, value: Value, span: Span) -> Result<bool, NivError> {
+    fn assign_fast(
+        &mut self,
+        instruction: usize,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<bool, NivError> {
         let Some(frame) = self.fast_frames.last_mut() else {
             return Ok(false);
         };
-        let Some(slot) = frame.slots_by_name.get(name).copied() else {
+        let Some(plan) = frame.plan.as_ref() else {
+            return Ok(false);
+        };
+        let Some(slot) = plan.instruction_slots.get(instruction).copied().flatten() else {
             return Ok(false);
         };
         let binding = &mut frame.slots[slot];
@@ -3031,22 +3068,26 @@ impl Interpreter {
                     Literal::Bool(value) => Value::Bool(*value),
                     Literal::Null => Value::Null,
                 }),
-                Op::Load(name) => stack.push(self.lookup(name).ok_or_else(|| {
-                    NivError::new(
-                        format!("undefined name '{name}'"),
-                        item.span.line,
-                        item.span.column,
-                    )
-                })?),
+                Op::Load(name) => stack.push(
+                    self.load_fast(instruction)
+                        .or_else(|| self.lookup(name))
+                        .ok_or_else(|| {
+                            NivError::new(
+                                format!("undefined name '{name}'"),
+                                item.span.line,
+                                item.span.column,
+                            )
+                        })?,
+                ),
                 Op::Store(name) => {
                     let value = stack.last().cloned().unwrap();
-                    if !self.assign_fast(name, value.clone(), item.span)? {
+                    if !self.assign_fast(instruction, name, value.clone(), item.span)? {
                         assign(&self.environment, name, value, item.span)?;
                     }
                 }
                 Op::Define { name, mutable } => {
                     let value = stack.last().cloned().unwrap();
-                    if self.define_fast(name, value.clone(), *mutable) {
+                    if self.define_fast(instruction, value.clone(), *mutable) {
                         instruction += 1;
                         continue;
                     }
@@ -3079,7 +3120,10 @@ impl Interpreter {
                 Op::Binary(operator) => {
                     let right = stack.pop().unwrap();
                     let left = stack.pop().unwrap();
-                    stack.push(self.binary(left, operator, right, item.span)?);
+                    stack.push(match (left, right) {
+                        (Value::Int(a), Value::Int(b)) => vm_int_binary(a, operator, b, item.span)?,
+                        (left, right) => self.binary(left, operator, right, item.span)?,
+                    });
                 }
                 Op::Jump(target) => {
                     self.maybe_collect(&stack);
@@ -3144,12 +3188,20 @@ impl Interpreter {
                     stack.push(Value::Null);
                 }
                 Op::EnterScope => {
-                    if self.fast_frames.is_empty() {
+                    if self
+                        .fast_frames
+                        .last()
+                        .is_none_or(|frame| frame.plan.is_none())
+                    {
                         self.environment = self.child_scope(self.environment.clone());
                     }
                 }
                 Op::ExitScope => {
-                    if self.fast_frames.is_empty() {
+                    if self
+                        .fast_frames
+                        .last()
+                        .is_none_or(|frame| frame.plan.is_none())
+                    {
                         let parent = self.environment.lock().unwrap().parent.clone().unwrap();
                         self.environment = parent;
                     }
@@ -3160,7 +3212,7 @@ impl Interpreter {
                         params: params.clone(),
                         body: FunctionBody::Bytecode(body.clone()),
                         closure: self.environment.clone(),
-                        fast_slots: fast_integer_slots(name, params, body),
+                        fast_slots: fast_local_slots(params, body),
                         #[cfg(feature = "host-runtime")]
                         jit: JitState::default(),
                     })));
@@ -3173,6 +3225,7 @@ impl Interpreter {
                     let choices = choice_catalog(&self.environment);
                     let value = Value::RecordType(Arc::new(RecordType {
                         name: type_name,
+                        field_indices: record_field_indices(fields),
                         fields: fields.clone(),
                         catalog,
                         choices,
@@ -3907,38 +3960,73 @@ impl Drop for Interpreter {
     }
 }
 
-fn fast_integer_slots(
-    function_name: &str,
-    parameters: &[String],
-    body: &Chunk,
-) -> Option<Arc<HashMap<String, usize>>> {
-    let mut slots = HashMap::new();
+fn record_field_indices<T>(fields: &[(String, T)]) -> Arc<HashMap<String, usize>> {
+    Arc::new(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.clone(), index))
+            .collect(),
+    )
+}
+
+fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotPlan>> {
+    let mut slots_by_name = HashMap::new();
+    let mut scopes = vec![HashMap::new()];
+    let mut slot_count = 0usize;
     for parameter in parameters {
-        let next = slots.len();
-        if slots.insert(parameter.clone(), next).is_some() {
+        if scopes[0].contains_key(parameter) {
             return None;
         }
+        scopes[0].insert(parameter.clone(), slot_count);
+        slots_by_name.insert(parameter.clone(), slot_count);
+        slot_count += 1;
     }
+    let mut instruction_slots = Vec::with_capacity(body.code.len());
     for instruction in &body.code {
-        match &instruction.op {
-            Op::Constant(Literal::Int(_) | Literal::Bool(_) | Literal::Null)
-            | Op::Load(_)
+        let slot = match &instruction.op {
+            Op::Constant(_)
             | Op::Pop
             | Op::Jump(_)
             | Op::JumpIfFalse(_)
             | Op::Call(_)
+            | Op::MakeArray(_)
+            | Op::Index
+            | Op::Coalesce(_)
+            | Op::Propagate
+            | Op::Get(_)
             | Op::Print
-            | Op::EnterScope
-            | Op::ExitScope
-            | Op::Return => {}
+            | Op::Return => None,
+            Op::Load(name) | Op::Store(name) => scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(name).copied()),
             Op::Define { name, .. } => {
-                let next = slots.len();
-                if slots.insert(name.clone(), next).is_some() {
+                let top_level = scopes.len() == 1;
+                let scope = scopes.last_mut()?;
+                if scope.contains_key(name) {
                     return None;
                 }
+                let slot = slot_count;
+                scope.insert(name.clone(), slot);
+                if top_level {
+                    slots_by_name.insert(name.clone(), slot);
+                }
+                slot_count += 1;
+                Some(slot)
             }
-            Op::Store(_) => {}
-            Op::Unary(TokenKind::Minus | TokenKind::Bang) => {}
+            Op::EnterScope => {
+                scopes.push(HashMap::new());
+                None
+            }
+            Op::ExitScope => {
+                if scopes.len() == 1 {
+                    return None;
+                }
+                scopes.pop();
+                None
+            }
+            Op::Unary(TokenKind::Minus | TokenKind::Bang) => None,
             Op::Binary(
                 TokenKind::Plus
                 | TokenKind::Minus
@@ -3951,22 +4039,23 @@ fn fast_integer_slots(
                 | TokenKind::GreaterEqual
                 | TokenKind::Less
                 | TokenKind::LessEqual,
-            ) => {}
+            ) => None,
             _ => return None,
-        }
+        };
+        instruction_slots.push(slot);
     }
-    for instruction in &body.code {
-        match &instruction.op {
-            Op::Load(name) if !slots.contains_key(name) && name != function_name => return None,
-            Op::Store(name) if !slots.contains_key(name) => return None,
-            _ => {}
-        }
+    if scopes.len() != 1 {
+        return None;
     }
-    Some(Arc::new(slots))
+    Some(Arc::new(FastSlotPlan {
+        slots_by_name,
+        instruction_slots,
+        slot_count,
+    }))
 }
 
 fn fast_root_slots(chunk: &Chunk) -> Option<FastRootSlots> {
-    let slots_by_name = fast_integer_slots("", &[], chunk)?;
+    let plan = fast_local_slots(&[], chunk)?;
     let mut depth = 0usize;
     let mut persistent = Vec::new();
     for instruction in &chunk.code {
@@ -3977,10 +4066,7 @@ fn fast_root_slots(chunk: &Chunk) -> Option<FastRootSlots> {
             _ => {}
         }
     }
-    Some(FastRootSlots {
-        slots_by_name,
-        persistent,
-    })
+    Some(FastRootSlots { plan, persistent })
 }
 
 fn lookup(environment: &Env, name: &str) -> Option<Value> {
@@ -4106,6 +4192,16 @@ fn int_binary(a: i64, operator: &TokenKind, b: i64, span: Span) -> Result<Value,
         _ => unreachable!(),
     }
 }
+
+fn vm_int_binary(a: i64, operator: &TokenKind, b: i64, span: Span) -> Result<Value, NivError> {
+    match operator {
+        TokenKind::Plus => checked_int(a.checked_add(b), span),
+        TokenKind::EqualEqual => Ok(Value::Bool(a == b)),
+        TokenKind::BangEqual => Ok(Value::Bool(a != b)),
+        _ => int_binary(a, operator, b, span),
+    }
+}
+
 fn float_binary(a: f64, operator: &TokenKind, b: f64, span: Span) -> Result<Value, NivError> {
     match operator {
         TokenKind::Minus => Ok(Value::Float(a - b)),
@@ -5493,6 +5589,7 @@ fn decode_record(schema: &RecordType, value: serde_json::Value) -> Result<Value,
     Ok(Value::Record(Arc::new(RecordValue {
         type_name: schema.name.clone(),
         fields,
+        field_indices: schema.field_indices.clone(),
     })))
 }
 
@@ -5724,6 +5821,7 @@ fn decode_schema_value(
                 &RecordType {
                     name,
                     fields: fields.clone(),
+                    field_indices: record_field_indices(fields),
                     catalog: catalog.clone(),
                     choices: choices.clone(),
                 },
@@ -10898,10 +10996,9 @@ fn index_value(collection: Value, index: usize, span: Span) -> Result<Value, Niv
 fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
     match object {
         Value::Record(record) => record
-            .fields
-            .iter()
-            .find(|(field, _)| field == name)
-            .map(|(_, value)| value.clone())
+            .field_indices
+            .get(name)
+            .map(|index| record.fields[*index].1.clone())
             .ok_or_else(|| {
                 NivError::new(
                     format!("{} has no field '{name}'", record.type_name),
@@ -10909,7 +11006,7 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
                     span.column,
                 )
             }),
-        Value::EnumType(enum_type) if enum_type.variants.contains(&name.to_string()) => {
+        Value::EnumType(enum_type) if enum_type.variants.iter().any(|variant| variant == name) => {
             if enum_type.payload_variants.contains(name) {
                 Ok(Value::EnumConstructor(Arc::new(EnumConstructor {
                     type_name: enum_type.name.clone(),

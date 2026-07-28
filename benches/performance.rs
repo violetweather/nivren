@@ -61,6 +61,23 @@ fn main() {
     );
     println!("nivren_benchmark_recursive_speedup {recursive_speedup:.3}");
 
+    let record_source = "shape Sample { alpha: Int, beta: Int, gamma: Int, delta: Int, epsilon: Int, zeta: Int, eta: Int, theta: Int } define checksum(sample: Sample) gives Int { give sample.theta + sample.alpha; } change index = 0; change result = 0; repeat (index < 100000) { result = checksum(Sample(index, 2, 3, 4, 5, 6, 7, 8)); index = index + 1; } result";
+    let record_tokens = nivren::lexer::scan(record_source).unwrap();
+    let record_program = nivren::parser::parse(record_tokens).unwrap();
+    nivren::typecheck::check(&record_program).unwrap();
+    let record_chunk = nivren::bytecode::compile(&record_program).unwrap();
+    let record_vm = median(7, || {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_jit_threshold(u32::MAX);
+        let value = black_box(interpreter.run_bytecode(&record_chunk).unwrap());
+        assert_eq!(value, Value::Int(100007));
+        value
+    });
+    println!(
+        "nivren_benchmark_record_fields_vm_ms {:.3}",
+        record_vm.as_secs_f64() * 1000.0
+    );
+
     if std::env::var_os("NIVREN_BENCH_GATE").is_some() {
         if speedup < 1.05 {
             eprintln!("performance gate failed: native tier speedup {speedup:.3} is below 1.05");

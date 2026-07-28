@@ -4933,6 +4933,54 @@ fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
 }
 
 #[test]
+fn general_call_frames_preserve_values_and_lexical_shadowing() {
+    let source = r#"
+shape Sample { label: String, enabled: Bool }
+keep label = "outer"
+define inspect(sample: Sample) gives String {
+    when sample.enabled {
+        keep label = "inner"
+        assert(label == "inner", "nested slot")
+    }
+    give label + sample.label
+}
+inspect(Sample("!", yes)) + inspect(Sample("?", no))
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(u32::MAX);
+    assert_eq!(
+        interpreter.run_bytecode(&chunk).unwrap(),
+        Value::String("outer!outer?".into())
+    );
+}
+
+#[test]
+fn fast_frames_do_not_leak_into_general_callees() {
+    let source = r#"
+define unwrap(value: Result<Int, String>) gives Int {
+    give choose value {
+        Ok(number) => number,
+        Err(problem) => 0
+    }
+}
+define wrapper(value: Int) gives Int {
+    keep adjusted = value + 2
+    give unwrap(ok(adjusted))
+}
+wrapper(40)
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(u32::MAX);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(42));
+}
+
+#[test]
 fn integer_root_slots_preserve_bindings_between_bytecode_runs() {
     let mut interpreter = nivren::runtime::Interpreter::new();
     let define = nivren::parser::parse(
