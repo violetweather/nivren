@@ -40,7 +40,7 @@ def fixture(directory: Path) -> None:
         write_archive(directory / f"nivren-{LABEL}-{platform}.zip", platform)
     (directory / f"nivren-{LABEL}-wasm32-wasip1.wasm").write_bytes(b"\0asm\x01\0\0\0")
     (directory / f"nivren-{LABEL}-browser.wasm").write_bytes(b"\0asm\x01\0\0\0")
-    (directory / f"nivren-{LABEL}-browser.mjs").write_text("export class NivrenBrowser {}\n")
+    (directory / f"nivren-{LABEL}-browser.mjs").write_text("export class Nivren {}\n")
     with zipfile.ZipFile(directory / "nivren-0.10.0-beta.7.vsix", "w") as extension:
         extension.writestr("extension/package.json", "{}")
     assets = sorted(

@@ -133,8 +133,8 @@ def verify(directory: Path, label: str) -> None:
         if not (directory / f"nivren-{label}-{suffix}").read_bytes().startswith(b"\0asm"):
             fail(f"invalid WebAssembly artifact: {suffix}")
     browser = (directory / f"nivren-{label}-browser.mjs").read_text(encoding="utf-8")
-    if "NivrenBrowser" not in browser:
-        fail("browser SDK does not expose NivrenBrowser")
+    if "export class Nivren " not in browser:
+        fail("browser SDK does not export Nivren")
     version = label.removeprefix("v")
     with zipfile.ZipFile(directory / f"nivren-{version}.vsix") as extension:
         if extension.testzip() is not None or not extension.namelist():
