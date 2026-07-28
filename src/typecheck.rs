@@ -1985,6 +1985,15 @@ impl Checker {
                     name.clone(),
                     fields.iter().map(|field| field.name.clone()).collect(),
                 );
+                for method in crate::derive_methods::METHODS
+                    .iter()
+                    .filter(|method| derives.iter().any(|derive| derive == method.derive))
+                {
+                    self.callable_labels.insert(
+                        format!("{name}.{}", method.name),
+                        method.labels.iter().map(ToString::to_string).collect(),
+                    );
+                }
                 let arguments = generic_names
                     .iter()
                     .map(|name| Type::Generic(name.clone()))
@@ -2811,6 +2820,25 @@ impl Checker {
                         ));
                         Type::Unknown
                     }),
+                Type::Function(_, _, _, result, _)
+                    if matches!(result.as_ref(), Type::Record(_, _)) =>
+                {
+                    let Type::Record(record, arguments) = result.as_ref() else {
+                        unreachable!();
+                    };
+                    self.derived_method_type(record, arguments, name)
+                        .unwrap_or_else(|| {
+                            self.errors.push(NivError::new(
+                                format!(
+                                    "shape '{}' has no generated method '{name}'; add the matching derive",
+                                    short_type_name(record)
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                            Type::Unknown
+                        })
+                }
                 Type::Unknown => Type::Unknown,
                 Type::EnumNamespace(enum_name) => {
                     if let Some((_, payload)) = self
@@ -3303,6 +3331,47 @@ impl Checker {
         self.record_derives
             .get(name)
             .is_none_or(|derives| derives.is_empty() || derives.contains(derive))
+    }
+    fn derived_method_type(
+        &self,
+        record: &str,
+        arguments: &[Type],
+        method_name: &str,
+    ) -> Option<Type> {
+        let method = crate::derive_methods::named(method_name)?;
+        let derives = self.record_derives.get(record)?;
+        if !derives.contains(method.derive) {
+            return None;
+        }
+        let value = Type::Record(record.to_string(), arguments.to_vec());
+        let string_result = || Type::Result(Box::new(Type::String), Box::new(Type::String));
+        let record_result = || Type::Result(Box::new(value.clone()), Box::new(Type::String));
+        let (parameters, result) = match method_name {
+            "to_json" => (vec![value], string_result()),
+            "from_json" => (vec![Type::String], record_result()),
+            "compare" => (vec![value.clone(), value], Type::Bool),
+            "display" => (vec![value], Type::String),
+            "key" => (vec![value], string_result()),
+            "validate" => (
+                vec![value],
+                Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+            ),
+            "to_binary" => (
+                vec![value],
+                Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+            ),
+            "from_binary" => (vec![Type::Bytes], record_result()),
+            "from_row" => (vec![Type::String], record_result()),
+            "from_arguments" => (vec![Type::Array(Box::new(Type::String))], record_result()),
+            _ => return None,
+        };
+        Some(Type::Function(
+            vec![],
+            vec![],
+            parameters,
+            Box::new(result),
+            vec![],
+        ))
     }
     fn protocol_name(&self, name: &str) -> Option<String> {
         if self.protocols.contains(name) {

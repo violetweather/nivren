@@ -320,6 +320,51 @@ std.json.stringify(Visible with { value set 1 })
 }
 
 #[test]
+fn edition_four_generated_derive_methods_run_in_both_engines() {
+    let source = r#"
+shape Release holds {
+    name is String
+    build is Int
+} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+
+define verify
+gives String or String
+{
+    keep release set Release with { name set "beta" build set 4 }
+    keep json set Release.to_json with { value set release } or give
+    keep decoded set Release.from_json with { source set json } or give
+    assert(Release.compare with { left set release right set decoded }, "compare")
+    keep shown set Release.display with { value set decoded }
+    keep key set Release.key with { value set decoded } or give
+    keep checked set Release.validate with { value set decoded } or give
+    keep bytes set Release.to_binary with { value set decoded } or give
+    keep binary set Release.from_binary with { bytes set bytes } or give
+    keep row set Release.from_row with { source set json } or give
+    keep cli set Release.from_arguments with {
+        arguments set ["--name=beta", "--build=4"]
+    } or give
+    assert(Release.compare with { left set binary right set row }, "binary and row")
+    assert(Release.compare with { left set row right set cli }, "arguments")
+    give ok(shown + ":" + key)
+}
+
+verify with {}
+"#;
+    assert_eq!(eval_tree(source), eval_vm(source));
+    assert!(matches!(eval_vm(source), Value::Ok(_)));
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let restored = nivren::bundle::decode(&nivren::bundle::encode(&chunk).unwrap()).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&restored)
+            .unwrap(),
+        eval_tree(source)
+    );
+}
+
+#[test]
 fn through_pipelines_values_into_readable_stages() {
     assert_eq!(
         eval(
@@ -2403,7 +2448,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
     nivren::bytecode::verify(&chunk).unwrap();
     let first = nivren::bytecode::disassemble(&chunk);
     assert_eq!(first, nivren::bytecode::disassemble(&chunk));
-    assert!(first.starts_with("NIVB 5\n"));
+    assert!(first.starts_with("NIVB 6\n"));
 
     let mut incompatible = chunk;
     incompatible.version += 1;
@@ -2426,7 +2471,7 @@ fn source_maps_are_stable_nested_and_exportable() {
     assert_eq!(first, second);
     let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(parsed["schema"], "org.nivren.sourcemap.v1");
-    assert_eq!(parsed["bytecodeVersion"], 5);
+    assert_eq!(parsed["bytecodeVersion"], 6);
     assert!(
         parsed["mappings"]
             .as_array()

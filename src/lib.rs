@@ -4,6 +4,7 @@ pub mod bundle;
 pub mod bytecode;
 mod call_labels;
 pub mod compiler;
+mod derive_methods;
 pub mod documentation;
 pub mod error;
 pub mod fixed;

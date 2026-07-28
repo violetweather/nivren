@@ -11,7 +11,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Black-box conformance | Passing, provisional | `conformance/edition4-language-proof.json` |
 | Six proof programs | Passing, static | All programs under `proofs/edition4` check; network/native proof programs are not executed during Language Proof |
 | Labeled argument safety | Passing | Labels survive the AST; local declarations, imported exports, core functions, compatibility aliases, and every typed standard-library function validate exact canonical names/order; catalog coverage and arity are checked automatically |
-| Derive behavior | Partial | All eight names, dependencies, field constraints, deterministic diagnostics, Compare/Json operation gates, and dual-engine positive evidence pass; generated Validate/Binary/DatabaseRow/Arguments entry points remain open |
+| Derive behavior | Passing | All eight derives enforce dependencies/field constraints and generate labeled methods; JSON, comparison, display, key, validation, deterministic binary, strict row, and argument decoding agree in the tree and Bytecode 6 engines |
 | Scoped source capabilities | Passing for Language Proof | Fixed capability vocabulary, bounded scope metadata, host-only Network validation, and generated documentation pass; runtime authorization remains gated by Intent Proof |
 | Canonical formatter | Partial | Edition 4 spacing, indentation, comments, strings, and operators have deterministic output; example and arbitrary-source idempotence properties pass; canonical line breaking remains open |
 | Usability corpus | Passing | Twelve paired tasks type-check within the 1.15 median token budget; six executable maintenance cases add no conceptual steps and reduce recorded ambiguous choices |
@@ -26,9 +26,8 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 
 ### Remaining Language Proof blockers
 
-1. Finish generated Validate/Binary/DatabaseRow/Arguments behavior for built-in derives.
-2. Finish canonical line breaking in the comment-preserving Edition 4 formatter.
-3. Rerun the entire checkpoint matrix and record final measurements.
+1. Finish canonical line breaking in the comment-preserving Edition 4 formatter.
+2. Rerun the entire checkpoint matrix and record final measurements.
 
 ## Intent Proof — not started
 

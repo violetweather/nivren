@@ -343,6 +343,15 @@ impl Parser {
             name.clone(),
             fields.iter().map(|field| field.name.clone()).collect(),
         );
+        for method in crate::derive_methods::METHODS
+            .iter()
+            .filter(|method| derives.iter().any(|derive| derive == method.derive))
+        {
+            self.callables.insert(
+                format!("{name}.{}", method.name),
+                method.labels.iter().map(ToString::to_string).collect(),
+            );
+        }
         Ok(Stmt::Record {
             name,
             type_params,

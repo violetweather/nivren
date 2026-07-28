@@ -154,6 +154,7 @@ pub enum Value {
     Enum(Arc<EnumValue>),
     ProtocolType(Arc<ProtocolType>),
     ProtocolMethod(Arc<ProtocolMethod>),
+    DerivedMethod(Arc<DerivedMethod>),
     Ok(Arc<Value>),
     Err(Arc<Value>),
     EarlyReturn(Arc<Value>),
@@ -199,7 +200,7 @@ impl Value {
             Self::EnumConstructor(_) => "Function",
             Self::Enum(value) => &value.type_name,
             Self::ProtocolType(_) => "ProtocolType",
-            Self::ProtocolMethod(_) => "Function",
+            Self::ProtocolMethod(_) | Self::DerivedMethod(_) => "Function",
             Self::Ok(_) | Self::Err(_) => "Result",
             Self::EarlyReturn(_) => "internal return",
             Self::Module(_) => "Module",
@@ -252,6 +253,7 @@ impl PartialEq for Value {
             }
             (Self::ProtocolType(a), Self::ProtocolType(b)) => Arc::ptr_eq(a, b),
             (Self::ProtocolMethod(a), Self::ProtocolMethod(b)) => Arc::ptr_eq(a, b),
+            (Self::DerivedMethod(a), Self::DerivedMethod(b)) => Arc::ptr_eq(a, b),
             (Self::Ok(a), Self::Ok(b)) | (Self::Err(a), Self::Err(b)) => a == b,
             (Self::EarlyReturn(a), Self::EarlyReturn(b)) => a == b,
             (Self::Module(a), Self::Module(b)) => Arc::ptr_eq(a, b),
@@ -363,6 +365,9 @@ impl Display for Value {
                     value.protocol, value.member
                 )
             }
+            Self::DerivedMethod(value) => {
+                write!(formatter, "<derived {}.{}>", value.schema.name, value.name)
+            }
             Self::Ok(value) => write!(formatter, "Ok({value})"),
             Self::Err(value) => write!(formatter, "Err({value})"),
             Self::EarlyReturn(_) => write!(formatter, "<early-return>"),
@@ -472,6 +477,7 @@ type HostCallback = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sy
 pub struct RecordType {
     name: String,
     fields: Vec<(String, String)>,
+    derives: Vec<String>,
     field_indices: Arc<HashMap<String, usize>>,
     catalog: BTreeMap<String, Vec<(String, String)>>,
     choices: BTreeMap<String, Vec<(String, bool)>>,
@@ -650,6 +656,10 @@ pub struct ProtocolType {
 pub struct ProtocolMethod {
     protocol: String,
     member: String,
+}
+pub struct DerivedMethod {
+    schema: Arc<RecordType>,
+    name: String,
 }
 
 pub struct Task {
@@ -1404,7 +1414,12 @@ impl Interpreter {
                 },
                 None => Value::Null,
             })),
-            Stmt::Record { name, fields, .. } => {
+            Stmt::Record {
+                name,
+                fields,
+                derives,
+                ..
+            } => {
                 let type_name = self.qualified(name);
                 let record_fields: Vec<_> = fields
                     .iter()
@@ -1417,6 +1432,7 @@ impl Interpreter {
                     name: type_name,
                     field_indices: record_field_indices(&record_fields),
                     fields: record_fields,
+                    derives: derives.clone(),
                     catalog,
                     choices,
                 }));
@@ -1693,6 +1709,29 @@ impl Interpreter {
                             span.column,
                         )
                     }),
+                Value::RecordType(record) => {
+                    let Some(method) = crate::derive_methods::named(name) else {
+                        return Err(NivError::new(
+                            format!("{} has no generated method '{name}'", record.name),
+                            span.line,
+                            span.column,
+                        ));
+                    };
+                    if !record.derives.iter().any(|derive| derive == method.derive) {
+                        return Err(NivError::new(
+                            format!(
+                                "{} needs derive {} for generated method '{name}'",
+                                record.name, method.derive
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    Ok(Value::DerivedMethod(Arc::new(DerivedMethod {
+                        schema: record,
+                        name: name.clone(),
+                    })))
+                }
                 Value::EnumType(enum_type) => {
                     if enum_type.variants.contains(name) {
                         if enum_type.payload_variants.contains(name) {
@@ -2003,6 +2042,7 @@ impl Interpreter {
                     })?;
                 self.call(implementation, arguments, span)
             }
+            Value::DerivedMethod(method) => call_derived_method(&method, arguments, span),
             value => Err(NivError::new(
                 format!("{} is not callable", value.type_name()),
                 span.line,
@@ -3218,7 +3258,11 @@ impl Interpreter {
                     })));
                 }
                 Op::Return => return Ok(VmFlow::Return(stack.pop().unwrap())),
-                Op::DefineRecord { name, fields } => {
+                Op::DefineRecord {
+                    name,
+                    fields,
+                    derives,
+                } => {
                     let type_name = self.qualified(name);
                     let mut catalog = record_catalog(&self.environment);
                     catalog.insert(type_name.clone(), fields.clone());
@@ -3227,6 +3271,7 @@ impl Interpreter {
                         name: type_name,
                         field_indices: record_field_indices(fields),
                         fields: fields.clone(),
+                        derives: derives.clone(),
                         catalog,
                         choices,
                     }));
@@ -3926,6 +3971,7 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::File(_)
         | Value::TcpListener(_)
         | Value::TlsListener(_)
@@ -5821,6 +5867,7 @@ fn decode_schema_value(
                 &RecordType {
                     name,
                     fields: fields.clone(),
+                    derives: Vec::new(),
                     field_indices: record_field_indices(fields),
                     catalog: catalog.clone(),
                     choices: choices.clone(),
@@ -6026,6 +6073,185 @@ fn native_json_stringify(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
         },
         Err(error) => Value::Err(Arc::new(Value::String(error.message))),
     })
+}
+
+fn call_derived_method(
+    method: &DerivedMethod,
+    arguments: Vec<Value>,
+    span: Span,
+) -> Result<Value, NivError> {
+    let metadata = crate::derive_methods::named(&method.name).expect("known derived method");
+    check_arity(
+        &format!("{}.{}", method.schema.name, method.name),
+        metadata.labels.len(),
+        arguments.len(),
+        span,
+    )?;
+    let record_matches = |value: &Value| matches!(value, Value::Record(record) if record.type_name == method.schema.name);
+    match method.name.as_str() {
+        "to_json" | "key" => {
+            if !record_matches(&arguments[0]) {
+                return Err(expected_value(
+                    &method.name,
+                    &method.schema.name,
+                    &arguments[0],
+                    span,
+                ));
+            }
+            native_json_stringify(arguments, span)
+        }
+        "from_json" | "from_row" => native_json_decode(
+            vec![
+                Value::RecordType(method.schema.clone()),
+                arguments[0].clone(),
+            ],
+            span,
+        ),
+        "compare" => {
+            if !record_matches(&arguments[0]) || !record_matches(&arguments[1]) {
+                return Err(NivError::new(
+                    format!(
+                        "{}.compare expects two {} values",
+                        method.schema.name, method.schema.name
+                    ),
+                    span.line,
+                    span.column,
+                ));
+            }
+            Ok(Value::Bool(arguments[0] == arguments[1]))
+        }
+        "display" => {
+            if !record_matches(&arguments[0]) {
+                return Err(expected_value(
+                    &method.name,
+                    &method.schema.name,
+                    &arguments[0],
+                    span,
+                ));
+            }
+            Ok(Value::String(arguments[0].to_string()))
+        }
+        "validate" => {
+            if record_matches(&arguments[0]) {
+                Ok(Value::Ok(Arc::new(Value::Null)))
+            } else {
+                Ok(Value::Err(Arc::new(Value::String(format!(
+                    "expected {}",
+                    method.schema.name
+                )))))
+            }
+        }
+        "to_binary" => {
+            if !record_matches(&arguments[0]) {
+                return Err(expected_value(
+                    &method.name,
+                    &method.schema.name,
+                    &arguments[0],
+                    span,
+                ));
+            }
+            Ok(match native_json_stringify(arguments, span)? {
+                Value::Ok(value) => match value.as_ref() {
+                    Value::String(source) => {
+                        Value::Ok(Arc::new(Value::Bytes(Arc::new(source.as_bytes().to_vec()))))
+                    }
+                    _ => unreachable!("JSON stringify returns text"),
+                },
+                Value::Err(error) => Value::Err(error),
+                _ => unreachable!("JSON stringify returns Result"),
+            })
+        }
+        "from_binary" => {
+            let Value::Bytes(bytes) = &arguments[0] else {
+                return Err(expected_value("from_binary", "Bytes", &arguments[0], span));
+            };
+            let source = match String::from_utf8(bytes.as_ref().clone()) {
+                Ok(source) => source,
+                Err(error) => return Ok(result_error(error)),
+            };
+            native_json_decode(
+                vec![
+                    Value::RecordType(method.schema.clone()),
+                    Value::String(source),
+                ],
+                span,
+            )
+        }
+        "from_arguments" => decode_derived_arguments(&method.schema, &arguments[0], span),
+        _ => unreachable!("complete derived method table"),
+    }
+}
+
+fn decode_derived_arguments(
+    schema: &Arc<RecordType>,
+    value: &Value,
+    span: Span,
+) -> Result<Value, NivError> {
+    let Value::Array(arguments) = value else {
+        return Err(expected_value("from_arguments", "[String]", value, span));
+    };
+    let mut raw = BTreeMap::new();
+    for argument in arguments.iter() {
+        let argument = expect_string(argument, "from_arguments", span)?;
+        let Some((name, value)) = argument
+            .strip_prefix("--")
+            .and_then(|item| item.split_once('='))
+        else {
+            return Ok(Value::Err(Arc::new(Value::String(format!(
+                "argument '{argument}' must use --name=value"
+            )))));
+        };
+        if raw.insert(name.to_string(), value.to_string()).is_some() {
+            return Ok(Value::Err(Arc::new(Value::String(format!(
+                "argument '--{name}' appears more than once"
+            )))));
+        }
+    }
+    let expected = schema
+        .fields
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(unexpected) = raw.keys().find(|name| !expected.contains(name.as_str())) {
+        return Ok(Value::Err(Arc::new(Value::String(format!(
+            "unexpected argument '--{unexpected}'"
+        )))));
+    }
+    let mut object = serde_json::Map::new();
+    for (name, field_type) in &schema.fields {
+        let Some(raw_value) = raw.remove(name) else {
+            if field_type.ends_with('?') {
+                object.insert(name.clone(), serde_json::Value::Null);
+                continue;
+            }
+            return Ok(Value::Err(Arc::new(Value::String(format!(
+                "missing argument '--{name}'"
+            )))));
+        };
+        let field_type = field_type.strip_suffix('?').unwrap_or(field_type);
+        let parsed = match field_type {
+            "String" => serde_json::Value::String(raw_value),
+            "Bool" => match raw_value.as_str() {
+                "yes" | "true" => serde_json::Value::Bool(true),
+                "no" | "false" => serde_json::Value::Bool(false),
+                _ => {
+                    return Ok(Value::Err(Arc::new(Value::String(format!(
+                        "argument '--{name}' expects yes or no"
+                    )))));
+                }
+            },
+            _ => match serde_json::from_str::<serde_json::Value>(&raw_value) {
+                Ok(value @ (serde_json::Value::Number(_) | serde_json::Value::String(_))) => value,
+                _ => serde_json::Value::String(raw_value),
+            },
+        };
+        object.insert(name.clone(), parsed);
+    }
+    let source = serde_json::to_string(&object).expect("JSON object serialization cannot fail");
+    native_json_decode(
+        vec![Value::RecordType(schema.clone()), Value::String(source)],
+        span,
+    )
 }
 
 fn value_to_json(value: &Value, span: Span) -> Result<serde_json::Value, NivError> {
@@ -10512,6 +10738,7 @@ fn transferable(value: &Value) -> bool {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::Module(_)
         | Value::Iterator(_)
         | Value::Transaction(_)
@@ -10795,6 +11022,7 @@ fn stable_key(value: &Value) -> bool {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::Module(_)
         | Value::Iterator(_)
         | Value::Transaction(_)
@@ -10882,6 +11110,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::Module(_)
         | Value::File(_)
         | Value::TcpListener(_)
@@ -11006,6 +11235,29 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
                     span.column,
                 )
             }),
+        Value::RecordType(record) => {
+            let method = crate::derive_methods::named(name).ok_or_else(|| {
+                NivError::new(
+                    format!("{} has no generated method '{name}'", record.name),
+                    span.line,
+                    span.column,
+                )
+            })?;
+            if !record.derives.iter().any(|derive| derive == method.derive) {
+                return Err(NivError::new(
+                    format!(
+                        "{} needs derive {} for generated method '{name}'",
+                        record.name, method.derive
+                    ),
+                    span.line,
+                    span.column,
+                ));
+            }
+            Ok(Value::DerivedMethod(Arc::new(DerivedMethod {
+                schema: record,
+                name: name.to_string(),
+            })))
+        }
         Value::EnumType(enum_type) if enum_type.variants.iter().any(|variant| variant == name) => {
             if enum_type.payload_variants.contains(name) {
                 Ok(Value::EnumConstructor(Arc::new(EnumConstructor {

@@ -9,7 +9,7 @@ use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
-pub const BYTECODE_VERSION: u16 = 5;
+pub const BYTECODE_VERSION: u16 = 6;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chunk {
@@ -55,6 +55,7 @@ pub enum Op {
     DefineRecord {
         name: String,
         fields: Vec<(String, String)>,
+        derives: Vec<String>,
     },
     DefineEnum {
         name: String,
@@ -296,7 +297,11 @@ impl Compiler {
                 self.emit(Op::Return, *span);
             }
             Stmt::Record {
-                name, fields, span, ..
+                name,
+                fields,
+                derives,
+                span,
+                ..
             } => {
                 self.emit(
                     Op::DefineRecord {
@@ -305,6 +310,7 @@ impl Compiler {
                             .iter()
                             .map(|field| (field.name.clone(), schema_name(&field.ty)))
                             .collect(),
+                        derives: derives.clone(),
                     },
                     *span,
                 );

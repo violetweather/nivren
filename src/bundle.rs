@@ -110,7 +110,11 @@ impl Writer {
                 self.chunk(body)?;
             }
             Op::Return => self.u8(18),
-            Op::DefineRecord { name, fields } => {
+            Op::DefineRecord {
+                name,
+                fields,
+                derives,
+            } => {
                 self.u8(19);
                 self.string(name)?;
                 self.len(fields.len())?;
@@ -118,6 +122,7 @@ impl Writer {
                     self.string(field)?;
                     self.string(schema)?;
                 }
+                self.strings(derives)?;
             }
             Op::DefineEnum {
                 name,
@@ -328,6 +333,7 @@ impl Reader<'_> {
                     }
                     fields
                 },
+                derives: self.strings()?,
             },
             20 => Op::DefineEnum {
                 name: self.string()?,

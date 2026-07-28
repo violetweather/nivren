@@ -10,7 +10,7 @@ Audit date: 2026-07-26
 - Workspace unit, language, property, FFI, JIT, and documentation tests pass.
 - Strict workspace Clippy passes with warnings denied.
 - Edition 3 has checked capabilities plus runtime project grants, typed `or give`, `through`, structured concurrency words, generic protocols and collections, immutable bytes, deterministic `using`, unified project commands, instruction budgets, call-depth limits, bounded WebSocket text clients/servers over plain or configured verified TLS, stable JSON observation export, and privacy-safe crash reports.
-- Bytecode version 5 is bounded, recursively verified, bundle-tested, and documents `Using`, `Propagate`, canonical shape schemas, payload-choice metadata, and coherent protocol dispatch.
+- Bytecode version 6 is bounded, recursively verified, bundle-tested, and preserves `Using`, `Propagate`, canonical shape schemas, payload-choice metadata, coherent protocol dispatch, and checked Edition 4 derive metadata.
 - Deterministic package, registry trust, checksum, provenance, advisory, installer, and native release foundations remain in the tree.
 - Reproducible WASI Preview 1 and zero-import browser compiler/runtime guests execute check, diagnostics, formatting, bytecode compilation, and Edition 3 programs through a bounded owned-memory ABI. The public browser SDK passes the same real-module test.
 - Bounded asynchronous native host operations return ordinary structured tasks; transferable sequentially consistent atomic integers pass four-task contention in both engines.
