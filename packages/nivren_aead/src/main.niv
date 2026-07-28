@@ -1,29 +1,39 @@
-shape Sealed {
-    nonce: Bytes,
-    body: Bytes,
+shape Sealed holds {
+    nonce is Bytes
+    body is Bytes
+} with Compare
+
+define import_key
+takes { bytes is Bytes }
+gives SecretKey or String
+{ give std.crypto.key_import with { bytes set bytes } }
+
+define generate_key
+gives SecretKey or String
+needs Random
+{ give perform std.crypto.key_generate with {} }
+
+define seal
+takes { key is SecretKey context is Bytes plaintext is Bytes }
+gives Sealed or String
+needs Random
+{
+    keep nonce set perform std.crypto.random_bytes with { length set 12 } or give
+    keep body set std.crypto.encrypt with { key set key nonce set nonce associated set context plaintext set plaintext } or give
+    give ok(Sealed with { nonce set nonce body set body })
 }
 
-define import_key(bytes: Bytes) gives Result<SecretKey, String> {
-    give std.crypto.key_import(bytes)
+define seal_with_nonce
+takes { key is SecretKey nonce is Bytes context is Bytes plaintext is Bytes }
+gives Sealed or String
+{
+    keep body set std.crypto.encrypt with { key set key nonce set nonce associated set context plaintext set plaintext } or give
+    give ok(Sealed with { nonce set nonce body set body })
 }
 
-define generate_key() gives Result<SecretKey, String> needs Random {
-    give std.crypto.key_generate()
-}
-
-define seal(key: SecretKey, context: Bytes, plaintext: Bytes) gives Result<Sealed, String> needs Random {
-    keep nonce = std.crypto.random_bytes(12) or give
-    keep body = std.crypto.encrypt(key, nonce, context, plaintext) or give
-    give ok(Sealed(nonce, body))
-}
-
-define seal_with_nonce(key: SecretKey, nonce: Bytes, context: Bytes, plaintext: Bytes) gives Result<Sealed, String> {
-    keep body = std.crypto.encrypt(key, nonce, context, plaintext) or give
-    give ok(Sealed(nonce, body))
-}
-
-define unseal(key: SecretKey, context: Bytes, sealed: Sealed) gives Result<Bytes, String> {
-    give std.crypto.decrypt(key, sealed.nonce, context, sealed.body)
-}
+define unseal
+takes { key is SecretKey context is Bytes sealed is Sealed }
+gives Bytes or String
+{ give std.crypto.decrypt with { key set key nonce set sealed.nonce associated set context ciphertext set sealed.body } }
 
 expose { Sealed, import_key, generate_key, seal, seal_with_nonce, unseal }

@@ -1,13 +1,15 @@
 use "../src/main.niv"
 
-define verify() gives Result<Bool, String> {
-    keep headers = ["name", "note"]
-    keep rows = main.decode("Ada,\"hello, Nivren\"\r\nLin,portable\r\n", headers, 10) or give
-    assert(len(rows) == 2, "two rows")
-    assert(std.map.get(rows[0], "note") == "hello, Nivren", "quoted field")
-    keep encoded = main.encode(rows, headers) or give
-    keep decoded = main.decode(encoded, headers, 10) or give
+define verify
+gives Bool or String
+{
+    keep headers set ["name", "note"]
+    keep rows set main.decode with { source set "Ada,\"hello, Nivren\"\r\nLin,portable\r\n" headers set headers maximum_rows set 10 } or give
+    assert with { condition set len(rows) == 2 message set "two rows" }
+    assert with { condition set std.map.get with { map set rows[0] key set "note" } == "hello, Nivren" message set "quoted field" }
+    keep encoded set main.encode with { rows set rows headers set headers } or give
+    keep decoded set main.decode with { source set encoded headers set headers maximum_rows set 10 } or give
     give ok(decoded == rows)
 }
 
-verify()
+verify with {}
