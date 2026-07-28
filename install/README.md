@@ -55,6 +55,8 @@ sh install.sh --channel beta --channel-key ./nivren-channel.pub
 
 The already verified Nivren binary authenticates the channel manifest before the installer trusts its version or asset digest. Manifests expire and carry a monotonically increasing generation; the installer records the highest accepted generation and rejects rollback. It then requires the archive to match both the signed channel digest and the release checksum manifest. The trusted public key is retained for later channel updates. A first install deliberately cannot bootstrap from a channel manifest because an untrusted downloaded verifier cannot establish its own trust; use an explicit version and verify its published provenance first.
 
+The release matrix exercises the complete signed-channel state flow on both Windows architectures and the supported Unix runners: retained keys and generations, dual digest checking, failure atomicity, local rollback, and ownership-checked uninstall. Cryptographic signature, expiry, and generation rejection are tested independently by the release-channel verifier before installer fixtures are allowed to rely on it.
+
 Remove an installer-managed copy safely:
 
 ```sh

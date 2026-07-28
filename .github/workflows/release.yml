@@ -91,6 +91,7 @@ jobs:
           if (-not (Test-Path (Join-Path $root "install-receipt.json"))) { throw "rollback receipt is missing" }
           & "install/install.ps1" -Uninstall -InstallRoot $root
           if (Test-Path $root) { throw "uninstaller left its managed root behind" }
+          tools/test_windows_installer.ps1
       - name: Test release source
         run: |
           cargo test --workspace --all-targets --locked
