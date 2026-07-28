@@ -15,6 +15,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Scoped source capabilities | Passing for Language Proof | Fixed capability vocabulary, bounded scope metadata, host-only Network validation, and generated documentation pass; runtime authorization remains gated by Intent Proof |
 | Canonical formatter | Partial | Edition 4 spacing, indentation, comments, strings, and operators have deterministic output; example and arbitrary-source idempotence properties pass; canonical line breaking remains open |
 | Usability corpus | Passing | Twelve paired tasks type-check within the 1.15 median token budget; six executable maintenance cases add no conceptual steps and reduce recorded ambiguous choices |
+| Actionable diagnostics | Passing for implemented forms | Canonical bindings, nominal wrappers, shapes, choices, preparation, pipelines, scopes, protocols, adoptions, derives, and label order have correction-oriented assertions |
 | Clippy warnings denied | Passing | The complete workspace passes Rust 1.97 clippy with warnings denied |
 
 ### Stop-and-correct record
@@ -28,8 +29,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 1. Preserve label metadata through modules and provide complete official-callable labels.
 2. Implement generated behavior and constraints for all built-in derives.
 3. Implement a comment-preserving canonical Edition 4 formatter.
-4. Complete actionable diagnostic coverage for every new canonical form.
-5. Rerun the entire checkpoint matrix and record final measurements.
+4. Rerun the entire checkpoint matrix and record final measurements.
 
 ## Intent Proof — not started
 

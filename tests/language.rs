@@ -145,6 +145,36 @@ fn edition_four_diagnostics_name_the_intended_forms() {
     )
     .unwrap_err();
     assert!(errors[0].message.contains("canonical order"));
+
+    for (source, expected) in [
+        ("type UserId U64", "from"),
+        ("shape User name is String }", "holds"),
+        ("choice State holds { case Failed carries }", "type"),
+        ("prepare request Request with {}", "as"),
+        ("5 through 2", "function"),
+        (
+            "define fetch needs Network within \"https://api.example.test/v1\" { give null }",
+            "names a host",
+        ),
+        (
+            "protocol Named { name(value: Self) gives String }",
+            "define",
+        ),
+        (
+            "shape User holds { name is String } adopt Named for User { name user_name }",
+            "set",
+        ),
+        (
+            "shape User holds { name is String } with Json, Json",
+            "more than once",
+        ),
+    ] {
+        let errors = nivren::check(source).unwrap_err();
+        assert!(
+            errors.iter().any(|error| error.message.contains(expected)),
+            "{source:?} did not explain {expected:?}: {errors:?}"
+        );
+    }
 }
 
 #[test]
