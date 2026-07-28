@@ -2,6 +2,7 @@ pub mod ast;
 pub mod bindgen;
 pub mod bundle;
 pub mod bytecode;
+mod call_labels;
 pub mod compiler;
 pub mod documentation;
 pub mod error;

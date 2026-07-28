@@ -1617,7 +1617,7 @@ impl Checker {
             protocol_members: HashMap::new(),
             adoptions: HashSet::new(),
             dispatch_adoptions: HashSet::new(),
-            callable_labels: edition_four_builtin_labels(),
+            callable_labels: crate::call_labels::owned(),
             namespace,
         }
     }
@@ -4106,27 +4106,6 @@ fn callable_path(expression: &Expr) -> Option<String> {
     }
 }
 
-fn edition_four_builtin_labels() -> HashMap<String, Vec<String>> {
-    [
-        ("std.files.read", &["path"][..]),
-        ("std.web.get", &["url", "timeout"][..]),
-        ("std.map.single", &["key", "value"][..]),
-        ("std.map.get", &["map", "key"][..]),
-        (
-            "std.web.request",
-            &["method", "url", "headers", "body", "timeout", "maximum"][..],
-        ),
-    ]
-    .into_iter()
-    .map(|(path, labels)| {
-        (
-            path.to_string(),
-            labels.iter().map(ToString::to_string).collect(),
-        )
-    })
-    .collect()
-}
-
 fn compatible(left: &Type, right: &Type) -> bool {
     left == right
         || matches!(left, Type::Unknown)
@@ -4267,5 +4246,52 @@ fn substitute(ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
             needs.clone(),
         ),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Checker, Type};
+
+    #[test]
+    fn official_labeled_call_catalog_matches_every_standard_function() {
+        fn collect(path: &str, ty: &Type, functions: &mut Vec<(String, usize)>) {
+            match ty {
+                Type::Function(_, _, parameters, _, _) => {
+                    functions.push((path.to_string(), parameters.len()));
+                }
+                Type::Module(members) => {
+                    for (name, member) in members {
+                        collect(&format!("{path}.{name}"), member, functions);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let checker = Checker::new();
+        let standard = &checker.scopes[0]["std"].ty;
+        let mut functions = Vec::new();
+        collect("std", standard, &mut functions);
+        for (name, binding) in &checker.scopes[0] {
+            if name != "std" && matches!(binding.ty, Type::Function(_, _, _, _, _)) {
+                collect(name, &binding.ty, &mut functions);
+            }
+        }
+        functions.sort();
+        let failures = functions
+            .into_iter()
+            .filter_map(|(path, arity)| match crate::call_labels::get(&path) {
+                Some(labels) if labels.len() == arity => None,
+                Some(labels) => Some(format!(
+                    "{path} has arity {arity}, catalog has {} labels",
+                    labels.len()
+                )),
+                None => Some(format!(
+                    "{path} has arity {arity}, catalog entry is missing"
+                )),
+            })
+            .collect::<Vec<_>>();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

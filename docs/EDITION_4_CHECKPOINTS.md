@@ -10,7 +10,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Edition 4 grammar executes | Passing, provisional | Tree interpreter and bytecode VM execute bindings, vertical functions, results, nominal wrappers, shapes, choices, labeled calls, preparation syntax, control flow, and scoped-needs syntax |
 | Black-box conformance | Passing, provisional | `conformance/edition4-language-proof.json` |
 | Six proof programs | Passing, static | All programs under `proofs/edition4` check; network/native proof programs are not executed during Language Proof |
-| Labeled argument safety | Partial | Labels survive the AST; same-unit functions/shapes and imported module exports validate exact names/order; complete standard-library metadata remains open |
+| Labeled argument safety | Passing | Labels survive the AST; local declarations, imported exports, core functions, compatibility aliases, and every typed standard-library function validate exact canonical names/order; catalog coverage and arity are checked automatically |
 | Derive behavior | Partial | All eight names, dependencies, field constraints, deterministic diagnostics, Compare/Json operation gates, and dual-engine positive evidence pass; generated Validate/Binary/DatabaseRow/Arguments entry points remain open |
 | Scoped source capabilities | Passing for Language Proof | Fixed capability vocabulary, bounded scope metadata, host-only Network validation, and generated documentation pass; runtime authorization remains gated by Intent Proof |
 | Canonical formatter | Partial | Edition 4 spacing, indentation, comments, strings, and operators have deterministic output; example and arbitrary-source idempotence properties pass; canonical line breaking remains open |
@@ -26,10 +26,9 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 
 ### Remaining Language Proof blockers
 
-1. Preserve label metadata through modules and provide complete official-callable labels.
-2. Implement generated behavior and constraints for all built-in derives.
-3. Implement a comment-preserving canonical Edition 4 formatter.
-4. Rerun the entire checkpoint matrix and record final measurements.
+1. Finish generated Validate/Binary/DatabaseRow/Arguments behavior for built-in derives.
+2. Finish canonical line breaking in the comment-preserving Edition 4 formatter.
+3. Rerun the entire checkpoint matrix and record final measurements.
 
 ## Intent Proof — not started
 

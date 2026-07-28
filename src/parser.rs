@@ -797,7 +797,7 @@ impl Parser {
             .callables
             .get(callable)
             .map(Vec::as_slice)
-            .or_else(|| edition_four_labels(callable));
+            .or_else(|| crate::call_labels::get(callable));
         let Some(expected) = expected else {
             return Ok(());
         };
@@ -1360,35 +1360,6 @@ fn expression_path(expression: &Expr) -> Option<String> {
             path.push_str(name);
             Some(path)
         }
-        _ => None,
-    }
-}
-
-fn edition_four_labels(callable: &str) -> Option<&'static [String]> {
-    static FILE_READ: std::sync::LazyLock<Vec<String>> =
-        std::sync::LazyLock::new(|| vec!["path".into()]);
-    static WEB_GET: std::sync::LazyLock<Vec<String>> =
-        std::sync::LazyLock::new(|| vec!["url".into(), "timeout".into()]);
-    static MAP_PAIR: std::sync::LazyLock<Vec<String>> =
-        std::sync::LazyLock::new(|| vec!["key".into(), "value".into()]);
-    static MAP_GET: std::sync::LazyLock<Vec<String>> =
-        std::sync::LazyLock::new(|| vec!["map".into(), "key".into()]);
-    static WEB_REQUEST: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
-        vec![
-            "method".into(),
-            "url".into(),
-            "headers".into(),
-            "body".into(),
-            "timeout".into(),
-            "maximum".into(),
-        ]
-    });
-    match callable {
-        "std.files.read" => Some(FILE_READ.as_slice()),
-        "std.web.get" => Some(WEB_GET.as_slice()),
-        "std.map.single" => Some(MAP_PAIR.as_slice()),
-        "std.map.get" => Some(MAP_GET.as_slice()),
-        "std.web.request" => Some(WEB_REQUEST.as_slice()),
         _ => None,
     }
 }
