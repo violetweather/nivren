@@ -166,6 +166,12 @@ impl Package {
 
 pub fn publish(package_bytes: &[u8], registry: &Path) -> Result<PathBuf, NivError> {
     let package = Package::decode(package_bytes)?;
+    let manifest_source = package
+        .files
+        .get(MANIFEST_NAME)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .ok_or_else(|| package_error("package manifest is not UTF-8"))?;
+    let manifest = Manifest::parse(manifest_source, PathBuf::from("."))?;
     let digest = sha256(package_bytes);
     let packages = registry.join("v1/packages").join(&package.name);
     let index = registry.join("v1/index").join(&package.name);
@@ -190,6 +196,10 @@ pub fn publish(package_bytes: &[u8], registry: &Path) -> Result<PathBuf, NivErro
         "version": package.version,
         "sha256": digest,
         "size": package_bytes.len(),
+        "yanked": false,
+        "capabilities": manifest.capabilities,
+        "capability_scopes": manifest.capability_scopes,
+        "unsafe_modules": manifest.unsafe_modules,
     });
     let metadata = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| package_error(format!("cannot encode registry metadata: {error}")))?;
@@ -221,6 +231,11 @@ pub fn fetch(name: &str, version: &str, registry: &Path) -> Result<Vec<u8>, NivE
     .map_err(|error| package_error(format!("invalid registry metadata: {error}")))?;
     if metadata["format"] != 1 || metadata["name"] != name || metadata["version"] != version {
         return Err(package_error("registry metadata identity is invalid"));
+    }
+    if metadata["yanked"].as_bool().unwrap_or(false) {
+        return Err(package_error(format!(
+            "package {name} {version} is yanked and cannot be newly installed"
+        )));
     }
     let expected = metadata["sha256"]
         .as_str()
@@ -305,6 +320,16 @@ pub fn search(query: &str, registry: &Path) -> Result<Vec<SearchResult>, NivErro
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "json")
+                && let Ok(document) = fs::read(&path)
+                    .map_err(|error| {
+                        package_error(format!("cannot read registry metadata: {error}"))
+                    })
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+                            package_error(format!("invalid registry metadata: {error}"))
+                        })
+                    })
+                && !document["yanked"].as_bool().unwrap_or(false)
                 && let Some(version) = path.file_stem().and_then(|value| value.to_str())
                 && validate_identity("search-result", version).is_ok()
             {
@@ -319,6 +344,31 @@ pub fn search(query: &str, registry: &Path) -> Result<Vec<SearchResult>, NivErro
     results.sort_by(|left, right| left.name.cmp(&right.name));
     results.truncate(100);
     Ok(results)
+}
+
+pub fn set_yanked(
+    name: &str,
+    version: &str,
+    registry: &Path,
+    yanked: bool,
+) -> Result<(), NivError> {
+    validate_identity(name, version)?;
+    let metadata_path = registry
+        .join("v1/index")
+        .join(name)
+        .join(format!("{version}.json"));
+    reject_symlink_if_present(&metadata_path)?;
+    let bytes = fs::read(&metadata_path)
+        .map_err(|error| package_error(format!("cannot read registry metadata: {error}")))?;
+    let mut metadata: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| package_error(format!("invalid registry metadata: {error}")))?;
+    if metadata["format"] != 1 || metadata["name"] != name || metadata["version"] != version {
+        return Err(package_error("registry metadata identity is invalid"));
+    }
+    metadata["yanked"] = serde_json::Value::Bool(yanked);
+    let encoded = serde_json::to_vec_pretty(&metadata)
+        .map_err(|error| package_error(format!("cannot encode registry metadata: {error}")))?;
+    write_atomic(&metadata_path, &encoded)
 }
 
 fn version_parts(version: &str) -> (u64, u64, u64) {
@@ -369,6 +419,13 @@ pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usiz
     let lockfile = manifest.resolved_lockfile(&resolved);
     write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
     Ok(resolved.len())
+}
+
+pub fn install_offline_dependencies(manifest: &Manifest) -> Result<usize, NivError> {
+    let lockfile = installed_lockfile(manifest)?;
+    let count = lockfile.matches("[[dependency]]").count();
+    write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
+    Ok(count)
 }
 
 pub fn install_trusted_dependencies(

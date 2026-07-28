@@ -1,0 +1,101 @@
+shape PoolConfig holds {
+    minimum is Int
+    maximum is Int
+    connect_timeout is Float
+    idle_timeout is Float
+} with Json, Compare, Display, Validate
+
+shape DriverRequest holds {
+    operation is String
+    statement is String
+    parameters is [String]
+    maximum_rows is Int
+    timeout is Float
+} with Json, Compare, Display, Validate
+
+shape Migration holds {
+    version is Int
+    name is String
+    statement is String
+} with Json, Compare, Display, Validate
+
+shape QueryPage holds {
+    rows is [String]
+    next_cursor is maybe String
+} with Json, Compare, Display, Validate
+
+define validate_pool
+takes {
+    config is PoolConfig
+}
+gives PoolConfig or String
+{
+    when config.minimum < 0 or config.maximum < 1 or config.minimum > config.maximum or config.maximum > 1024 {
+        give err("database pool bounds are invalid")
+    }
+    when config.connect_timeout <= 0.0 or config.connect_timeout > 300.0 or config.idle_timeout < 0.0 or config.idle_timeout > 86400.0 {
+        give err("database pool timeout is outside the supported bounds")
+    }
+    give ok(config)
+}
+
+define validate_request
+takes {
+    request is DriverRequest
+}
+gives DriverRequest or String
+{
+    when request.operation != "query" and request.operation != "execute" and request.operation != "begin" and request.operation != "commit" and request.operation != "rollback" {
+        give err("database driver operation is not supported")
+    }
+    when len(request.statement) > 1048576 or len(request.parameters) > 65536 {
+        give err("database request exceeds a bounded field limit")
+    }
+    when request.maximum_rows < 0 or request.maximum_rows > 1000000 {
+        give err("database maximum_rows is outside the supported bounds")
+    }
+    when request.timeout <= 0.0 or request.timeout > 300.0 {
+        give err("database timeout must be greater than zero and at most 300 seconds")
+    }
+    give ok(request)
+}
+
+define validate_migrations
+takes {
+    migrations is [Migration]
+}
+gives [Migration] or String
+{
+    change previous set -1
+    each migration in migrations {
+        when migration.version <= previous {
+            give err("database migrations must use strictly increasing versions")
+        }
+        when len(migration.name) < 1 or len(migration.name) > 128 or len(migration.statement) < 1 or len(migration.statement) > 1048576 {
+            give err("database migration has an invalid name or statement length")
+        }
+        change previous to migration.version
+    }
+    give ok(migrations)
+}
+
+define encode_request
+takes {
+    request is DriverRequest
+}
+gives String or String
+{
+    keep checked set validate_request with { request set request } or give
+    give DriverRequest.to_json with { value set checked }
+}
+
+define decode_page
+takes {
+    source is String
+}
+gives QueryPage or String
+{
+    give QueryPage.from_json with { source set source }
+}
+
+expose { PoolConfig, DriverRequest, Migration, QueryPage, validate_pool, validate_request, validate_migrations, encode_request, decode_page }

@@ -10,6 +10,8 @@ Package builds are sandboxed by construction: Nivren has no lifecycle or compile
 
 Use `niv install --trusted https://registry.example root.pub [project]` for a public registry. This mode requires verified HTTPS and a separately obtained root key, verifies signed publishing provenance/status/advisories for every package, and persists the highest registry generation to prevent rollback.
 
+After one verified install, `niv install --offline [project]` reconstructs and verifies the complete dependency graph from the immutable archives cached under `.niv/deps`, then rewrites the exact lockfile without making a network request. Missing, altered, or identity-mismatched cache entries fail closed.
+
 ## Archive format
 
 All integers are unsigned little-endian. Strings are UTF-8 prefixed by a `u32` byte length.
@@ -33,7 +35,9 @@ v1/
   packages/<name>/<version>.nivpkg
 ```
 
-Index metadata contains `format`, `name`, `version`, lowercase SHA-256, and byte size. Publishing the same content is idempotent. Reusing a name/version for different content or metadata is rejected. Fetch verifies the metadata identity, bounded size, exact byte size, SHA-256, archive structure, and embedded manifest identity before extraction.
+Index metadata contains `format`, `name`, `version`, lowercase SHA-256, byte size, yank state, declared capabilities/scopes, and declared unsafe modules. Publishing the same content is idempotent. Reusing a name/version for different content or metadata is rejected. Fetch verifies the metadata identity, bounded size, exact byte size, SHA-256, archive structure, embedded manifest identity, and yank state before extraction.
+
+The hosted signed-publish path writes an immutable first-publisher ownership record under `v1/owners/<name>.json`. A later release for that package must use the same authorized publisher. Yanking never deletes or rewrites the immutable archive; it hides the version from search and blocks new fetches while retaining the bytes for existing lockfiles and incident analysis. Registry operators use explicit `yank` and `unyank` commands.
 
 ## Commands
 
@@ -41,10 +45,13 @@ Index metadata contains `format`, `name`, `version`, lowercase SHA-256, and byte
 niv package [project]
 niv install /path/to/registry [project]
 niv install --trusted https://registry.example root.pub [project]
+niv install --offline [project]
 niv package verify target/name-version.nivpkg
 niv registry search web /path/to/registry
 niv registry publish target/name-version.nivpkg /path/to/registry
 niv registry fetch name 1.2.3 /path/to/registry ./vendor/name
+niv registry yank name 1.2.3 /path/to/registry
+niv registry unyank name 1.2.3 /path/to/registry
 ```
 
 Extraction requires a destination that does not exist. Files are written to a sibling temporary directory and committed with one rename; failures clean up the temporary sandbox.

@@ -1,0 +1,122 @@
+shape ComputeLimits holds {
+    maximum_items is Int
+    workgroup_size is Int
+} with Display, Validate
+
+shape AddPlan holds {
+    left is [Int]
+    right is [Int]
+    limits is ComputeLimits
+} with Json, Display, Validate
+
+shape ComputeArtifact holds {
+    target is String
+    entry is String
+    source is String
+    workgroups is Int
+    cpu_fallback is [Int]
+} with Json, Display, Validate
+
+define validate_plan
+takes {
+    plan is AddPlan
+}
+gives AddPlan or String
+{
+    when plan.limits.maximum_items < 1 or plan.limits.maximum_items > 1048576 {
+        give err("GPU maximum_items must be from 1 through 1048576")
+    }
+    when plan.limits.workgroup_size < 1 or plan.limits.workgroup_size > 256 {
+        give err("GPU workgroup_size must be from 1 through 256")
+    }
+    when len(plan.left) != len(plan.right) {
+        give err("GPU vector inputs must have equal lengths")
+    }
+    when len(plan.left) > plan.limits.maximum_items {
+        give err("GPU vector input exceeds the declared maximum_items")
+    }
+    give ok(plan)
+}
+
+define append_sum
+takes {
+    output is [Int]
+    left is Int
+    right is Int
+}
+gives [Int]
+{
+    give append with {
+        values set output
+        value set left + right
+    }
+}
+
+define add_cpu
+takes {
+    plan is AddPlan
+}
+gives [Int] or String
+{
+    keep checked set validate_plan with { plan set plan } or give
+    change output set []
+    change index set 0
+    repeat while index + 3 < len(checked.left) {
+        change output to append_sum with {
+            output set output
+            left set checked.left[index]
+            right set checked.right[index]
+        }
+        change output to append_sum with {
+            output set output
+            left set checked.left[index + 1]
+            right set checked.right[index + 1]
+        }
+        change output to append_sum with {
+            output set output
+            left set checked.left[index + 2]
+            right set checked.right[index + 2]
+        }
+        change output to append_sum with {
+            output set output
+            left set checked.left[index + 3]
+            right set checked.right[index + 3]
+        }
+        change index to index + 4
+    }
+    repeat while index < len(checked.left) {
+        change output to append_sum with {
+            output set output
+            left set checked.left[index]
+            right set checked.right[index]
+        }
+        change index to index + 1
+    }
+    give ok(output)
+}
+
+define add_wgsl
+gives String
+{
+    give "@group(0) @binding(0) var<storage, read> left: array<i32>; @group(0) @binding(1) var<storage, read> right: array<i32>; @group(0) @binding(2) var<storage, read_write> output: array<i32>; @compute @workgroup_size(64) fn add(@builtin(global_invocation_id) id: vec3<u32>) { let index = id.x; if (index < arrayLength(&output)) { output[index] = left[index] + right[index]; } }"
+}
+
+define compile_add
+takes {
+    plan is AddPlan
+}
+gives ComputeArtifact or String
+{
+    keep checked set validate_plan with { plan set plan } or give
+    keep fallback set add_cpu with { plan set checked } or give
+    keep workgroups set (len(checked.left) + checked.limits.workgroup_size - 1) / checked.limits.workgroup_size
+    give ok(ComputeArtifact with {
+        target set "webgpu-wgsl"
+        entry set "add"
+        source set add_wgsl with {}
+        workgroups set workgroups
+        cpu_fallback set fallback
+    })
+}
+
+expose { ComputeLimits, AddPlan, ComputeArtifact, validate_plan, add_cpu, add_wgsl, compile_add }

@@ -14,6 +14,14 @@ use crate::trust::{Advisory, PublishEnvelope, RegistryStatus, parse_public_key, 
 const MAX_HEADER: usize = 64 * 1024;
 const MAX_BODY: usize = 66 * 1024 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackageOwnership {
+    format: u16,
+    package: String,
+    publisher: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub registry: PathBuf,
@@ -192,7 +200,30 @@ fn publish(
         now,
         minimum_generation,
     )?;
+    let ownership_path = registry
+        .join("v1/owners")
+        .join(format!("{}.json", package.name));
+    if ownership_path.exists() {
+        let ownership: PackageOwnership = read_json(&ownership_path, "package ownership")?;
+        if ownership.format != 1
+            || ownership.package != package.name
+            || ownership.publisher != envelope.authorization.publisher
+        {
+            return Err(server_error(format!(
+                "package '{}' is owned by a different publisher",
+                package.name
+            )));
+        }
+    }
     crate::package::publish(&envelope.package, registry)?;
+    write_immutable_json(
+        &ownership_path,
+        &PackageOwnership {
+            format: 1,
+            package: package.name.clone(),
+            publisher: envelope.authorization.publisher.clone(),
+        },
+    )?;
     let provenance_path = registry
         .join("v1/provenance")
         .join(&package.name)

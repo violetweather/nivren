@@ -37,8 +37,19 @@ niv test
 `niv new` creates the manifest, `src/main.niv`, and a first test. Replace the entry point with:
 
 ```nivren
-define double(value: Int) gives Int { give value * 2 }
-define even(value: Int) gives Bool { give value % 2 == 0 }
+define double
+takes { value is Int }
+gives Int
+{
+    give value * 2
+}
+
+define even
+takes { value is Int }
+gives Bool
+{
+    give value % 2 == 0
+}
 
 keep values = [1, 2, 3, 4]
     through std.list.transform(double)
@@ -54,17 +65,24 @@ Run `niv ship` when the project is ready. It checks and builds the project, runs
 Effects are visible in source and authorized in the project manifest. For a file-reading program:
 
 ```nivren
-define load(path: String) gives Result<String, String> needs FileRead {
-    give std.files.read(path)
+define load
+takes { path is String }
+gives String or String
+needs FileRead
+{
+    give perform std.files.read with { path set path }
 }
 
-define main() gives Result<Null, String> needs FileRead {
-    keep text = load("message.txt") or give
+define main
+gives Null or String
+needs FileRead
+{
+    keep text set perform load with { path set "message.txt" } or give
     show(text)
     give ok(none)
 }
 
-main()
+perform main with {}
 ```
 
 Add this to `niv.toml`:
@@ -99,6 +117,8 @@ niv install /path/to/registry
 
 Dependencies use exact versions and checksum-pinned lockfiles. Import the installed entry module with `use "@text_utils"`.
 
+Once those dependencies are cached, `niv install --offline .` verifies and relocks them without network access. `niv bench .` runs two warmups and fifteen isolated VM samples and reports minimum, median, and p95; add `--json report.json` for the stable `org.nivren.benchmark.v1` schema.
+
 ## Editor and help
 
-The first-party VS Code extension provides Edition 3 highlighting, diagnostics, completion, and formatting through `niv lsp`. Run `niv help` for the complete command list. See `docs/LANGUAGE.md`, `docs/STANDARD_LIBRARY.md`, and the normative Edition 3 drafts in `spec/` next.
+The first-party VS Code extension provides Edition 4 highlighting, diagnostics, completion, and formatting through `niv lsp`. Editors that speak the Debug Adapter Protocol can launch `niv dap` over standard input/output for framed initialization, launch, breakpoints, threads, stack frames, scopes, and local variables. Run `niv help` for the complete command list. See `docs/LANGUAGE.md`, `docs/STANDARD_LIBRARY.md`, and the executable Edition 4 draft next.

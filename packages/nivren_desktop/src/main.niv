@@ -1,0 +1,79 @@
+shape Window holds {
+    title is String
+    width is Int
+    height is Int
+    start_url is String
+} with Json, Compare, Display, Validate
+
+shape BridgeMessage holds {
+    identifier is String
+    command is String
+    payload is String
+} with Json, Compare, Display, Validate
+
+shape UpdateManifest holds {
+    channel is String
+    version is String
+    url is String
+    sha256 is String
+    signature is String
+} with Json, Compare, Display, Validate
+
+define validate_window
+takes {
+    window is Window
+}
+gives Window or String
+{
+    when len(window.title) < 1 or len(window.title) > 256 {
+        give err("desktop title must contain 1 through 256 characters")
+    }
+    when window.width < 320 or window.width > 16384 or window.height < 240 or window.height > 16384 {
+        give err("desktop dimensions are outside the supported bounds")
+    }
+    when !std.text.starts_with with { value set window.start_url prefix set "https://" } and window.start_url != "app://index.html" {
+        give err("desktop start_url must use https:// or app://index.html")
+    }
+    give ok(window)
+}
+
+define encode_message
+takes {
+    message is BridgeMessage
+}
+gives String or String
+{
+    when len(message.identifier) < 1 or len(message.identifier) > 128 {
+        give err("desktop bridge identifier must contain 1 through 128 characters")
+    }
+    when len(message.command) < 1 or len(message.command) > 128 {
+        give err("desktop bridge command must contain 1 through 128 characters")
+    }
+    when len(message.payload) > 1048576 {
+        give err("desktop bridge payload exceeds 1 MiB")
+    }
+    give BridgeMessage.to_json with { value set message }
+}
+
+define validate_update
+takes {
+    update is UpdateManifest
+}
+gives UpdateManifest or String
+{
+    when update.channel != "stable" and update.channel != "beta" and update.channel != "nightly" {
+        give err("desktop update channel must be stable, beta, or nightly")
+    }
+    when !std.text.starts_with with { value set update.url prefix set "https://" } {
+        give err("desktop update URL must use https://")
+    }
+    when len(update.sha256) != 64 {
+        give err("desktop update SHA-256 must contain 64 hexadecimal characters")
+    }
+    when len(update.signature) < 64 or len(update.signature) > 512 {
+        give err("desktop update signature has an invalid length")
+    }
+    give ok(update)
+}
+
+expose { Window, BridgeMessage, UpdateManifest, validate_window, encode_message, validate_update }

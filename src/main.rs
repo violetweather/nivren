@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         [] => repl(),
         [command] if command == "repl" => repl(),
         [command] if command == "lsp" => lsp(),
+        [command] if command == "dap" => dap(),
         [command] if command == "version" || command == "--version" || command == "-V" => {
             println!("Nivren {}", nivren::VERSION);
             ExitCode::SUCCESS
@@ -67,6 +68,12 @@ fn main() -> ExitCode {
         [command, flag, registry, root, path] if command == "install" && flag == "--trusted" => {
             install_trusted_project(path, registry, root)
         }
+        [command, flag] if command == "install" && flag == "--offline" => {
+            install_offline_project(".")
+        }
+        [command, flag, path] if command == "install" && flag == "--offline" => {
+            install_offline_project(path)
+        }
         [command, registry] if command == "install" => install_project(".", registry),
         [command, registry, path] if command == "install" => install_project(path, registry),
         [command] if command == "package" => package_project("."),
@@ -79,6 +86,14 @@ fn main() -> ExitCode {
         }
         [command, action, query, registry] if command == "registry" && action == "search" => {
             registry_search(query, registry)
+        }
+        [command, action, name, version, registry] if command == "registry" && action == "yank" => {
+            registry_set_yanked(name, version, registry, true)
+        }
+        [command, action, name, version, registry]
+            if command == "registry" && action == "unyank" =>
+        {
+            registry_set_yanked(name, version, registry, false)
         }
         [command, action, name, version, registry, destination]
             if command == "registry" && action == "fetch" =>
@@ -144,6 +159,11 @@ fn main() -> ExitCode {
         [command, flag, output, path] if command == "coverage" && flag == "--json" => {
             observe_path(path, true, Some(output))
         }
+        [command] if command == "bench" => benchmark_path(".", None),
+        [command, path] if command == "bench" => benchmark_path(path, None),
+        [command, flag, output, path] if command == "bench" && flag == "--json" => {
+            benchmark_path(path, Some(output))
+        }
         [command] if command == "test" => test_path("tests/niv", None),
         [command, flag] if command == "test" && flag == "--snapshots" => {
             test_path("tests/niv", Some(false))
@@ -193,6 +213,16 @@ fn generate_c_bindings(path: &str, output: &str) -> ExitCode {
         Err(error) => {
             eprintln!("error: cannot write '{output}': {error}");
             ExitCode::from(74)
+        }
+    }
+}
+
+fn dap() -> ExitCode {
+    match nivren::dap::serve() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            ExitCode::from(70)
         }
     }
 }
@@ -385,6 +415,26 @@ fn install_project(path: &str, registry: &str) -> ExitCode {
     match nivren::package::install_dependencies(&manifest, Path::new(registry)) {
         Ok(count) => {
             println!("installed {count} package(s)");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn install_offline_project(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::install_offline_dependencies(&manifest) {
+        Ok(count) => {
+            println!("verified {count} cached package(s); no network used");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -730,11 +780,11 @@ fn new_project(path: &str) -> ExitCode {
         fs::write(root.join("niv.toml"), manifest_source)?;
         fs::write(
             root.join("src/main.niv"),
-            "define main() gives Null {\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain()\n",
+            "define main\ngives Null\n{\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain with {}\n",
         )?;
         fs::write(
             root.join("tests/niv/main_test.niv"),
-            "define answer() gives Int { give 42 }\nassert(answer() == 42, \"answer\")\n",
+            "define answer\ngives Int\n{\n    give 42\n}\n\nassert(answer with {} == 42, \"answer\")\n",
         )?;
         Ok(())
     })();
@@ -887,6 +937,22 @@ fn registry_search(query: &str, registry_path: &str) -> ExitCode {
         }
         Err(error) => {
             report(registry_path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn registry_set_yanked(name: &str, version: &str, registry: &str, yanked: bool) -> ExitCode {
+    match nivren::package::set_yanked(name, version, Path::new(registry), yanked) {
+        Ok(()) => {
+            println!(
+                "{} {name} {version}",
+                if yanked { "yanked" } else { "unyanked" }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(registry, "", &[error]);
             ExitCode::from(65)
         }
     }
@@ -1252,6 +1318,97 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
             jit.compilations, jit.executions
         );
     }
+    ExitCode::SUCCESS
+}
+
+fn benchmark_path(path: &str, output: Option<&str>) -> ExitCode {
+    const WARMUPS: usize = 2;
+    const SAMPLES: usize = 15;
+    let (manifest, chunk) = if is_bundle_path(Path::new(path)) {
+        match fs::read(path)
+            .map_err(|error| NivError::new(error.to_string(), 1, 1))
+            .and_then(|bytes| nivren::bundle::decode(&bytes))
+        {
+            Ok(chunk) => (None, chunk),
+            Err(error) => {
+                report(path, "", &[error]);
+                return ExitCode::from(65);
+            }
+        }
+    } else if is_project_path(Path::new(path)) {
+        match compile_project(Path::new(path)) {
+            Ok((manifest, chunk)) => (Some(manifest), chunk),
+            Err(errors) => {
+                report(path, "", &errors);
+                return ExitCode::from(65);
+            }
+        }
+    } else {
+        match compile_file(Path::new(path)) {
+            Ok(chunk) => (None, chunk),
+            Err(errors) => {
+                let source = fs::read_to_string(path).unwrap_or_default();
+                report(path, &source, &errors);
+                return ExitCode::from(65);
+            }
+        }
+    };
+
+    for _ in 0..WARMUPS {
+        let mut interpreter = manifest
+            .as_ref()
+            .map_or_else(Interpreter::new, project_interpreter);
+        if let Err(error) = interpreter.run_bytecode(&chunk) {
+            report(path, "", &[error]);
+            return ExitCode::from(70);
+        }
+    }
+
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let mut interpreter = manifest
+            .as_ref()
+            .map_or_else(Interpreter::new, project_interpreter);
+        let started = Instant::now();
+        if let Err(error) = interpreter.run_bytecode(&chunk) {
+            report(path, "", &[error]);
+            return ExitCode::from(70);
+        }
+        samples.push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    }
+    samples.sort_unstable();
+    let minimum = samples[0];
+    let median = samples[SAMPLES / 2];
+    let p95 = samples[(SAMPLES * 95).div_ceil(100) - 1];
+    let report = serde_json::json!({
+        "schema": "org.nivren.benchmark.v1",
+        "path": path,
+        "engine": "vm",
+        "warmups": WARMUPS,
+        "samples": SAMPLES,
+        "minimum_nanoseconds": minimum,
+        "median_nanoseconds": median,
+        "p95_nanoseconds": p95,
+    });
+    if let Some(output) = output {
+        let bytes = serde_json::to_vec_pretty(&report).expect("benchmark JSON is representable");
+        return match write_atomic(Path::new(output), &bytes) {
+            Ok(()) => {
+                println!("wrote {output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: cannot write {output}: {error}");
+                ExitCode::from(73)
+            }
+        };
+    }
+    println!(
+        "bench {path}: median {:.3} ms, p95 {:.3} ms, minimum {:.3} ms ({SAMPLES} samples)",
+        median as f64 / 1_000_000.0,
+        p95 as f64 / 1_000_000.0,
+        minimum as f64 / 1_000_000.0,
+    );
     ExitCode::SUCCESS
 }
 
@@ -2143,7 +2300,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");

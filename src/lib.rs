@@ -4,6 +4,8 @@ pub mod bundle;
 pub mod bytecode;
 mod call_labels;
 pub mod compiler;
+#[cfg(feature = "host-runtime")]
+pub mod dap;
 mod derive_methods;
 pub mod documentation;
 pub mod error;

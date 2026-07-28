@@ -2194,6 +2194,7 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
     for arguments in [
         vec!["new".to_string(), project.display().to_string()],
         vec!["dev".to_string(), project.display().to_string()],
+        vec!["bench".to_string(), project.display().to_string()],
         vec![
             "test".to_string(),
             project.join("tests/niv").display().to_string(),
@@ -2303,6 +2304,16 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
         1
     );
     let expected_lock = nivren::package::installed_lockfile(&app_manifest).unwrap();
+    assert_eq!(
+        fs::read_to_string(app.join("niv.lock")).unwrap(),
+        expected_lock
+    );
+    fs::remove_file(app.join("niv.lock")).unwrap();
+    fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(
+        nivren::package::install_offline_dependencies(&app_manifest).unwrap(),
+        1
+    );
     assert_eq!(
         fs::read_to_string(app.join("niv.lock")).unwrap(),
         expected_lock
@@ -5167,7 +5178,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("niv.toml"),
-        "[package]\nname = \"sample\"\nversion = \"1.2.3\"\nentry = \"src/main.niv\"\n",
+        "[package]\nname = \"sample\"\nversion = \"1.2.3\"\nentry = \"src/main.niv\"\n\n[capabilities]\nFileRead = \"path:./data\"\n",
     )
     .unwrap();
     fs::write(project.join("src/main.niv"), "keep answer = 42; answer").unwrap();
@@ -5194,6 +5205,23 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
         }]
     );
     assert!(nivren::package::search("../", &registry).is_err());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("v1/index/sample/1.2.3.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["capabilities"], serde_json::json!(["FileRead"]));
+    assert_eq!(metadata["capability_scopes"]["FileRead"], "path:./data");
+    nivren::package::set_yanked("sample", "1.2.3", &registry, true).unwrap();
+    assert!(nivren::package::fetch("sample", "1.2.3", &registry).is_err());
+    assert!(
+        nivren::package::search("sample", &registry)
+            .unwrap()
+            .is_empty()
+    );
+    nivren::package::set_yanked("sample", "1.2.3", &registry, false).unwrap();
+    assert_eq!(
+        nivren::package::fetch("sample", "1.2.3", &registry).unwrap(),
+        first
+    );
     let destination = project.with_file_name(format!(
         "nivren-package-extracted-{}-{:?}",
         std::process::id(),
@@ -5230,7 +5258,10 @@ fn official_packages_test_document_publish_install_and_run_together() {
         "nivren_compression",
         "nivren_crypto",
         "nivren_csv",
+        "nivren_database",
+        "nivren_desktop",
         "nivren_discord",
+        "nivren_gpu",
         "nivren_image",
         "nivren_jwt",
         "nivren_matrix",
@@ -5287,7 +5318,7 @@ fn official_packages_test_document_publish_install_and_run_together() {
     fs::create_dir_all(consumer.join("src")).unwrap();
     fs::write(
         consumer.join("niv.toml"),
-        "[package]\nname = \"official_consumer\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[dependencies]\nnivren_aead = \"1.0.0\"\nnivren_aws = \"1.0.0\"\nnivren_columnar = \"1.0.0\"\nnivren_compression = \"1.0.0\"\nnivren_csv = \"1.0.0\"\nnivren_crypto = \"1.0.0\"\nnivren_discord = \"1.0.0\"\nnivren_image = \"1.0.0\"\nnivren_jwt = \"1.0.0\"\nnivren_matrix = \"1.0.0\"\nnivren_metrics = \"1.0.0\"\nnivren_oidc = \"1.0.0\"\nnivren_redis = \"1.0.0\"\nnivren_routing = \"1.0.0\"\nnivren_secrets = \"1.0.0\"\nnivren_sql = \"1.0.0\"\nnivren_stats = \"1.0.0\"\nnivren_svg = \"1.0.0\"\nnivren_testing = \"1.0.0\"\nnivren_trace = \"1.0.0\"\nnivren_validation = \"1.0.0\"\nnivren_wav = \"1.0.0\"\n",
+        "[package]\nname = \"official_consumer\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[dependencies]\nnivren_aead = \"1.0.0\"\nnivren_aws = \"1.0.0\"\nnivren_columnar = \"1.0.0\"\nnivren_compression = \"1.0.0\"\nnivren_csv = \"1.0.0\"\nnivren_crypto = \"1.0.0\"\nnivren_database = \"1.0.0\"\nnivren_desktop = \"1.0.0\"\nnivren_discord = \"1.0.0\"\nnivren_gpu = \"1.0.0\"\nnivren_image = \"1.0.0\"\nnivren_jwt = \"1.0.0\"\nnivren_matrix = \"1.0.0\"\nnivren_metrics = \"1.0.0\"\nnivren_oidc = \"1.0.0\"\nnivren_redis = \"1.0.0\"\nnivren_routing = \"1.0.0\"\nnivren_secrets = \"1.0.0\"\nnivren_sql = \"1.0.0\"\nnivren_stats = \"1.0.0\"\nnivren_svg = \"1.0.0\"\nnivren_testing = \"1.0.0\"\nnivren_trace = \"1.0.0\"\nnivren_validation = \"1.0.0\"\nnivren_wav = \"1.0.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -5304,7 +5335,10 @@ use "@nivren_image"
 use "@nivren_crypto"
 use "@nivren_compression"
 use "@nivren_csv"
+use "@nivren_database"
+use "@nivren_desktop"
 use "@nivren_secrets"
+use "@nivren_gpu"
 use "@nivren_sql"
 use "@nivren_stats"
 use "@nivren_jwt"
@@ -5333,6 +5367,12 @@ keep compressed = nivren_compression.gzip_text("Nivren", 6)
 keep compression_ok = choose compressed { Ok(bytes) => nivren_compression.gunzip_text(bytes, 1024) == ok("Nivren"), Err(problem) => no }
 keep csv_rows = nivren_csv.decode("Nivren,1\r\n", ["name", "version"], 10)
 keep csv_ok = choose csv_rows { Ok(rows) => len(rows) == 1 and std.map.get(rows[0], "name") == "Nivren", Err(problem) => no }
+keep database_pool = nivren_database.PoolConfig(1, 4, 5.0, 60.0)
+keep database_ok = nivren_database.validate_pool(database_pool) == ok(database_pool)
+keep desktop_window = nivren_desktop.Window("Nivren", 800, 600, "app://index.html")
+keep desktop_ok = nivren_desktop.validate_window(desktop_window) == ok(desktop_window)
+keep gpu_plan = nivren_gpu.AddPlan([1, 2], [3, 4], nivren_gpu.ComputeLimits(8, 4))
+keep gpu_ok = choose nivren_gpu.compile_add(gpu_plan) { Ok(value) => value.cpu_fallback == [4, 6], Err(problem) => no }
 keep stats_ok = nivren_stats.mean([1.0, 2.0, 3.0]) == ok(2.0)
 keep jwt_secret = std.bytes.from_string("official package test secret")
 keep jwt_token = nivren_jwt.sign_hs256("{\"sub\":\"42\"}", jwt_secret)
@@ -5366,7 +5406,7 @@ keep aead_ok = choose aead_key {
     },
     Err(problem) => no,
 }
-keep checked = nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
+keep checked = nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and database_ok and desktop_ok and gpu_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
 keep port = nivren_validation.range("port", 443, 1, 65535)
 choose checked {
     Ok(value) => choose port { Ok(number) => number, Err(problem) => 0 },
@@ -5378,7 +5418,7 @@ choose checked {
     let manifest = nivren::project::Manifest::load(&consumer).unwrap();
     assert_eq!(
         nivren::package::install_dependencies(&manifest, &registry).unwrap(),
-        22
+        25
     );
     let program = nivren::modules::load_project(&manifest.root, &manifest.entry_path()).unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -5802,6 +5842,11 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
     request.extend_from_slice(&envelope);
     let response = nivren::registry_server::handle_request_for_test(&request, &registry, 1_100, 1);
     assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
+    let ownership: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("v1/owners/trusted.json")).unwrap())
+            .unwrap();
+    assert_eq!(ownership["package"], "trusted");
+    assert_eq!(ownership["publisher"], "team");
     let response = nivren::registry_server::handle_request_for_test(
         b"GET /v1/packages/trusted/1.0.0.nivpkg HTTP/1.1\r\nHost: registry.test\r\n\r\n",
         &registry,
