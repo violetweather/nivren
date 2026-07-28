@@ -2324,6 +2324,21 @@ fn cli_test_profiles_and_deterministic_time_are_explicit() {
 }
 
 #[test]
+fn vscode_extension_registers_the_nivren_debug_adapter() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(repository.join("editors/vscode/package.json")).unwrap())
+            .unwrap();
+    let debugger = &manifest["contributes"]["debuggers"][0];
+    assert_eq!(debugger["type"], "nivren");
+    assert_eq!(debugger["languages"][0], "nivren");
+    assert_eq!(debugger["initialConfigurations"][0]["request"], "launch");
+    let extension = fs::read_to_string(repository.join("editors/vscode/src/extension.ts")).unwrap();
+    assert!(extension.contains("registerDebugAdapterDescriptorFactory"));
+    assert!(extension.contains("new vscode.DebugAdapterExecutable(this.executable, [\"dap\"])"));
+}
+
+#[test]
 fn workspace_commands_build_test_and_reuse_incremental_members() {
     let root = module_fixture("workspace-commands");
     for name in ["core", "app"] {

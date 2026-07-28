@@ -12,7 +12,8 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onLanguage:nivren"
+    "onLanguage:nivren",
+    "onDebug:nivren"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -34,6 +35,34 @@
         "language": "nivren",
         "scopeName": "source.nivren",
         "path": "./syntaxes/nivren.tmLanguage.json"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "nivren",
+        "label": "Nivren",
+        "languages": ["nivren"],
+        "program": "${file}",
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Nivren source file or project to debug.",
+                "default": "${file}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "nivren",
+            "request": "launch",
+            "name": "Launch Nivren",
+            "program": "${file}"
+          }
+        ]
       }
     ],
     "configuration": {
