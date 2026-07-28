@@ -21,16 +21,21 @@ $originalPath = $env:Path
 try {
     New-Item -ItemType Directory -Force $fakeCommands, (Join-Path $releaseRoot "bin"), (Join-Path $installRoot "bin"), (Join-Path $installRoot "versions\1.0.0\bin") | Out-Null
     $program = @'
-using System;
-public static class NivrenInstallerFixture {
-    public static int Main(string[] args) {
-        Console.WriteLine("Nivren installer fixture");
-        return 0;
-    }
+#include <stdio.h>
+int main(void) {
+    puts("Nivren installer fixture");
+    return 0;
 }
 '@
+    $fixtureSource = Join-Path $fixture "nivren-installer-fixture.c"
     $fixtureBinary = Join-Path $fixture "niv.exe"
-    Add-Type -TypeDefinition $program -OutputAssembly $fixtureBinary -OutputType ConsoleApplication
+    $fixtureObject = Join-Path $fixture "nivren-installer-fixture.obj"
+    Set-Content -LiteralPath $fixtureSource -Value $program -NoNewline
+    $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+    & $compiler /nologo /O1 "/Fe:$fixtureBinary" "/Fo:$fixtureObject" $fixtureSource
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $fixtureBinary -PathType Leaf)) {
+        throw "failed to build the native $machine installer fixture"
+    }
     Copy-Item $fixtureBinary (Join-Path $releaseRoot "bin\niv.exe")
     Copy-Item $fixtureBinary (Join-Path $installRoot "bin\niv.exe")
     Copy-Item $fixtureBinary (Join-Path $installRoot "versions\1.0.0\bin\niv.exe")
