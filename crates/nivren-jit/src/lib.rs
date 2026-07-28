@@ -517,6 +517,7 @@ impl CompiledFunction {
         })
     }
 
+    #[inline]
     pub fn call(&self, arguments: &[i64]) -> Result<i64, CallError> {
         if arguments.len() != self.parameters {
             return Err(CallError::Arity);
