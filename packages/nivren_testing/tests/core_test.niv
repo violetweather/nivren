@@ -1,28 +1,37 @@
 use "../src/main.niv"
 
-assert(main.expect_equal(42, 42, "answer") == ok(none), "equal values pass")
-assert(main.expect_yes(yes, "truth") == ok(none), "yes passes")
-assert(main.expect_no(no, "falsehood") == ok(none), "no passes")
+assert with { condition set main.expect_equal with { actual set 42 expected set 42 label set "answer" } == ok(none) message set "equal values pass" }
+assert with { condition set main.expect_yes with { condition set yes label set "truth" } == ok(none) message set "yes passes" }
+assert with { condition set main.expect_no with { condition set no label set "falsehood" } == ok(none) message set "no passes" }
 
-define controlled() gives Result<Bool, String> needs Task, Channel {
-    keep first = main.gate()
-    keep second = main.gate()
-    keep events = std.channels.create(2)
-    define one() gives Result<Null, String> needs Channel {
-        main.pass(first) or give
-        give main.checkpoint(events, "one")
+define controlled
+gives Bool or String
+needs Task, Channel
+{
+    keep first set perform main.gate with {}
+    keep second set perform main.gate with {}
+    keep events set perform std.channels.create with { capacity set 2 }
+    define one
+    gives Null or String
+    needs Channel
+    {
+        perform main.pass with { value set first } or give
+        give perform main.checkpoint with { events set events label set "one" }
     }
-    define two() gives Result<Null, String> needs Channel {
-        main.pass(second) or give
-        give main.checkpoint(events, "two")
+    define two
+    gives Null or String
+    needs Channel
+    {
+        perform main.pass with { value set second } or give
+        give perform main.checkpoint with { events set events label set "two" }
     }
-    keep tasks = [start one, start two]
-    main.open(second) or give
-    keep observed_second = std.channels.receive(events, 5.0) or give
-    main.open(first) or give
-    keep observed_first = std.channels.receive(events, 5.0) or give
+    keep tasks set [start one, start two]
+    perform main.open with { value set second } or give
+    keep observed_second set perform std.channels.receive with { channel set events timeout set 5.0 } or give
+    perform main.open with { value set first } or give
+    keep observed_first set perform std.channels.receive with { channel set events timeout set 5.0 } or give
     together tasks or give
     give ok(observed_second == "two" and observed_first == "one")
 }
 
-controlled()
+perform controlled with {}

@@ -1,51 +1,70 @@
-define count_as_float(values: [Float]) gives Result<Float, String> {
-    give std.float.parse(std.int.format(len(values)))
-}
+define count_as_float
+takes { values is [Float] }
+gives Float or String
+{ give std.float.parse with { source set std.int.format with { value set len(values) } } }
 
-define sum(values: [Float]) gives Float {
-    change total: Float = 0.0
-    each value within values { total = total + value }
+define sum
+takes { values is [Float] }
+gives Float
+{
+    change total is Float set 0.0
+    each value within values { change total to total + value }
     give total
 }
 
-define mean(values: [Float]) gives Result<Float, String> {
+define mean
+takes { values is [Float] }
+gives Float or String
+{
     when len(values) == 0 { give err("mean requires at least one value") }
-    keep count = count_as_float(values) or give
-    give ok(sum(values) / count)
+    keep count set count_as_float with { values set values } or give
+    give ok(sum with { values set values } / count)
 }
 
-define variance(values: [Float]) gives Result<Float, String> {
-    keep average = mean(values) or give
-    keep count = count_as_float(values) or give
-    change squares: Float = 0.0
+define variance
+takes { values is [Float] }
+gives Float or String
+{
+    keep average set mean with { values set values } or give
+    keep count set count_as_float with { values set values } or give
+    change squares is Float set 0.0
     each value within values {
-        keep difference = value - average
-        squares = squares + difference * difference
+        keep difference set value - average
+        change squares to squares + difference * difference
     }
     give ok(squares / count)
 }
 
-define minimum(values: [Float]) gives Result<Float, String> {
+define minimum
+takes { values is [Float] }
+gives Float or String
+{
     when len(values) == 0 { give err("minimum requires at least one value") }
-    change found = values[0]
-    each value within values { when value < found { found = value } }
+    change found set values[0]
+    each value within values { when value < found { change found to value } }
     give ok(found)
 }
 
-define maximum(values: [Float]) gives Result<Float, String> {
+define maximum
+takes { values is [Float] }
+gives Float or String
+{
     when len(values) == 0 { give err("maximum requires at least one value") }
-    change found = values[0]
-    each value within values { when value > found { found = value } }
+    change found set values[0]
+    each value within values { when value > found { change found to value } }
     give ok(found)
 }
 
-define normalize(values: [Float]) gives Result<[Float], String> {
-    keep low = minimum(values) or give
-    keep high = maximum(values) or give
-    keep width = high - low
+define normalize
+takes { values is [Float] }
+gives [Float] or String
+{
+    keep low set minimum with { values set values } or give
+    keep high set maximum with { values set values } or give
+    keep width set high - low
     when width == 0.0 { give err("normalize requires a nonzero range") }
-    change normalized: [Float] = []
-    each value within values { normalized = append(normalized, (value - low) / width) }
+    change normalized is [Float] set []
+    each value within values { change normalized to append with { values set normalized value set (value - low) / width } }
     give ok(normalized)
 }
 
