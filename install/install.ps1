@@ -2,6 +2,9 @@
 param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$Version = "0.10.0-beta.6",
+    [ValidateSet("", "stable", "beta", "nightly")]
+    [string]$Channel = "",
+    [string]$ChannelKey = "",
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "Nivren"),
     [switch]$Uninstall,
     [switch]$Rollback,
@@ -28,10 +31,7 @@ $machine = switch ($architecture) {
     default { throw "Unsupported Windows architecture: $architecture" }
 }
 
-$asset = "nivren-v$Version-windows-$machine.zip"
-$base = "https://github.com/violetweather/nivren/releases/download/v$Version"
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("nivren-install-" + [guid]::NewGuid())
-$versionRoot = Join-Path $InstallRoot "versions\$Version"
 $binDir = Join-Path $InstallRoot "bin"
 
 if ($Uninstall -and $Rollback) { throw "-Uninstall and -Rollback cannot be combined" }
@@ -85,13 +85,40 @@ if ($Rollback) {
     return
 }
 
-Write-Host "Nivren $Version installer" -ForegroundColor Cyan
-Write-Host "Platform: windows-$machine"
-Write-Host "Install:  $versionRoot"
-Write-Host "Command:  $binDir\niv.exe"
-
 New-Item -ItemType Directory -Force $temporary | Out-Null
 try {
+    $channelGeneration = $null
+    $channelDigest = $null
+    if ($Channel) {
+        $verifier = Join-Path $binDir "niv.exe"
+        if (-not (Test-Path $verifier -PathType Leaf)) { throw "Signed channel updates require an existing verified Nivren install; use -Version for the first install" }
+        if (-not $ChannelKey) { $ChannelKey = Join-Path $InstallRoot "channel-public-key" }
+        if (-not (Test-Path $ChannelKey -PathType Leaf)) { throw "Channel public key is missing; pass -ChannelKey from a separately trusted source" }
+        $channelPath = Join-Path $temporary "channel-$Channel.json"
+        Invoke-WebRequest -UseBasicParsing "https://github.com/violetweather/nivren/releases/latest/download/channel-$Channel.json" -OutFile $channelPath
+        $minimumPath = Join-Path $InstallRoot "channel-$Channel-generation"
+        $minimum = if (Test-Path $minimumPath -PathType Leaf) { (Get-Content -Raw $minimumPath).Trim() } else { "0" }
+        if ($minimum -notmatch '^\d+$') { throw "Stored channel generation is invalid" }
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
+        & $verifier release verify-channel $channelPath $ChannelKey $now $minimum
+        if ($LASTEXITCODE -ne 0) { throw "Signed channel verification failed" }
+        $channelManifest = Get-Content -Raw $channelPath | ConvertFrom-Json
+        $Version = [string]$channelManifest.version
+        $channelGeneration = [string]$channelManifest.generation
+        if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $channelGeneration -notmatch '^\d+$') { throw "Signed channel identity is invalid" }
+    }
+    $asset = "nivren-v$Version-windows-$machine.zip"
+    $base = "https://github.com/violetweather/nivren/releases/download/v$Version"
+    $versionRoot = Join-Path $InstallRoot "versions\$Version"
+    Write-Host "Nivren $Version installer" -ForegroundColor Cyan
+    Write-Host "Platform: windows-$machine"
+    Write-Host "Install:  $versionRoot"
+    Write-Host "Command:  $binDir\niv.exe"
+    if ($Channel) {
+        $property = $channelManifest.assets.PSObject.Properties[$asset]
+        if (-not $property) { throw "Signed channel does not offer $asset" }
+        $channelDigest = [string]$property.Value
+    }
     $archive = Join-Path $temporary $asset
     $checksums = Join-Path $temporary "SHA256SUMS"
     Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile $archive
@@ -102,6 +129,7 @@ try {
     $expected = ($line -split '\s+')[0].ToLowerInvariant()
     $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { throw "Checksum verification failed" }
+    if ($channelDigest -and $actual -ne $channelDigest.ToLowerInvariant()) { throw "Signed channel digest verification failed" }
 
     $gh = Get-Command gh -ErrorAction SilentlyContinue
     if ($gh) {
@@ -143,6 +171,12 @@ try {
         platform = "windows-$machine"
         bin_dir = $binDir
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $InstallRoot "install-receipt.json") -NoNewline
+    if ($Channel) {
+        Set-Content -LiteralPath (Join-Path $InstallRoot "channel-$Channel-generation") -Value $channelGeneration -NoNewline
+        $storedKey = Join-Path $InstallRoot "channel-public-key"
+        if ([System.IO.Path]::GetFullPath($ChannelKey) -ne [System.IO.Path]::GetFullPath($storedKey)) { Copy-Item $ChannelKey $storedKey -Force }
+        Set-Content -LiteralPath (Join-Path $InstallRoot "current-channel") -Value $Channel -NoNewline
+    }
 
     $addPath = -not $NoPath
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

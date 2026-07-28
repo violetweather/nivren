@@ -41,6 +41,20 @@ sh install.sh --rollback
 
 Rollback swaps the current and previous receipts, so repeating it restores the version that was replaced. It refuses missing ownership markers, malformed receipts, and absent binaries. Installing an explicit version remains available through `--version VERSION` or `-Version VERSION`.
 
+## Signed channel updates
+
+After the first version-pinned install, opt into a stable, beta, or nightly channel with a public key obtained separately from the download host:
+
+```sh
+sh install.sh --channel beta --channel-key ./nivren-channel.pub
+```
+
+```powershell
+.\install.ps1 -Channel beta -ChannelKey .\nivren-channel.pub
+```
+
+The already verified Nivren binary authenticates the channel manifest before the installer trusts its version or asset digest. Manifests expire and carry a monotonically increasing generation; the installer records the highest accepted generation and rejects rollback. It then requires the archive to match both the signed channel digest and the release checksum manifest. The trusted public key is retained for later channel updates. A first install deliberately cannot bootstrap from a channel manifest because an untrusted downloaded verifier cannot establish its own trust; use an explicit version and verify its published provenance first.
+
 Remove an installer-managed copy safely:
 
 ```sh
