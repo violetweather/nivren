@@ -45,7 +45,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           arch: ${{ matrix.msvc_arch }}
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Verify release version
         shell: python
         run: |
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-wasip1, wasm32-unknown-unknown
       - uses: actions/setup-node@v6
@@ -223,7 +223,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Enforce Edition 4 Product Proof for stable releases
         if: ${{ !contains(github.ref_name, '-') }}
         run: cargo run --locked -- release check .
