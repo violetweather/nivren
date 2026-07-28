@@ -38,7 +38,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.bytes",
-        "from_string:value;from_values:values;to_string:bytes;length:bytes;get:bytes,index;slice:bytes,start,length",
+        "from_string:value;from_values:values;to_string:bytes;length:bytes;get:bytes,index;slice:bytes,offset,length",
     );
     for module in ["std.channel", "std.channels"] {
         add(

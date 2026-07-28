@@ -1,24 +1,27 @@
 use "../src/main.niv"
 
-define compatibility() gives Result<Bool, String> {
-    keep signed = main.sign_v4(
-        "GET",
-        "/",
-        "Action=ListUsers&Version=2010-05-08",
-        "content-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z",
-        "content-type;host;x-amz-date",
-        "",
-        "20150830T123600Z",
-        "20150830",
-        "us-east-1",
-        "iam",
-        "AKIDEXAMPLE",
-        std.bytes.from_string("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
-    ) or give
-    assert(signed.payload_hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "empty payload hash")
-    assert(signed.canonical_request_hash == "f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59", "AWS canonical request hash")
-    assert(signed.authorization == "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7", "AWS published signature")
+define compatibility
+takes { }
+gives Bool or String
+{
+    keep signed set main.sign_v4 with {
+        method set "GET"
+        canonical_uri set "/"
+        canonical_query set "Action=ListUsers&Version=2010-05-08"
+        canonical_headers set "content-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z"
+        signed_headers set "content-type;host;x-amz-date"
+        payload set ""
+        timestamp set "20150830T123600Z"
+        date set "20150830"
+        region set "us-east-1"
+        service set "iam"
+        access_key set "AKIDEXAMPLE"
+        secret_key set std.bytes.from_string with { value set "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY" }
+    } or give
+    assert with { condition set signed.payload_hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" message set "empty payload hash" }
+    assert with { condition set signed.canonical_request_hash == "f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59" message set "AWS canonical request hash" }
+    assert with { condition set signed.authorization == "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7" message set "AWS published signature" }
     give ok(yes)
 }
 
-compatibility()
+compatibility with { }
