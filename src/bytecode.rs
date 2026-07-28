@@ -422,7 +422,7 @@ impl Compiler {
                     self.patch(jump, self.code.len());
                 }
             }
-            Expr::Call(callee, arguments, span) => {
+            Expr::Call(callee, arguments, _, span) => {
                 self.expression(callee);
                 for argument in arguments {
                     self.expression(argument);

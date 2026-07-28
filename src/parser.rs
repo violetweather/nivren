@@ -234,6 +234,7 @@ impl Parser {
                 } else {
                     None
                 };
+                validate_capability_need(&capability, boundary.as_deref(), need_span)?;
                 capability_needs.push(CapabilityNeed {
                     capability,
                     boundary,
@@ -755,7 +756,12 @@ impl Parser {
             name,
             mutable: false,
             annotation: None,
-            initializer: Expr::Call(Box::new(Expr::Variable(plan_type, span)), arguments, span),
+            initializer: Expr::Call(
+                Box::new(Expr::Variable(plan_type, span)),
+                arguments,
+                Some(labels),
+                span,
+            ),
             span,
         })
     }
@@ -975,12 +981,12 @@ impl Parser {
             let span = self.previous_span();
             let stage = self.call()?;
             expression = match stage {
-                Expr::Call(callee, mut arguments, _) => {
+                Expr::Call(callee, mut arguments, labels, _) => {
                     arguments.insert(0, expression);
-                    Expr::Call(callee, arguments, span)
+                    Expr::Call(callee, arguments, labels, span)
                 }
                 Expr::Variable(_, _) | Expr::Get(_, _, _) => {
-                    Expr::Call(Box::new(stage), vec![expression], span)
+                    Expr::Call(Box::new(stage), vec![expression], None, span)
                 }
                 _ => {
                     return Err(NivError::new(
@@ -1105,7 +1111,7 @@ impl Parser {
                 if let Some(name) = expression_path(&expression) {
                     self.validate_labels(&name, &labels, span)?;
                 }
-                expression = Expr::Call(Box::new(expression), args, span);
+                expression = Expr::Call(Box::new(expression), args, Some(labels), span);
             } else if self.matches(&[TokenKind::LeftParen]) {
                 let span = self.previous_span();
                 let mut args = vec![];
@@ -1121,7 +1127,7 @@ impl Parser {
                     }
                 }
                 self.consume(&TokenKind::RightParen, "expected ')' after arguments")?;
-                expression = Expr::Call(Box::new(expression), args, span);
+                expression = Expr::Call(Box::new(expression), args, None, span);
             } else if self.matches(&[TokenKind::LeftBracket]) {
                 let span = self.previous_span();
                 let index = self.expression()?;
@@ -1387,11 +1393,63 @@ fn edition_four_labels(callable: &str) -> Option<&'static [String]> {
     }
 }
 
+fn validate_capability_need(
+    capability: &str,
+    boundary: Option<&str>,
+    span: Span,
+) -> Result<(), NivError> {
+    const CAPABILITIES: &[&str] = &[
+        "FileRead",
+        "FileWrite",
+        "Environment",
+        "Time",
+        "Process",
+        "Network",
+        "Task",
+        "Channel",
+        "Log",
+        "Native",
+        "Random",
+    ];
+    if !CAPABILITIES.contains(&capability) {
+        return Err(NivError::new(
+            format!(
+                "unknown capability '{capability}'; expected one of {}",
+                CAPABILITIES.join(", ")
+            ),
+            span.line,
+            span.column,
+        ));
+    }
+    let Some(boundary) = boundary else {
+        return Ok(());
+    };
+    if boundary.is_empty() || boundary.len() > 1024 || boundary.chars().any(char::is_control) {
+        return Err(NivError::new(
+            "a capability boundary must be non-empty, at most 1024 bytes, and contain no control characters",
+            span.line,
+            span.column,
+        ));
+    }
+    if capability == "Network"
+        && (boundary.contains("://")
+            || boundary.contains('/')
+            || boundary.chars().any(char::is_whitespace))
+    {
+        return Err(NivError::new(
+            "a Network boundary names a host such as \"api.example.com\", without a URL scheme or path",
+            span.line,
+            span.column,
+        ));
+    }
+    Ok(())
+}
+
 fn task_call(operation: &str, argument: Expr, span: Span) -> Expr {
     let standard = Expr::Variable("std".into(), span);
     let task = Expr::Get(Box::new(standard), "tasks".into(), span);
     let function = Expr::Get(Box::new(task), operation.into(), span);
-    Expr::Call(Box::new(function), vec![argument], span)
+    Expr::Call(Box::new(function), vec![argument], None, span)
 }
 
 fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {

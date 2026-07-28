@@ -145,6 +145,7 @@ struct Checker {
     generics: Vec<Vec<String>>,
     constraints: Vec<HashMap<String, String>>,
     records: HashMap<String, HashMap<String, Type>>,
+    record_derives: HashMap<String, HashSet<String>>,
     enums: HashMap<String, Vec<(String, Option<Type>)>>,
     type_parameters: HashMap<String, Vec<String>>,
     type_constraints: HashMap<String, Vec<(String, String)>>,
@@ -153,6 +154,7 @@ struct Checker {
     protocol_members: HashMap<String, HashMap<String, ProtocolMemberType>>,
     adoptions: HashSet<(String, String)>,
     dispatch_adoptions: HashSet<(String, String)>,
+    callable_labels: HashMap<String, Vec<String>>,
     namespace: String,
 }
 
@@ -1606,6 +1608,7 @@ impl Checker {
             generics: vec![],
             constraints: vec![],
             records: HashMap::new(),
+            record_derives: HashMap::new(),
             enums: HashMap::new(),
             type_parameters: HashMap::new(),
             type_constraints: HashMap::new(),
@@ -1614,6 +1617,7 @@ impl Checker {
             protocol_members: HashMap::new(),
             adoptions: HashSet::new(),
             dispatch_adoptions: HashSet::new(),
+            callable_labels: edition_four_builtin_labels(),
             namespace,
         }
     }
@@ -1849,6 +1853,13 @@ impl Checker {
                     .as_ref()
                     .map(|ty| self.type_ref(ty))
                     .unwrap_or(Type::Unknown);
+                self.callable_labels.insert(
+                    name.clone(),
+                    params
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                );
                 self.declare(
                     name,
                     Binding {
@@ -1895,8 +1906,8 @@ impl Checker {
                 name,
                 type_params,
                 fields,
+                derives,
                 span,
-                ..
             } => {
                 if self.type_names.contains_key(name) {
                     self.errors.push(NivError::new(
@@ -1957,7 +1968,23 @@ impl Checker {
                 }
                 self.generics.pop();
                 self.constraints.pop();
+                validate_record_derives(
+                    name,
+                    derives,
+                    &schema,
+                    &self.records,
+                    *span,
+                    &mut self.errors,
+                );
                 self.records.insert(qualified.clone(), schema);
+                self.record_derives.insert(
+                    qualified.clone(),
+                    derives.iter().cloned().collect::<HashSet<_>>(),
+                );
+                self.callable_labels.insert(
+                    name.clone(),
+                    fields.iter().map(|field| field.name.clone()).collect(),
+                );
                 let arguments = generic_names
                     .iter()
                     .map(|name| Type::Generic(name.clone()))
@@ -2315,6 +2342,9 @@ impl Checker {
                 for (record, fields) in module_checker.records {
                     self.records.entry(record).or_insert(fields);
                 }
+                for (record, derives) in module_checker.record_derives {
+                    self.record_derives.entry(record).or_insert(derives);
+                }
                 for (enumeration, variants) in module_checker.enums {
                     self.enums.entry(enumeration).or_insert(variants);
                 }
@@ -2331,6 +2361,12 @@ impl Checker {
                 self.adoptions.extend(module_checker.adoptions);
                 self.dispatch_adoptions
                     .extend(module_checker.dispatch_adoptions);
+                for export in exports {
+                    if let Some(labels) = module_checker.callable_labels.get(export) {
+                        self.callable_labels
+                            .insert(format!("{name}.{export}"), labels.clone());
+                    }
+                }
                 self.declare(
                     name,
                     Binding {
@@ -2424,6 +2460,20 @@ impl Checker {
                                 span.column,
                             ));
                         }
+                        for ty in [&left, &right] {
+                            if let Type::Record(name, _) = ty
+                                && !self.record_supports_derive(name, "Compare")
+                            {
+                                self.errors.push(NivError::new(
+                                    format!(
+                                        "shape '{}' must derive Compare before its values can be compared",
+                                        short_type_name(name)
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                        }
                         Type::Bool
                     }
                     TokenKind::Plus
@@ -2460,7 +2510,30 @@ impl Checker {
                 self.require(&right, &Type::Bool, *span);
                 Type::Bool
             }
-            Expr::Call(callee, arguments, span) => {
+            Expr::Call(callee, arguments, labels, span) => {
+                if let Some(labels) = labels
+                    && let Some(path) = callable_path(callee)
+                {
+                    match self.callable_labels.get(&path) {
+                        Some(expected) if expected == labels => {}
+                        Some(expected) => self.errors.push(NivError::new(
+                            format!(
+                                "{path} expects labeled values [{}] in canonical order; received [{}]",
+                                expected.join(", "),
+                                labels.join(", ")
+                            ),
+                            span.line,
+                            span.column,
+                        )),
+                        None => self.errors.push(NivError::new(
+                            format!(
+                                "labeled call metadata is unavailable for '{path}'; use its documented canonical labels"
+                            ),
+                            span.line,
+                            span.column,
+                        )),
+                    }
+                }
                 let callee_type = self.expression(callee);
                 let argument_types: Vec<Type> = arguments
                     .iter()
@@ -2493,6 +2566,33 @@ impl Checker {
                 } else {
                     None
                 };
+                if member_path(callee, &["std", "json", "stringify"])
+                    && let Some(Type::Record(name, _)) = argument_types.first()
+                    && !self.record_supports_derive(name, "Json")
+                {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "shape '{}' must derive Json before it can be encoded",
+                            short_type_name(name)
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if schema_decode_result.is_some()
+                    && let Some(Type::Function(_, _, _, result, _)) = argument_types.first()
+                    && let Type::Record(name, _) = result.as_ref()
+                    && !self.record_supports_derive(name, "Json")
+                {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "shape '{}' must derive Json before it can be decoded",
+                            short_type_name(name)
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
                 if let Expr::Variable(name, _) = callee.as_ref() {
                     if name == "ok" && argument_types.len() == 1 {
                         return Type::Result(
@@ -3199,6 +3299,11 @@ impl Checker {
     fn known_protocol(&self, name: &str) -> bool {
         known_builtin_protocol(name) || self.protocol_name(name).is_some()
     }
+    fn record_supports_derive(&self, name: &str, derive: &str) -> bool {
+        self.record_derives
+            .get(name)
+            .is_none_or(|derives| derives.is_empty() || derives.contains(derive))
+    }
     fn protocol_name(&self, name: &str) -> Option<String> {
         if self.protocols.contains(name) {
             return Some(name.to_string());
@@ -3274,6 +3379,185 @@ fn known_builtin_protocol(name: &str) -> bool {
         name,
         "Comparable" | "Number" | "Ordered" | "Iterable" | "Closable" | "Sendable"
     )
+}
+
+fn short_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn validate_record_derives(
+    name: &str,
+    derives: &[String],
+    fields: &HashMap<String, Type>,
+    records: &HashMap<String, HashMap<String, Type>>,
+    span: Span,
+    errors: &mut Vec<NivError>,
+) {
+    if derives.iter().any(|derive| derive == "Key")
+        && !derives.iter().any(|derive| derive == "Compare")
+    {
+        errors.push(NivError::new(
+            format!("shape '{name}' derives Key and must also derive Compare"),
+            span.line,
+            span.column,
+        ));
+    }
+    let mut field_names = fields.keys().collect::<Vec<_>>();
+    field_names.sort();
+    for derive in derives {
+        for field in &field_names {
+            let ty = &fields[*field];
+            let supported = match derive.as_str() {
+                "Json" | "Display" | "Validate" | "Binary" | "Compare" | "Key" => {
+                    derive_data_type(ty, records)
+                }
+                "DatabaseRow" => derive_scalar_type(ty, records),
+                "Arguments" => derive_argument_type(ty, records),
+                _ => true,
+            };
+            if !supported {
+                errors.push(NivError::new(
+                    format!(
+                        "derive {derive} does not support field '{field}' of type {} in shape '{name}'",
+                        ty.name()
+                    ),
+                    span.line,
+                    span.column,
+                ));
+            }
+        }
+    }
+}
+
+fn derive_data_type(ty: &Type, records: &HashMap<String, HashMap<String, Type>>) -> bool {
+    derive_data_type_at(ty, records, 0)
+}
+
+fn derive_data_type_at(
+    ty: &Type,
+    records: &HashMap<String, HashMap<String, Type>>,
+    depth: usize,
+) -> bool {
+    if depth >= 128 {
+        return false;
+    }
+    match ty {
+        Type::Int
+        | Type::Float
+        | Type::String
+        | Type::Bytes
+        | Type::Bool
+        | Type::Null
+        | Type::Generic(_)
+        | Type::Enum(_, _)
+        | Type::DateTime
+        | Type::BigInt
+        | Type::Decimal
+        | Type::Fixed(_)
+        | Type::Unknown => true,
+        Type::Record(name, _) => records.get(name).is_some_and(|fields| {
+            fields
+                .values()
+                .all(|field| derive_data_type_at(field, records, depth + 1))
+        }),
+        Type::Array(value) | Type::Set(value) | Type::Nullable(value) => {
+            derive_data_type_at(value, records, depth + 1)
+        }
+        Type::Map(key, value) | Type::Result(key, value) => {
+            derive_data_type_at(key, records, depth + 1)
+                && derive_data_type_at(value, records, depth + 1)
+        }
+        Type::SecretKey
+        | Type::Function(_, _, _, _, _)
+        | Type::Iterator(_)
+        | Type::EnumNamespace(_)
+        | Type::ProtocolNamespace(_)
+        | Type::Module(_)
+        | Type::File
+        | Type::TcpListener
+        | Type::TcpStream
+        | Type::TlsStream
+        | Type::WebSocket
+        | Type::TlsListener
+        | Type::Lock
+        | Type::LockGuard
+        | Type::AtomicInt
+        | Type::NativeHandle
+        | Type::NativeLibrary
+        | Type::Transaction(_, _)
+        | Type::Task
+        | Type::Channel => false,
+    }
+}
+
+fn derive_scalar_type(ty: &Type, records: &HashMap<String, HashMap<String, Type>>) -> bool {
+    derive_scalar_type_at(ty, records, 0)
+}
+
+fn derive_scalar_type_at(
+    ty: &Type,
+    records: &HashMap<String, HashMap<String, Type>>,
+    depth: usize,
+) -> bool {
+    if depth >= 128 {
+        return false;
+    }
+    match ty {
+        Type::Int
+        | Type::Float
+        | Type::String
+        | Type::Bytes
+        | Type::Bool
+        | Type::Generic(_)
+        | Type::Enum(_, _)
+        | Type::DateTime
+        | Type::BigInt
+        | Type::Decimal
+        | Type::Fixed(_)
+        | Type::Unknown => true,
+        Type::Record(name, _) => records.get(name).is_some_and(|fields| {
+            fields.len() == 1
+                && fields
+                    .values()
+                    .all(|field| derive_scalar_type_at(field, records, depth + 1))
+        }),
+        Type::Nullable(inner) => derive_scalar_type_at(inner, records, depth + 1),
+        _ => false,
+    }
+}
+
+fn derive_argument_type(ty: &Type, records: &HashMap<String, HashMap<String, Type>>) -> bool {
+    derive_argument_type_at(ty, records, 0)
+}
+
+fn derive_argument_type_at(
+    ty: &Type,
+    records: &HashMap<String, HashMap<String, Type>>,
+    depth: usize,
+) -> bool {
+    if depth >= 128 {
+        return false;
+    }
+    match ty {
+        Type::Int
+        | Type::Float
+        | Type::String
+        | Type::Bool
+        | Type::Generic(_)
+        | Type::Enum(_, _)
+        | Type::BigInt
+        | Type::Decimal
+        | Type::Fixed(_)
+        | Type::Unknown => true,
+        Type::Record(name, _) => records.get(name).is_some_and(|fields| {
+            fields.len() == 1
+                && fields
+                    .values()
+                    .all(|field| derive_argument_type_at(field, records, depth + 1))
+        }),
+        Type::Nullable(inner) => derive_argument_type_at(inner, records, depth + 1),
+        _ => false,
+    }
 }
 
 fn fixed_type_module(kind: FixedKind) -> Type {
@@ -3807,6 +4091,40 @@ fn member_path(expression: &Expr, expected: &[&str]) -> bool {
     }
     let mut actual = Vec::new();
     collect(expression, &mut actual) && actual == expected
+}
+
+fn callable_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Variable(name, _) => Some(name.clone()),
+        Expr::Get(parent, name, _) => {
+            let mut path = callable_path(parent)?;
+            path.push('.');
+            path.push_str(name);
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn edition_four_builtin_labels() -> HashMap<String, Vec<String>> {
+    [
+        ("std.files.read", &["path"][..]),
+        ("std.web.get", &["url", "timeout"][..]),
+        ("std.map.single", &["key", "value"][..]),
+        ("std.map.get", &["map", "key"][..]),
+        (
+            "std.web.request",
+            &["method", "url", "headers", "body", "timeout", "maximum"][..],
+        ),
+    ]
+    .into_iter()
+    .map(|(path, labels)| {
+        (
+            path.to_string(),
+            labels.iter().map(ToString::to_string).collect(),
+        )
+    })
+    .collect()
 }
 
 fn compatible(left: &Type, right: &Type) -> bool {

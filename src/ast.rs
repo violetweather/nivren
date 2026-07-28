@@ -91,7 +91,7 @@ pub enum Expr {
     Unary(TokenKind, Box<Expr>, Span),
     Binary(Box<Expr>, TokenKind, Box<Expr>, Span),
     Logical(Box<Expr>, TokenKind, Box<Expr>, Span),
-    Call(Box<Expr>, Vec<Expr>, Span),
+    Call(Box<Expr>, Vec<Expr>, Option<Vec<String>>, Span),
     Array(Vec<Expr>, Span),
     Index(Box<Expr>, Box<Expr>, Span),
     Coalesce(Box<Expr>, Box<Expr>, Span),
@@ -109,7 +109,7 @@ impl Expr {
             | Self::Unary(_, _, span)
             | Self::Binary(_, _, _, span)
             | Self::Logical(_, _, _, span)
-            | Self::Call(_, _, span)
+            | Self::Call(_, _, _, span)
             | Self::Array(_, span)
             | Self::Index(_, _, span)
             | Self::Coalesce(_, _, span)

@@ -1617,7 +1617,7 @@ impl Interpreter {
                     )?)),
                 }
             }
-            Expr::Call(callee, arguments, span) => {
+            Expr::Call(callee, arguments, _, span) => {
                 let callee = evaluate_part!(self, callee);
                 let mut evaluated = Vec::with_capacity(arguments.len());
                 for argument in arguments {

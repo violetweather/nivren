@@ -164,6 +164,15 @@ fn edition_four_preserves_scoped_needs_as_checked_metadata() {
     );
     let docs = nivren::documentation::generate("proof", "4.0.0-beta", &program);
     assert!(docs.contains("Network within \"api.example.test\""));
+
+    let invalid = nivren::parser::parse(
+        nivren::lexer::scan(
+            "define fetch needs Network within \"https://api.example.test/v1\" { give null }",
+        )
+        .unwrap(),
+    )
+    .unwrap_err();
+    assert!(invalid[0].message.contains("names a host"));
 }
 
 #[test]
@@ -201,6 +210,83 @@ Named.name(user)
 "#;
     assert_eq!(eval_tree(source), Value::String("Mira".into()));
     assert_eq!(eval_vm(source), Value::String("Mira".into()));
+}
+
+#[test]
+fn edition_four_labeled_calls_preserve_names_and_validate_module_exports() {
+    let parsed = nivren::parser::parse(
+        nivren::lexer::scan(
+            r#"define greet takes { name is String } gives String { give name }
+               greet with { name set "Mira" }"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let nivren::ast::Stmt::Expression(nivren::ast::Expr::Call(_, _, labels, _)) = &parsed[1] else {
+        panic!("expected labeled call");
+    };
+    assert_eq!(labels.as_deref(), Some(["name".to_string()].as_slice()));
+
+    let body = nivren::parser::parse(
+        nivren::lexer::scan("define greet takes { name is String } gives String { give name }")
+            .unwrap(),
+    )
+    .unwrap();
+    let span = nivren::ast::Span { line: 1, column: 1 };
+    let module = nivren::ast::Stmt::Module {
+        name: "people".into(),
+        body,
+        exports: vec!["greet".into()],
+        span,
+    };
+    let call = |label: &str| {
+        nivren::parser::parse(
+            nivren::lexer::scan(&format!("people.greet with {{ {label} set \"Mira\" }}")).unwrap(),
+        )
+        .unwrap()
+        .remove(0)
+    };
+    assert!(nivren::typecheck::check(&[module.clone(), call("name")]).is_ok());
+    let errors = nivren::typecheck::check(&[module, call("person")]).unwrap_err();
+    assert!(errors[0].message.contains("expects labeled values [name]"));
+}
+
+#[test]
+fn edition_four_derives_are_checked_and_gate_generated_operations() {
+    let complete = r#"
+shape Release holds {
+    name is String
+    build is Int
+} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+
+keep first set Release with { name set "beta" build set 4 }
+keep second set Release with { name set "beta" build set 4 }
+assert(first == second, "Compare derive")
+std.json.stringify(first)
+"#;
+    assert!(nivren::check(complete).is_ok());
+    assert_eq!(eval_tree(complete), eval_vm(complete));
+
+    for derive in ["Json", "Compare", "Display", "Validate", "Binary"] {
+        let source = format!("shape Unsafe holds {{ handle is NativeHandle }} with {derive}");
+        let errors = nivren::check(&source).unwrap_err();
+        assert!(
+            errors[0]
+                .message
+                .contains(&format!("derive {derive} does not support"))
+        );
+    }
+    assert!(nivren::check("shape Row holds { values is [Int] } with DatabaseRow").is_err());
+    assert!(nivren::check("shape Cli holds { bytes is Bytes } with Arguments").is_err());
+    let key_errors = nivren::check("shape Id holds { value is Int } with Key").unwrap_err();
+    assert!(key_errors[0].message.contains("must also derive Compare"));
+
+    let missing_json = r#"
+shape Visible holds { value is Int } with Display
+std.json.stringify(Visible with { value set 1 })
+"#;
+    let errors = nivren::check(missing_json).unwrap_err();
+    assert!(errors[0].message.contains("must derive Json"));
 }
 
 #[test]

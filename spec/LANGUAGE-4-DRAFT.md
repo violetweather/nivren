@@ -42,7 +42,11 @@ repetition     = "repeat", "while", expression, statement ;
 unary          = "perform", unary | edition-three-unary ;
 ```
 
-The built-in derive names are `Json`, `Compare`, `Display`, `Key`, `Validate`, `Binary`, `DatabaseRow`, and `Arguments`. Derive metadata is part of the checked declaration. Generated behavior is completed and tested before the Language Proof gate may pass.
+The built-in derive names are `Json`, `Compare`, `Display`, `Key`, `Validate`, `Binary`, `DatabaseRow`, and `Arguments`. Derive metadata is part of the checked declaration and gates the corresponding generated operation. `Key` also requires `Compare`. Data derives reject functions, secrets, iterators, resources, handles, tasks, and channels. `DatabaseRow` accepts scalar or nullable-scalar columns (including nominal scalar wrappers), while `Arguments` accepts command-line scalar or nullable-scalar fields. Diagnostics name the derive, field, and unsupported type. A declaration with an explicit derive list cannot use an omitted generated operation. Unadorned Edition 3 shapes retain their structural compatibility behavior while the Edition 4 proof is developed.
+
+Labeled-call names are preserved in the checked syntax tree. Local functions and shapes use their declared parameters or fields; imported module exports retain that metadata and are checked at the call site. Official callables use the same canonical metadata catalog. A labeled call with missing metadata is rejected rather than silently reverting to positional behavior.
+
+Scoped `needs` declarations preserve both the capability and boundary. Capabilities are drawn from the fixed capability vocabulary. Boundaries must be non-empty, bounded, and free of control characters; `Network` boundaries name hosts rather than URLs. This is static Language Proof validation only. Authorization and enforcement belong to the Intent Proof checkpoint.
 
 `gives Value or Problem` denotes the same checked result type represented internally as `Result<Value, Problem>`. `maybe Value` denotes the standard optional type. Edition 4 source MUST NOT require `T?` or `Result<T, E>` spellings.
 

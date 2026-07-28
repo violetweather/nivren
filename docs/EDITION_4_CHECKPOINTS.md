@@ -10,9 +10,9 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Edition 4 grammar executes | Passing, provisional | Tree interpreter and bytecode VM execute bindings, vertical functions, results, nominal wrappers, shapes, choices, labeled calls, preparation syntax, control flow, and scoped-needs syntax |
 | Black-box conformance | Passing, provisional | `conformance/edition4-language-proof.json` |
 | Six proof programs | Passing, static | All programs under `proofs/edition4` check; network/native proof programs are not executed during Language Proof |
-| Labeled argument safety | Partial | Same-unit functions/shapes and the standard calls used by proof programs validate exact labels and order; complete standard-library metadata remains open |
-| Derive behavior | Partial | All eight names and duplicates are checked and emitted in documentation metadata; generated behavior and derive-specific constraints remain open |
-| Scoped source capabilities | Partial | Syntax, checked scope metadata, and generated documentation pass; runtime/intent enforcement remains gated by Intent Proof |
+| Labeled argument safety | Partial | Labels survive the AST; same-unit functions/shapes and imported module exports validate exact names/order; complete standard-library metadata remains open |
+| Derive behavior | Partial | All eight names, dependencies, field constraints, deterministic diagnostics, Compare/Json operation gates, and dual-engine positive evidence pass; generated Validate/Binary/DatabaseRow/Arguments entry points remain open |
+| Scoped source capabilities | Passing for Language Proof | Fixed capability vocabulary, bounded scope metadata, host-only Network validation, and generated documentation pass; runtime authorization remains gated by Intent Proof |
 | Canonical formatter | Partial | Existing formatter remains comment-safe and idempotent; complete Edition 4 canonical reprinting remains open |
 | Usability corpus | Passing, provisional | Twelve paired tasks type-check and remain within the 1.15 median token budget; maintenance-choice evidence remains open |
 | Clippy warnings denied | Passing | The complete workspace passes Rust 1.97 clippy with warnings denied |
@@ -27,10 +27,9 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 
 1. Preserve label metadata through modules and provide complete official-callable labels.
 2. Implement generated behavior and constraints for all built-in derives.
-3. Complete static validation of scoped `needs` boundaries; runtime enforcement belongs to Intent Proof.
-4. Implement a comment-preserving canonical Edition 4 formatter.
-5. Complete maintenance-edit evidence and actionable diagnostic coverage.
-6. Rerun the entire checkpoint matrix and record final measurements.
+3. Implement a comment-preserving canonical Edition 4 formatter.
+4. Complete maintenance-edit evidence and actionable diagnostic coverage.
+5. Rerun the entire checkpoint matrix and record final measurements.
 
 ## Intent Proof — not started
 
