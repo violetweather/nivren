@@ -1,13 +1,16 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep ids = main.Column.Ints(main.IntColumn("id", [1, 2]))
-    keep names = main.Column.Texts(main.TextColumn("name", ["Ada", "Lin"]))
-    keep data = main.table([ids, names]) or give
-    assert(data.rows == 2, "columnar row count")
-    keep chosen = main.select(data, ["name"]) or give
-    assert(main.column_name(chosen.columns[0]) == "name", "column selection")
+define works
+takes { }
+gives Bool or String
+{
+    keep ids set main.Column.Ints(main.IntColumn("id", [1, 2]))
+    keep names set main.Column.Texts(main.TextColumn("name", ["Ada", "Lin"]))
+    keep data set main.table with { columns set [ids, names] } or give
+    assert with { condition set data.rows == 2 message set "columnar row count" }
+    keep chosen set main.select with { value set data names set ["name"] } or give
+    assert with { condition set main.column_name with { column set chosen.columns[0] } == "name" message set "column selection" }
     give ok(yes)
 }
 
-works()
+works with { }

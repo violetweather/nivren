@@ -12,66 +12,78 @@ use crate::error::NivError;
 struct Policy {
     format: u64,
     edition: String,
-    freeze_started: String,
-    freeze_ends: String,
-    freeze_ends_unix: u64,
-    minimum_pilots: usize,
-    minimum_pilot_days: u64,
+    release_track: String,
+    expected_version: String,
+    product_proof_complete: bool,
+    completed_checkpoints: Vec<String>,
     minimum_conformance_cases: usize,
+    baseline_path: String,
     baseline_sha256: String,
-    roadmap_complete: bool,
     required_files: Vec<String>,
     tier_one_platforms: Vec<String>,
+    required_evidence: Vec<EvidenceRequirement>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Pilot {
+struct EvidenceRequirement {
+    gate: String,
+    path: String,
+    maximum_age_seconds: u64,
+    independent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Evidence {
     format: u64,
-    pilot_id: String,
-    workload: String,
-    toolchain: String,
-    started_at: String,
-    completed_at: String,
-    duration_days: u64,
-    outcome: String,
-    critical_blockers: Vec<String>,
-    evidence: String,
-    approved_by: String,
+    gate: String,
+    status: String,
+    completed_at_unix: u64,
+    run_id: String,
+    independent: bool,
+    artifacts: Vec<EvidenceArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceArtifact {
+    name: String,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Audit {
     pub blockers: Vec<String>,
-    pub freeze_ends: String,
-    pub pilots: usize,
+    pub release_track: String,
+    pub evidence_passed: usize,
+    pub evidence_required: usize,
     pub conformance_cases: usize,
 }
 
 pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
     let policy: Policy = read_json(&root.join("release/policy.json"), "release policy")?;
-    if policy.format != 2 || policy.edition != "3" {
+    if policy.format != 3 || policy.edition != "4" || policy.release_track != "beta" {
         return Err(release_error("unsupported release policy"));
     }
     let mut blockers = vec![];
-    if !policy.roadmap_complete {
-        blockers.push("Edition 3 capability roadmap is not complete".into());
+    if !policy.product_proof_complete {
+        blockers.push("Edition 4 Product Proof is not complete".into());
     }
-    if policy.freeze_started.is_empty() || policy.freeze_ends.is_empty() {
-        blockers.push("Edition 3 compatibility freeze has not started".into());
-    } else if now < policy.freeze_ends_unix {
+    for checkpoint in ["language", "intent", "compiler", "product"] {
+        if !policy
+            .completed_checkpoints
+            .iter()
+            .any(|completed| completed == checkpoint)
+        {
+            blockers.push(format!("checkpoint has not passed: {checkpoint}"));
+        }
+    }
+    if crate::VERSION != policy.expected_version {
         blockers.push(format!(
-            "Edition 3 compatibility freeze does not end until {}",
-            policy.freeze_ends
-        ));
-    }
-    if !policy.freeze_started.is_empty() && policy.freeze_started >= policy.freeze_ends {
-        blockers.push("compatibility freeze dates are invalid".into());
-    }
-    if crate::VERSION != "1.0.0" {
-        blockers.push(format!(
-            "toolchain version is {}, expected 1.0.0",
-            crate::VERSION
+            "toolchain version is {}, expected {}",
+            crate::VERSION,
+            policy.expected_version
         ));
     }
     for relative in &policy.required_files {
@@ -80,7 +92,7 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
         }
     }
 
-    let baseline_path = root.join("conformance/edition3-baseline.json");
+    let baseline_path = root.join(&policy.baseline_path);
     let baseline_bytes = fs::read(&baseline_path).map_err(|error| {
         release_error(format!(
             "cannot read conformance baseline '{}': {error}",
@@ -89,7 +101,7 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
     })?;
     let baseline_digest = encode_hex(&Sha256::digest(&baseline_bytes));
     if baseline_digest != policy.baseline_sha256 {
-        blockers.push("Edition 3 conformance baseline was modified".into());
+        blockers.push("Edition 4 conformance baseline was modified".into());
     }
     let cases: serde_json::Value = serde_json::from_slice(&baseline_bytes)
         .map_err(|error| release_error(format!("invalid conformance baseline: {error}")))?;
@@ -112,64 +124,74 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
         }
     }
 
-    let mut pilots = 0usize;
-    let pilot_directory = root.join("release/pilots");
-    for entry in fs::read_dir(&pilot_directory)
-        .map_err(|error| release_error(format!("cannot read pilot evidence: {error}")))?
-    {
-        let entry = entry.map_err(|error| release_error(format!("cannot read pilot: {error}")))?;
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "json")
-            || path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".example.json"))
-        {
+    let mut evidence_passed = 0;
+    for requirement in &policy.required_evidence {
+        let path = root.join(&requirement.path);
+        if !path.is_file() {
+            blockers.push(format!(
+                "required Product Proof evidence is missing: {} ({})",
+                requirement.gate, requirement.path
+            ));
             continue;
         }
-        let pilot: Pilot = read_json(&path, "pilot evidence")?;
-        if valid_pilot(&pilot, policy.minimum_pilot_days) {
-            pilots += 1;
-        } else {
-            blockers.push(format!("pilot evidence is incomplete: {}", path.display()));
+        let evidence: Evidence = read_json(&path, "Product Proof evidence")?;
+        let mut valid = true;
+        if evidence.format != 1 || evidence.gate != requirement.gate || evidence.status != "pass" {
+            blockers.push(format!(
+                "Product Proof evidence did not pass: {}",
+                requirement.gate
+            ));
+            valid = false;
+        }
+        if evidence.completed_at_unix > now
+            || now.saturating_sub(evidence.completed_at_unix) > requirement.maximum_age_seconds
+        {
+            blockers.push(format!(
+                "Product Proof evidence is stale: {}",
+                requirement.gate
+            ));
+            valid = false;
+        }
+        if evidence.run_id.trim().is_empty() || evidence.artifacts.is_empty() {
+            blockers.push(format!(
+                "Product Proof evidence lacks a run or artifact: {}",
+                requirement.gate
+            ));
+            valid = false;
+        }
+        if requirement.independent && !evidence.independent {
+            blockers.push(format!(
+                "Product Proof evidence must be independent: {}",
+                requirement.gate
+            ));
+            valid = false;
+        }
+        for artifact in &evidence.artifacts {
+            if artifact.name.trim().is_empty() || !valid_sha256(&artifact.sha256) {
+                blockers.push(format!(
+                    "Product Proof evidence has an invalid artifact: {}",
+                    requirement.gate
+                ));
+                valid = false;
+                break;
+            }
+        }
+        if valid {
+            evidence_passed += 1;
         }
     }
-    if pilots < policy.minimum_pilots {
-        blockers.push(format!(
-            "only {pilots} qualifying production pilots; {} required",
-            policy.minimum_pilots
-        ));
-    }
+
     Ok(Audit {
         blockers,
-        freeze_ends: policy.freeze_ends,
-        pilots,
+        release_track: policy.release_track,
+        evidence_passed,
+        evidence_required: policy.required_evidence.len(),
         conformance_cases,
     })
 }
 
-fn valid_pilot(pilot: &Pilot, minimum_days: u64) -> bool {
-    pilot.format == 1
-        && !pilot.pilot_id.trim().is_empty()
-        && !pilot.workload.trim().is_empty()
-        && pilot.toolchain.starts_with("0.10.")
-        && date_shape(&pilot.started_at)
-        && date_shape(&pilot.completed_at)
-        && pilot.duration_days >= minimum_days
-        && pilot.outcome == "pass"
-        && pilot.critical_blockers.is_empty()
-        && !pilot.evidence.trim().is_empty()
-        && !pilot.approved_by.trim().is_empty()
-}
-
-fn date_shape(value: &str) -> bool {
-    value.len() == 10
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 4 | 7) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit()
-            }
-        })
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -198,33 +220,29 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn repository_release_policy_is_machine_checkable() {
-        let audit = audit(Path::new(env!("CARGO_MANIFEST_DIR")), u64::MAX).unwrap();
-        assert_eq!(audit.conformance_cases, 17);
-        assert_eq!(audit.pilots, 0);
+    fn repository_beta_release_policy_is_machine_checkable() {
+        let audit = audit(Path::new(env!("CARGO_MANIFEST_DIR")), 1_800_000_000).unwrap();
+        assert_eq!(audit.release_track, "beta");
+        assert_eq!(audit.conformance_cases, 5);
+        assert_eq!(audit.evidence_passed, 0);
+        assert_eq!(audit.evidence_required, 7);
         assert!(
             audit
                 .blockers
                 .iter()
-                .any(|blocker| blocker.contains("expected 1.0.0"))
+                .any(|blocker| blocker.contains("Product Proof is not complete"))
         );
         assert!(
             audit
                 .blockers
                 .iter()
-                .any(|blocker| blocker.contains("production pilots"))
+                .any(|blocker| blocker.contains("checkpoint has not passed: product"))
         );
         assert!(
             audit
                 .blockers
                 .iter()
-                .any(|blocker| blocker.contains("roadmap"))
-        );
-        assert!(
-            audit
-                .blockers
-                .iter()
-                .any(|blocker| blocker.contains("freeze has not started"))
+                .any(|blocker| blocker.contains("platform-matrix"))
         );
     }
 }

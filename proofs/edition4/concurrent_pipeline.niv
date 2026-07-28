@@ -1,0 +1,24 @@
+define first
+gives Int
+{
+    give 20
+}
+
+define second
+gives Int
+{
+    give 22
+}
+
+define combine
+gives Int or String
+needs Task
+{
+    keep values set together [start first, start second] or give
+    give ok(values[0] + values[1])
+}
+
+choose combine with {} {
+    case Ok carries value => value
+    case Err carries problem => -1
+}

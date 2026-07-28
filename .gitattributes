@@ -1,0 +1,22 @@
+* text=auto
+
+*.json text eol=lf
+*.md text eol=lf
+*.niv text eol=lf
+*.ps1 text eol=lf
+*.rs text eol=lf
+*.sh text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.a binary
+*.dll binary
+*.dylib binary
+*.exe binary
+*.lib binary
+*.png binary
+*.so binary
+*.vsix binary
+*.wasm binary
+*.zip binary

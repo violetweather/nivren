@@ -1,6 +1,6 @@
 # Nivren WebAssembly host
 
-Nivren ships portable `wasm32-wasip1` and zero-import `wasm32-unknown-unknown` modules containing the Edition 3 frontend, bytecode compiler, and portable virtual machine. They are intended for build tools, browser playgrounds, editors, and sandboxed application hosts. The modules do not silently emulate unavailable operating-system facilities: TLS, WebSockets, dynamic libraries, native JIT, and other host-only resources report Nivren errors.
+Nivren ships portable `wasm32-wasip1` and zero-import `wasm32-unknown-unknown` modules containing the Edition 4 frontend, Bytecode 7 compiler, and portable virtual machine. They are intended for build tools, browser playgrounds, editors, and sandboxed application hosts. The real-host parity suite executes Edition 4 shapes, choices, labeled calls, `prepare`, and `perform` on both targets. The modules do not silently emulate unavailable operating-system facilities: TLS, WebSockets, dynamic libraries, native JIT, and other host-only resources report typed Nivren errors.
 
 ## Build and verify
 

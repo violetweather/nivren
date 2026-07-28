@@ -1,26 +1,34 @@
-define gzip(data: Bytes, level: Int) gives Result<Bytes, String> {
-    give std.compression.gzip(data, level)
-}
+define gzip
+takes { data is Bytes level is Int }
+gives Bytes or String
+{ give std.compression.gzip with { bytes set data level set level } }
 
-define gunzip(data: Bytes, maximum: Int) gives Result<Bytes, String> {
-    give std.compression.gunzip(data, maximum)
-}
+define gunzip
+takes { data is Bytes maximum is Int }
+gives Bytes or String
+{ give std.compression.gunzip with { bytes set data maximum set maximum } }
 
-define zlib(data: Bytes, level: Int) gives Result<Bytes, String> {
-    give std.compression.zlib(data, level)
-}
+define zlib
+takes { data is Bytes level is Int }
+gives Bytes or String
+{ give std.compression.zlib with { bytes set data level set level } }
 
-define unzlib(data: Bytes, maximum: Int) gives Result<Bytes, String> {
-    give std.compression.unzlib(data, maximum)
-}
+define unzlib
+takes { data is Bytes maximum is Int }
+gives Bytes or String
+{ give std.compression.unzlib with { bytes set data maximum set maximum } }
 
-define gzip_text(text: String, level: Int) gives Result<Bytes, String> {
-    give gzip(std.bytes.from_string(text), level)
-}
+define gzip_text
+takes { text is String level is Int }
+gives Bytes or String
+{ give gzip with { data set std.bytes.from_string with { value set text } level set level } }
 
-define gunzip_text(data: Bytes, maximum: Int) gives Result<String, String> {
-    keep restored = gunzip(data, maximum) or give
-    give std.bytes.to_string(restored)
+define gunzip_text
+takes { data is Bytes maximum is Int }
+gives String or String
+{
+    keep restored set gunzip with { data set data maximum set maximum } or give
+    give std.bytes.to_string with { bytes set restored }
 }
 
 expose { gzip, gunzip, zlib, unzlib, gzip_text, gunzip_text }

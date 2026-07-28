@@ -1,0 +1,24 @@
+use "../../packages/nivren_desktop/src/main.niv"
+
+define run_desktop
+gives String or String
+needs Native within "desktop"
+{
+    keep window set main.Window with {
+        title set "Nivren Product Proof"
+        width set 1024
+        height set 768
+        start_url set "app://index.html"
+    }
+    keep opened set perform main.open_host with { window set window } or give
+    using host = opened {
+        keep message set main.BridgeMessage with {
+            identifier set "request-1"
+            command set "preferences.load"
+            payload set "{}"
+        }
+        give perform main.send_bridge with { handle set host message set message }
+    }
+}
+
+perform run_desktop with {}

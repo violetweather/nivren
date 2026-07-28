@@ -1,13 +1,16 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep left = main.matrix(2, 2, [1.0, 2.0, 3.0, 4.0]) or give
-    keep right = main.matrix(2, 2, [5.0, 6.0, 7.0, 8.0]) or give
-    keep product = main.multiply(left, right) or give
-    assert(main.at(product, 0, 0) == ok(19.0), "matrix product")
-    assert(main.transpose(left).values == [1.0, 3.0, 2.0, 4.0], "matrix transpose")
-    assert(main.matrix(2, 3, [1.0]) != ok(left), "invalid dimensions rejected")
+define works
+takes { }
+gives Bool or String
+{
+    keep left set main.matrix with { rows set 2 columns set 2 values set [1.0, 2.0, 3.0, 4.0] } or give
+    keep right set main.matrix with { rows set 2 columns set 2 values set [5.0, 6.0, 7.0, 8.0] } or give
+    keep product set main.multiply with { left set left right set right } or give
+    assert with { condition set main.at with { value set product row set 0 column set 0 } == ok(19.0) message set "matrix product" }
+    assert with { condition set main.transpose with { value set left }.values == [1.0, 3.0, 2.0, 4.0] message set "matrix transpose" }
+    assert with { condition set main.matrix with { rows set 2 columns set 3 values set [1.0] } != ok(left) message set "invalid dimensions rejected" }
     give ok(yes)
 }
 
-works()
+works with { }

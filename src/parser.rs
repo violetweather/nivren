@@ -1,6 +1,9 @@
-use crate::ast::{Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef};
+use crate::ast::{
+    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef,
+};
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
+use std::collections::{BTreeSet, HashMap};
 
 const MAX_PARSE_DEPTH: usize = 128;
 
@@ -10,6 +13,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, Vec<NivError>> {
         current: 0,
         errors: vec![],
         depth: 0,
+        callables: HashMap::new(),
     }
     .program()
 }
@@ -19,6 +23,7 @@ struct Parser {
     current: usize,
     errors: Vec<NivError>,
     depth: usize,
+    callables: HashMap<String, Vec<String>>,
 }
 
 impl Parser {
@@ -45,13 +50,22 @@ impl Parser {
             return self.binding(false);
         }
         if self.matches(&[TokenKind::Var]) {
-            return self.binding(true);
+            return self.change_declaration();
         }
         if self.matches(&[TokenKind::Fun]) {
             return self.function();
         }
         if self.matches(&[TokenKind::Record]) {
             return self.record();
+        }
+        if self.check_identifier_value("type")
+            && self
+                .tokens
+                .get(self.current + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::Identifier(_)))
+        {
+            self.advance();
+            return self.nominal_type();
         }
         if self.matches(&[TokenKind::Enum]) {
             return self.enum_declaration();
@@ -74,12 +88,19 @@ impl Parser {
     fn binding(&mut self, mutable: bool) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected a name after binding keyword")?;
-        let annotation = if self.matches(&[TokenKind::Colon]) {
+        let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
+        let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
             Some(self.type_ref()?)
         } else {
             None
         };
-        self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
+        if edition_four {
+            if !self.matches(&[TokenKind::Set]) {
+                self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
+            }
+        } else {
+            self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
+        }
         let initializer = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Let {
@@ -91,56 +112,146 @@ impl Parser {
         })
     }
 
+    fn change_declaration(&mut self) -> Result<Stmt, NivError> {
+        let span = self.previous_span();
+        let name = self.consume_identifier("expected a name after 'change'")?;
+        if self.matches(&[TokenKind::To]) {
+            let value = self.expression()?;
+            self.optional_semicolon();
+            return Ok(Stmt::Expression(Expr::Assign(name, Box::new(value), span)));
+        }
+        let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
+        let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
+        if edition_four {
+            if !self.matches(&[TokenKind::Set]) {
+                self.consume(
+                    &TokenKind::Set,
+                    "a mutable binding uses 'set' for its initial value",
+                )?;
+            }
+        } else {
+            self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
+        }
+        let initializer = self.expression()?;
+        self.optional_semicolon();
+        Ok(Stmt::Let {
+            name,
+            mutable: true,
+            annotation,
+            initializer,
+            span,
+        })
+    }
+
     fn function(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected function name")?;
         let type_params = self.type_parameters()?;
-        self.consume(&TokenKind::LeftParen, "expected '(' after function name")?;
         let mut params = vec![];
-        if !self.check(&TokenKind::RightParen) {
-            loop {
-                if params.len() >= 255 {
-                    return Err(self.error_here("functions may have at most 255 parameters"));
-                }
+        if self.matches(&[TokenKind::Takes]) {
+            self.consume(&TokenKind::LeftBrace, "expected '{' after 'takes'")?;
+            while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
                 let param_span = Span {
                     line: self.peek().line,
                     column: self.peek().column,
                 };
-                let param_name = self.consume_identifier("expected parameter name")?;
-                let ty = if self.matches(&[TokenKind::Colon]) {
-                    Some(self.type_ref()?)
+                let param_name = self.consume_identifier("expected an input name")?;
+                self.consume(&TokenKind::Is, "an input states its type with 'is'")?;
+                params.push(Param {
+                    name: param_name,
+                    ty: Some(self.type_ref()?),
+                    span: param_span,
+                });
+                self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+            }
+            self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
+        } else if self.check(&TokenKind::LeftParen) {
+            self.consume(
+                &TokenKind::LeftParen,
+                "expected 'takes' or '(' after function name",
+            )?;
+            if !self.check(&TokenKind::RightParen) {
+                loop {
+                    if params.len() >= 255 {
+                        return Err(self.error_here("functions may have at most 255 parameters"));
+                    }
+                    let param_span = Span {
+                        line: self.peek().line,
+                        column: self.peek().column,
+                    };
+                    let param_name = self.consume_identifier("expected parameter name")?;
+                    let ty = if self.matches(&[TokenKind::Colon]) {
+                        Some(self.type_ref()?)
+                    } else {
+                        None
+                    };
+                    params.push(Param {
+                        name: param_name,
+                        ty,
+                        span: param_span,
+                    });
+                    if !self.matches(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightParen, "expected ')' after parameters")?;
+        }
+        let return_type = if self.matches(&[TokenKind::Arrow]) {
+            let value = self.type_ref()?;
+            if self.matches(&[TokenKind::Or]) {
+                let problem = self.type_ref()?;
+                let span = value_span(&value);
+                Some(TypeRef::Result(Box::new(value), Box::new(problem), span))
+            } else {
+                Some(value)
+            }
+        } else {
+            None
+        };
+        let mut needs = vec![];
+        let mut capability_needs = vec![];
+        if self.matches(&[TokenKind::Needs]) {
+            loop {
+                let need_span = Span {
+                    line: self.peek().line,
+                    column: self.peek().column,
+                };
+                let capability = self.consume_identifier("expected capability after needs")?;
+                if needs.contains(&capability) {
+                    return Err(self.error_here("duplicate capability in needs list"));
+                }
+                needs.push(capability.clone());
+                let boundary = if self.matches(&[TokenKind::In]) {
+                    match self.advance().kind.clone() {
+                        TokenKind::String(boundary) => Some(boundary),
+                        _ => return Err(self.error_here("a scoped need expects a quoted boundary")),
+                    }
                 } else {
                     None
                 };
-                params.push(Param {
-                    name: param_name,
-                    ty,
-                    span: param_span,
+                validate_capability_need(&capability, boundary.as_deref(), need_span)?;
+                capability_needs.push(CapabilityNeed {
+                    capability,
+                    boundary,
+                    span: need_span,
                 });
                 if !self.matches(&[TokenKind::Comma]) {
                     break;
                 }
             }
         }
-        self.consume(&TokenKind::RightParen, "expected ')' after parameters")?;
-        let return_type = if self.matches(&[TokenKind::Arrow]) {
-            Some(self.type_ref()?)
-        } else {
-            None
-        };
-        let mut needs = vec![];
-        if self.matches(&[TokenKind::Needs]) {
-            loop {
-                let capability = self.consume_identifier("expected capability after needs")?;
-                if needs.contains(&capability) {
-                    return Err(self.error_here("duplicate capability in needs list"));
-                }
-                needs.push(capability);
-                if !self.matches(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-        }
+        self.callables.insert(
+            name.clone(),
+            params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .collect(),
+        );
         self.consume(&TokenKind::LeftBrace, "expected '{' before function body")?;
         let body = self.block_contents()?;
         Ok(Stmt::Function {
@@ -149,6 +260,7 @@ impl Parser {
             params,
             return_type,
             needs,
+            capability_needs,
             body,
             span,
         })
@@ -174,8 +286,8 @@ impl Parser {
                 {
                     return Err(self.error_here("duplicate generic type parameter"));
                 }
-                let constraint = if self.matches(&[TokenKind::Colon]) {
-                    Some(self.consume_identifier("expected protocol after ':'")?)
+                let constraint = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+                    Some(self.consume_identifier("expected protocol constraint")?)
                 } else {
                     None
                 };
@@ -200,7 +312,8 @@ impl Parser {
         let span = self.previous_span();
         let name = self.consume_identifier("expected shape name")?;
         let type_params = self.type_parameters()?;
-        self.consume(&TokenKind::LeftBrace, "expected '{' after shape name")?;
+        let edition_four = self.matches(&[TokenKind::Holds]);
+        self.consume(&TokenKind::LeftBrace, "expected 'holds {' after shape name")?;
         let mut fields = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
             let field_span = Span {
@@ -208,41 +321,123 @@ impl Parser {
                 column: self.peek().column,
             };
             let field_name = self.consume_identifier("expected field name")?;
-            self.consume(&TokenKind::Colon, "expected ':' after field name")?;
+            if !self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+                return Err(self.error_here("a shape field states its type with 'is'"));
+            }
             let ty = self.type_ref()?;
             fields.push(FieldDef {
                 name: field_name,
                 ty,
                 span: field_span,
             });
-            if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+            if !edition_four
+                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after shape field"));
             }
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after shape")?;
+        let derives = self.derive_list()?;
+        self.callables.insert(
+            name.clone(),
+            fields.iter().map(|field| field.name.clone()).collect(),
+        );
+        for method in crate::derive_methods::METHODS
+            .iter()
+            .filter(|method| derives.iter().any(|derive| derive == method.derive))
+        {
+            self.callables.insert(
+                format!("{name}.{}", method.name),
+                method.labels.iter().map(ToString::to_string).collect(),
+            );
+        }
         Ok(Stmt::Record {
             name,
             type_params,
             fields,
+            derives,
             span,
         })
+    }
+
+    fn nominal_type(&mut self) -> Result<Stmt, NivError> {
+        let span = self.previous_span();
+        let name = self.consume_identifier("expected nominal type name")?;
+        if !self.check_identifier_value("from") {
+            return Err(self.error_here("a nominal type names its representation with 'from'"));
+        }
+        self.advance();
+        let representation = self.type_ref()?;
+        self.optional_semicolon();
+        self.callables.insert(name.clone(), vec!["value".into()]);
+        Ok(Stmt::Record {
+            name,
+            type_params: vec![],
+            fields: vec![FieldDef {
+                name: "value".into(),
+                ty: representation,
+                span,
+            }],
+            derives: vec![],
+            span,
+        })
+    }
+
+    fn derive_list(&mut self) -> Result<Vec<String>, NivError> {
+        if !self.matches(&[TokenKind::With]) {
+            return Ok(vec![]);
+        }
+        let mut derives = vec![];
+        loop {
+            let derive = self.consume_identifier("expected a derive name after 'with'")?;
+            const BUILT_INS: &[&str] = &[
+                "Json",
+                "Compare",
+                "Display",
+                "Key",
+                "Validate",
+                "Binary",
+                "DatabaseRow",
+                "Arguments",
+            ];
+            if !BUILT_INS.contains(&derive.as_str()) {
+                return Err(self.error_here(&format!(
+                    "unknown derive '{derive}'; Edition 4 derives are {}",
+                    BUILT_INS.join(", ")
+                )));
+            }
+            if derives.contains(&derive) {
+                return Err(self.error_here(&format!("derive '{derive}' appears more than once")));
+            }
+            derives.push(derive);
+            if !self.matches(&[TokenKind::Comma]) {
+                break;
+            }
+        }
+        Ok(derives)
     }
 
     fn enum_declaration(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected choice name")?;
         let type_params = self.type_parameters()?;
-        self.consume(&TokenKind::LeftBrace, "expected '{' after choice name")?;
+        let edition_four = self.matches(&[TokenKind::Holds]);
+        self.consume(
+            &TokenKind::LeftBrace,
+            "expected 'holds {' after choice name",
+        )?;
         let mut variants = vec![];
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
             let variant_span = Span {
                 line: self.peek().line,
                 column: self.peek().column,
             };
-            let variant_name = self.consume_identifier("expected variant name")?;
-            let payload = if self.matches(&[TokenKind::LeftParen]) {
+            let uses_case = self.matches(&[TokenKind::Case]);
+            let variant_name = self.consume_identifier("expected case name")?;
+            let payload = if self.matches(&[TokenKind::Carries]) {
+                Some(self.type_ref()?)
+            } else if self.matches(&[TokenKind::LeftParen]) {
                 let payload = self.type_ref()?;
                 self.consume(
                     &TokenKind::RightParen,
@@ -257,7 +452,9 @@ impl Parser {
                 payload,
                 span: variant_span,
             });
-            if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+            if !edition_four
+                && !uses_case
+                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after choice variant"));
@@ -288,39 +485,65 @@ impl Parser {
                 self.consume(&TokenKind::Fun, "expected 'define' before protocol member")?;
                 let member_span = self.previous_span();
                 let member_name = self.consume_identifier("expected protocol member name")?;
-                self.consume(
-                    &TokenKind::LeftParen,
-                    "expected '(' after protocol member name",
-                )?;
                 let mut params = vec![];
-                if !self.check(&TokenKind::RightParen) {
-                    loop {
+                if self.matches(&[TokenKind::Takes]) {
+                    self.consume(&TokenKind::LeftBrace, "expected '{' after 'takes'")?;
+                    while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
                         let parameter_span = Span {
                             line: self.peek().line,
                             column: self.peek().column,
                         };
                         let parameter_name =
                             self.consume_identifier("expected protocol parameter name")?;
-                        self.consume(
-                            &TokenKind::Colon,
-                            "protocol parameters require an explicit type",
-                        )?;
+                        self.consume(&TokenKind::Is, "a protocol input states its type with 'is'")?;
                         params.push(Param {
                             name: parameter_name,
                             ty: Some(self.type_ref()?),
                             span: parameter_span,
                         });
-                        if !self.matches(&[TokenKind::Comma]) {
-                            break;
+                        self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                    }
+                    self.consume(&TokenKind::RightBrace, "expected '}' after protocol inputs")?;
+                } else {
+                    self.consume(
+                        &TokenKind::LeftParen,
+                        "expected 'takes' or '(' after protocol member name",
+                    )?;
+                    if !self.check(&TokenKind::RightParen) {
+                        loop {
+                            let parameter_span = Span {
+                                line: self.peek().line,
+                                column: self.peek().column,
+                            };
+                            let parameter_name =
+                                self.consume_identifier("expected protocol parameter name")?;
+                            self.consume(
+                                &TokenKind::Colon,
+                                "protocol parameters require an explicit type",
+                            )?;
+                            params.push(Param {
+                                name: parameter_name,
+                                ty: Some(self.type_ref()?),
+                                span: parameter_span,
+                            });
+                            if !self.matches(&[TokenKind::Comma]) {
+                                break;
+                            }
                         }
                     }
+                    self.consume(
+                        &TokenKind::RightParen,
+                        "expected ')' after protocol parameters",
+                    )?;
                 }
-                self.consume(
-                    &TokenKind::RightParen,
-                    "expected ')' after protocol parameters",
-                )?;
                 self.consume(&TokenKind::Arrow, "protocol members require a 'gives' type")?;
-                let return_type = self.type_ref()?;
+                let value_type = self.type_ref()?;
+                let return_type = if self.matches(&[TokenKind::Or]) {
+                    let problem_type = self.type_ref()?;
+                    TypeRef::Result(Box::new(value_type), Box::new(problem_type), member_span)
+                } else {
+                    value_type
+                };
                 let mut needs = vec![];
                 if self.matches(&[TokenKind::Needs]) {
                     loop {
@@ -370,7 +593,9 @@ impl Parser {
                     column: self.peek().column,
                 };
                 let member = self.consume_identifier("expected protocol member name")?;
-                self.consume(&TokenKind::Equal, "expected '=' after protocol member name")?;
+                if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+                    return Err(self.error_here("a protocol adoption maps a member with 'set'"));
+                }
                 let implementation =
                     self.consume_identifier("expected implementation function name")?;
                 members.push(crate::ast::AdoptionMember {
@@ -440,7 +665,10 @@ impl Parser {
     }
 
     fn type_ref_inner(&mut self) -> Result<TypeRef, NivError> {
-        let mut result = if self.matches(&[TokenKind::LeftBracket]) {
+        let mut result = if self.matches(&[TokenKind::Maybe]) {
+            let span = self.previous_span();
+            TypeRef::Nullable(Box::new(self.type_ref()?), span)
+        } else if self.matches(&[TokenKind::LeftBracket]) {
             let span = self.previous_span();
             let element = self.type_ref()?;
             self.consume(
@@ -491,6 +719,9 @@ impl Parser {
     }
 
     fn statement_inner(&mut self) -> Result<Stmt, NivError> {
+        if self.matches(&[TokenKind::Prepare]) {
+            return self.prepare_statement();
+        }
         if self.matches(&[TokenKind::Print]) {
             return self.print_statement();
         }
@@ -516,6 +747,80 @@ impl Parser {
         let expression = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Expression(expression))
+    }
+
+    fn prepare_statement(&mut self) -> Result<Stmt, NivError> {
+        let span = self.previous_span();
+        let name = self.consume_identifier("expected a plan name after 'prepare'")?;
+        self.consume(&TokenKind::As, "a prepared plan states its type with 'as'")?;
+        let plan_type = self.consume_identifier("expected a plan type after 'as'")?;
+        self.consume(
+            &TokenKind::With,
+            "a prepared plan provides values with 'with'",
+        )?;
+        let (labels, arguments) = self.intent_arguments()?;
+        self.validate_labels(&plan_type, &labels, span)?;
+        self.optional_semicolon();
+        Ok(Stmt::Prepare {
+            name,
+            plan_type: plan_type.clone(),
+            initializer: Expr::Call(
+                Box::new(Expr::Variable(plan_type, span)),
+                arguments,
+                Some(labels),
+                span,
+            ),
+            span,
+        })
+    }
+
+    fn intent_arguments(&mut self) -> Result<(Vec<String>, Vec<Expr>), NivError> {
+        self.consume(&TokenKind::LeftBrace, "expected '{' before labeled values")?;
+        let mut arguments = vec![];
+        let mut names = BTreeSet::new();
+        let mut labels = vec![];
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            let name = self.consume_identifier("expected a labeled value name")?;
+            if !names.insert(name.clone()) {
+                return Err(
+                    self.error_here(&format!("labeled value '{name}' appears more than once"))
+                );
+            }
+            self.consume(&TokenKind::Set, "a labeled value uses 'set'")?;
+            labels.push(name);
+            arguments.push(self.expression()?);
+            self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+        }
+        self.consume(&TokenKind::RightBrace, "expected '}' after labeled values")?;
+        Ok((labels, arguments))
+    }
+
+    fn validate_labels(
+        &self,
+        callable: &str,
+        labels: &[String],
+        span: Span,
+    ) -> Result<(), NivError> {
+        let expected = self
+            .callables
+            .get(callable)
+            .map(Vec::as_slice)
+            .or_else(|| crate::call_labels::get(callable));
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        if labels == expected || (expected.len() == labels.len() + 1 && labels == &expected[1..]) {
+            return Ok(());
+        }
+        Err(NivError::new(
+            format!(
+                "{callable} expects labeled values [{}] in canonical order; received [{}]",
+                expected.join(", "),
+                labels.join(", ")
+            ),
+            span.line,
+            span.column,
+        ))
     }
 
     fn print_statement(&mut self) -> Result<Stmt, NivError> {
@@ -561,6 +866,7 @@ impl Parser {
 
     fn while_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
+        self.matches(&[TokenKind::WhileClause]);
         let condition = self.control_condition("repeat")?;
         let body = Box::new(self.statement()?);
         Ok(Stmt::While {
@@ -591,7 +897,9 @@ impl Parser {
     fn using_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected resource name after using")?;
-        self.consume(&TokenKind::Equal, "expected '=' after resource name")?;
+        if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+            return Err(self.error_here("a scoped resource uses 'set'"));
+        }
         let resource = self.expression()?;
         let body = Box::new(self.statement()?);
         Ok(Stmt::Using {
@@ -680,22 +988,17 @@ impl Parser {
         while self.matches(&[TokenKind::Through]) {
             let span = self.previous_span();
             let stage = self.call()?;
-            expression = match stage {
-                Expr::Call(callee, mut arguments, _) => {
-                    arguments.insert(0, expression);
-                    Expr::Call(callee, arguments, span)
-                }
-                Expr::Variable(_, _) | Expr::Get(_, _, _) => {
-                    Expr::Call(Box::new(stage), vec![expression], span)
-                }
-                _ => {
-                    return Err(NivError::new(
-                        "through expects a function or function call",
-                        span.line,
-                        span.column,
-                    ));
-                }
-            };
+            if !matches!(
+                stage,
+                Expr::Call(_, _, _, _) | Expr::Variable(_, _) | Expr::Get(_, _, _)
+            ) {
+                return Err(NivError::new(
+                    "through expects a function or function call",
+                    span.line,
+                    span.column,
+                ));
+            }
+            expression = Expr::Through(Box::new(expression), Box::new(stage), span);
         }
         Ok(expression)
     }
@@ -779,6 +1082,10 @@ impl Parser {
     }
 
     fn unary_inner(&mut self) -> Result<Expr, NivError> {
+        if self.matches(&[TokenKind::Perform]) {
+            let span = self.previous_span();
+            return Ok(Expr::Perform(Box::new(self.unary()?), span));
+        }
         for (kind, operation) in [
             (TokenKind::Start, "spawn"),
             (TokenKind::Wait, "await"),
@@ -802,7 +1109,14 @@ impl Parser {
     fn call(&mut self) -> Result<Expr, NivError> {
         let mut expression = self.primary()?;
         loop {
-            if self.matches(&[TokenKind::LeftParen]) {
+            if self.matches(&[TokenKind::With]) {
+                let span = self.previous_span();
+                let (labels, args) = self.intent_arguments()?;
+                if let Some(name) = expression_path(&expression) {
+                    self.validate_labels(&name, &labels, span)?;
+                }
+                expression = Expr::Call(Box::new(expression), args, Some(labels), span);
+            } else if self.matches(&[TokenKind::LeftParen]) {
                 let span = self.previous_span();
                 let mut args = vec![];
                 if !self.check(&TokenKind::RightParen) {
@@ -817,7 +1131,7 @@ impl Parser {
                     }
                 }
                 self.consume(&TokenKind::RightParen, "expected ')' after arguments")?;
-                expression = Expr::Call(Box::new(expression), args, span);
+                expression = Expr::Call(Box::new(expression), args, None, span);
             } else if self.matches(&[TokenKind::LeftBracket]) {
                 let span = self.previous_span();
                 let index = self.expression()?;
@@ -886,8 +1200,11 @@ impl Parser {
                 line: self.peek().line,
                 column: self.peek().column,
             };
-            let variant = self.consume_identifier("expected variant name")?;
-            let binding = if self.matches(&[TokenKind::LeftParen]) {
+            let edition_four = self.matches(&[TokenKind::Case]);
+            let variant = self.consume_identifier("expected case name")?;
+            let binding = if self.matches(&[TokenKind::Carries]) {
+                Some(self.consume_identifier("expected payload binding after 'carries'")?)
+            } else if self.matches(&[TokenKind::LeftParen]) {
                 let binding = self.consume_identifier("expected payload binding")?;
                 self.consume(&TokenKind::RightParen, "expected ')' after payload binding")?;
                 Some(binding)
@@ -902,7 +1219,8 @@ impl Parser {
                 value,
                 span: arm_span,
             });
-            if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+            if !edition_four
+                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after choose arm"));
@@ -937,8 +1255,31 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
+            TokenKind::Set => {
+                self.advance();
+                Ok("set".into())
+            }
+            TokenKind::From => {
+                self.advance();
+                Ok("from".into())
+            }
+            TokenKind::As => {
+                self.advance();
+                Ok("as".into())
+            }
+            TokenKind::With => {
+                self.advance();
+                Ok("with".into())
+            }
+            TokenKind::Maybe => {
+                self.advance();
+                Ok("maybe".into())
+            }
             _ => Err(self.error_here(message)),
         }
+    }
+    fn check_identifier_value(&self, expected: &str) -> bool {
+        matches!(&self.peek().kind, TokenKind::Identifier(value) if value == expected)
     }
     fn optional_semicolon(&mut self) {
         self.matches(&[TokenKind::Semicolon]);
@@ -1004,11 +1345,86 @@ impl Parser {
     }
 }
 
+fn value_span(value: &TypeRef) -> Span {
+    match value {
+        TypeRef::Named(_, span)
+        | TypeRef::Applied(_, _, span)
+        | TypeRef::Array(_, span)
+        | TypeRef::Nullable(_, span)
+        | TypeRef::Result(_, _, span) => *span,
+    }
+}
+
+fn expression_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Variable(name, _) => Some(name.clone()),
+        Expr::Get(parent, name, _) => {
+            let mut path = expression_path(parent)?;
+            path.push('.');
+            path.push_str(name);
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn validate_capability_need(
+    capability: &str,
+    boundary: Option<&str>,
+    span: Span,
+) -> Result<(), NivError> {
+    const CAPABILITIES: &[&str] = &[
+        "FileRead",
+        "FileWrite",
+        "Environment",
+        "Time",
+        "Process",
+        "Network",
+        "Task",
+        "Channel",
+        "Log",
+        "Native",
+        "Random",
+    ];
+    if !CAPABILITIES.contains(&capability) {
+        return Err(NivError::new(
+            format!(
+                "unknown capability '{capability}'; expected one of {}",
+                CAPABILITIES.join(", ")
+            ),
+            span.line,
+            span.column,
+        ));
+    }
+    let Some(boundary) = boundary else {
+        return Ok(());
+    };
+    if boundary.is_empty() || boundary.len() > 1024 || boundary.chars().any(char::is_control) {
+        return Err(NivError::new(
+            "a capability boundary must be non-empty, at most 1024 bytes, and contain no control characters",
+            span.line,
+            span.column,
+        ));
+    }
+    if capability == "Network"
+        && (boundary.contains("://")
+            || boundary.contains('/')
+            || boundary.chars().any(char::is_whitespace))
+    {
+        return Err(NivError::new(
+            "a Network boundary names a host such as \"api.example.com\", without a URL scheme or path",
+            span.line,
+            span.column,
+        ));
+    }
+    Ok(())
+}
+
 fn task_call(operation: &str, argument: Expr, span: Span) -> Expr {
     let standard = Expr::Variable("std".into(), span);
     let task = Expr::Get(Box::new(standard), "tasks".into(), span);
     let function = Expr::Get(Box::new(task), operation.into(), span);
-    Expr::Call(Box::new(function), vec![argument], span)
+    Expr::Call(Box::new(function), vec![argument], None, span)
 }
 
 fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {

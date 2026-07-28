@@ -3,8 +3,12 @@ use std::fmt::{Debug, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(feature = "host-runtime")]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::process::Command;
+#[cfg(feature = "host-runtime")]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
@@ -26,7 +30,7 @@ use csv::{
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use flate2::Compression;
 #[cfg(feature = "host-runtime")]
-use nivren_jit::{CallError as JitCallError, CompiledFunction};
+use nivren_jit::{CallError as JitCallError, CompiledFunction, CompiledTrace};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -35,6 +39,42 @@ use crate::bytecode::{BytecodeArm, Chunk, Op};
 use crate::error::NivError;
 use crate::fixed::{FixedInt, FixedKind};
 use crate::lexer::TokenKind;
+
+const LIVE_CLOCK: u64 = u64::MAX;
+static TEST_CLOCK_BITS: AtomicU64 = AtomicU64::new(LIVE_CLOCK);
+
+pub struct DeterministicClockGuard {
+    previous: u64,
+}
+
+impl Drop for DeterministicClockGuard {
+    fn drop(&mut self) {
+        TEST_CLOCK_BITS.store(self.previous, Ordering::SeqCst);
+    }
+}
+
+pub fn deterministic_clock(seconds: f64) -> Result<DeterministicClockGuard, NivError> {
+    if !seconds.is_finite() || seconds < 0.0 || seconds.to_bits() == LIVE_CLOCK {
+        return Err(NivError::new(
+            "deterministic test time must be a finite nonnegative number",
+            1,
+            1,
+        ));
+    }
+    let previous = TEST_CLOCK_BITS.swap(seconds.to_bits(), Ordering::SeqCst);
+    Ok(DeterministicClockGuard { previous })
+}
+
+fn unix_seconds(span: Span) -> Result<f64, NivError> {
+    let fixed = TEST_CLOCK_BITS.load(Ordering::SeqCst);
+    if fixed != LIVE_CLOCK {
+        return Ok(f64::from_bits(fixed));
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .map_err(|_| NivError::new("system clock is before Unix epoch", span.line, span.column))
+}
 
 #[cfg(feature = "host-runtime")]
 type NetInterest = mio::Interest;
@@ -154,6 +194,7 @@ pub enum Value {
     Enum(Arc<EnumValue>),
     ProtocolType(Arc<ProtocolType>),
     ProtocolMethod(Arc<ProtocolMethod>),
+    DerivedMethod(Arc<DerivedMethod>),
     Ok(Arc<Value>),
     Err(Arc<Value>),
     EarlyReturn(Arc<Value>),
@@ -199,7 +240,7 @@ impl Value {
             Self::EnumConstructor(_) => "Function",
             Self::Enum(value) => &value.type_name,
             Self::ProtocolType(_) => "ProtocolType",
-            Self::ProtocolMethod(_) => "Function",
+            Self::ProtocolMethod(_) | Self::DerivedMethod(_) => "Function",
             Self::Ok(_) | Self::Err(_) => "Result",
             Self::EarlyReturn(_) => "internal return",
             Self::Module(_) => "Module",
@@ -252,6 +293,7 @@ impl PartialEq for Value {
             }
             (Self::ProtocolType(a), Self::ProtocolType(b)) => Arc::ptr_eq(a, b),
             (Self::ProtocolMethod(a), Self::ProtocolMethod(b)) => Arc::ptr_eq(a, b),
+            (Self::DerivedMethod(a), Self::DerivedMethod(b)) => Arc::ptr_eq(a, b),
             (Self::Ok(a), Self::Ok(b)) | (Self::Err(a), Self::Err(b)) => a == b,
             (Self::EarlyReturn(a), Self::EarlyReturn(b)) => a == b,
             (Self::Module(a), Self::Module(b)) => Arc::ptr_eq(a, b),
@@ -363,6 +405,9 @@ impl Display for Value {
                     value.protocol, value.member
                 )
             }
+            Self::DerivedMethod(value) => {
+                write!(formatter, "<derived {}.{}>", value.schema.name, value.name)
+            }
             Self::Ok(value) => write!(formatter, "Ok({value})"),
             Self::Err(value) => write!(formatter, "Err({value})"),
             Self::EarlyReturn(_) => write!(formatter, "<early-return>"),
@@ -415,19 +460,42 @@ pub struct Function {
     params: Vec<String>,
     body: FunctionBody,
     closure: Env,
+    fast_slots: Option<Arc<FastSlotPlan>>,
     #[cfg(feature = "host-runtime")]
-    jit: Mutex<JitState>,
+    jit: JitState,
+}
+
+struct FastFrame {
+    plan: Option<Arc<FastSlotPlan>>,
+    slots: Vec<FastBinding>,
+}
+
+struct FastSlotPlan {
+    slots_by_name: HashMap<String, usize>,
+    instruction_slots: Vec<Option<usize>>,
+    slot_count: usize,
+}
+
+struct FastBinding {
+    value: Value,
+    mutable: bool,
+    defined: bool,
+}
+
+struct FastRootSlots {
+    plan: Arc<FastSlotPlan>,
+    persistent: Vec<String>,
 }
 
 #[derive(Default)]
 #[cfg(feature = "host-runtime")]
 struct JitState {
     #[cfg(feature = "host-runtime")]
-    calls: u32,
+    calls: AtomicU32,
     #[cfg(feature = "host-runtime")]
-    compiled: Option<CompiledFunction>,
+    compiled: OnceLock<CompiledFunction>,
     #[cfg(feature = "host-runtime")]
-    disabled: bool,
+    disabled: AtomicBool,
 }
 
 enum FunctionBody {
@@ -449,12 +517,15 @@ type HostCallback = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sy
 pub struct RecordType {
     name: String,
     fields: Vec<(String, String)>,
+    derives: Vec<String>,
+    field_indices: Arc<HashMap<String, usize>>,
     catalog: BTreeMap<String, Vec<(String, String)>>,
     choices: BTreeMap<String, Vec<(String, bool)>>,
 }
 pub struct RecordValue {
     type_name: String,
     fields: Vec<(String, Value)>,
+    field_indices: Arc<HashMap<String, usize>>,
 }
 
 pub enum ManagedFile {
@@ -626,6 +697,10 @@ pub struct ProtocolMethod {
     protocol: String,
     member: String,
 }
+pub struct DerivedMethod {
+    schema: Arc<RecordType>,
+    name: String,
+}
 
 pub struct Task {
     cancelled: Arc<AtomicBool>,
@@ -690,10 +765,10 @@ impl TaskHandle {
 impl Drop for Task {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Ok(slot) = self.handle.get_mut() {
-            if let Some(handle) = slot.take() {
-                let _ = handle.join();
-            }
+        if let Ok(slot) = self.handle.get_mut()
+            && let Some(handle) = slot.take()
+        {
+            let _ = handle.join();
         }
     }
 }
@@ -867,6 +942,13 @@ pub struct Interpreter {
     max_call_depth: usize,
     event_loop: Arc<RuntimeEventLoop>,
     protocol_dispatch: HashMap<(String, String, String), Value>,
+    fast_frames: Vec<FastFrame>,
+    native_execution_depth: usize,
+    native_compilations: usize,
+    native_executions: usize,
+    native_fallbacks: usize,
+    #[cfg(feature = "host-runtime")]
+    native_traces: HashMap<usize, Arc<CompiledTrace>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -882,6 +964,15 @@ pub struct HeapStats {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecutionMetrics {
     pub instructions: u64,
+    pub allocation_work_bytes: u64,
+    pub plan_allocations: u64,
+    pub perform_boundaries: u64,
+    pub task_spawns: u64,
+    pub blocking_task_submissions: u64,
+    pub task_joins: u64,
+    pub task_cancellations: u64,
+    pub event_loop_waits: u64,
+    pub effect_sequence: Vec<String>,
     pub line_hits: BTreeMap<usize, u64>,
     pub operation_hits: BTreeMap<String, u64>,
 }
@@ -910,6 +1001,13 @@ pub struct JitStats {
     pub executions: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeStats {
+    pub compilations: usize,
+    pub executions: usize,
+    pub fallbacks: usize,
+}
+
 enum Flow {
     Continue(Value),
     Return(Value),
@@ -917,6 +1015,11 @@ enum Flow {
 
 enum VmFlow {
     Continue(Value),
+    Return(Value),
+}
+
+enum BytecodeStep {
+    Next(usize),
     Return(Value),
 }
 
@@ -1011,6 +1114,13 @@ impl Interpreter {
             max_call_depth: 256,
             event_loop: Arc::new(RuntimeEventLoop::default()),
             protocol_dispatch: HashMap::new(),
+            fast_frames: Vec::new(),
+            native_execution_depth: 0,
+            native_compilations: 0,
+            native_executions: 0,
+            native_fallbacks: 0,
+            #[cfg(feature = "host-runtime")]
+            native_traces: HashMap::new(),
         }
     }
 
@@ -1080,7 +1190,74 @@ impl Interpreter {
 
     pub fn run_bytecode(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
         crate::bytecode::verify(chunk)?;
-        let result = match self.execute_chunk(chunk)? {
+        let root_slots = (self.debug_hook.is_none() && self.metrics.is_none())
+            .then(|| fast_root_slots(chunk))
+            .flatten();
+        let root_slots = root_slots.filter(|plan| {
+            let environment = self.environment.lock().unwrap();
+            plan.persistent
+                .iter()
+                .all(|name| !environment.values.contains_key(name))
+        });
+        if let Some(plan) = &root_slots {
+            self.fast_frames.push(FastFrame {
+                plan: Some(plan.plan.clone()),
+                slots: std::iter::repeat_with(|| FastBinding {
+                    value: Value::Null,
+                    mutable: false,
+                    defined: false,
+                })
+                .take(plan.plan.slot_count)
+                .collect(),
+            });
+        }
+        let execution = self.execute_chunk(chunk);
+        if let Some(plan) = &root_slots {
+            let frame = self.fast_frames.pop().unwrap();
+            let mut environment = self.environment.lock().unwrap();
+            for name in &plan.persistent {
+                let slot = plan.plan.slots_by_name[name];
+                let binding = &frame.slots[slot];
+                if binding.defined {
+                    environment.values.insert(
+                        name.clone(),
+                        Binding {
+                            value: binding.value.clone(),
+                            mutable: binding.mutable,
+                        },
+                    );
+                }
+            }
+        }
+        let result = match execution? {
+            VmFlow::Continue(value) => Ok(value),
+            VmFlow::Return(_) => Err(NivError::new(
+                "give may only appear inside a function",
+                1,
+                1,
+            )),
+        };
+        self.collect(&[]);
+        result
+    }
+
+    /// Executes every verified chunk through Cranelift native control traces.
+    /// Unsupported native compilation is a checked error; this entry point
+    /// never redirects execution to the bytecode loop.
+    #[cfg(feature = "host-runtime")]
+    pub fn run_native(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
+        crate::bytecode::verify(chunk)?;
+        if self.native_execution_depth != 0 {
+            return Err(NivError::new(
+                "native execution cannot be re-entered through the public entry point",
+                1,
+                1,
+            ));
+        }
+        self.native_execution_depth = 1;
+        let execution = self.execute_chunk_native(chunk);
+        self.native_execution_depth = 0;
+        let result = match execution? {
             VmFlow::Continue(value) => Ok(value),
             VmFlow::Return(_) => Err(NivError::new(
                 "give may only appear inside a function",
@@ -1151,9 +1328,41 @@ impl Interpreter {
         }
     }
 
+    pub fn native_stats(&self) -> NativeStats {
+        NativeStats {
+            compilations: self.native_compilations,
+            executions: self.native_executions,
+            fallbacks: self.native_fallbacks,
+        }
+    }
+
     fn execute(&mut self, statement: &Stmt) -> Result<Flow, NivError> {
         self.charge(statement_span(statement))?;
         match statement {
+            Stmt::Prepare {
+                name, initializer, ..
+            } => {
+                let value = self.evaluate(initializer)?;
+                if let Value::EarlyReturn(value) = value {
+                    return Ok(Flow::Return(value.as_ref().clone()));
+                }
+                let mut scope = self.environment.lock().unwrap();
+                if scope.values.contains_key(name) {
+                    return Err(NivError::new(
+                        format!("'{name}' is already declared in this scope"),
+                        initializer.span().line,
+                        initializer.span().column,
+                    ));
+                }
+                scope.values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                Ok(Flow::Continue(value))
+            }
             Stmt::Let {
                 name,
                 mutable,
@@ -1318,8 +1527,9 @@ impl Interpreter {
                     params: params.iter().map(|param| param.name.clone()).collect(),
                     body: FunctionBody::Tree(body.clone()),
                     closure: self.environment.clone(),
+                    fast_slots: None,
                     #[cfg(feature = "host-runtime")]
-                    jit: Mutex::new(JitState::default()),
+                    jit: JitState::default(),
                 }));
                 self.environment.lock().unwrap().values.insert(
                     name.clone(),
@@ -1337,7 +1547,12 @@ impl Interpreter {
                 },
                 None => Value::Null,
             })),
-            Stmt::Record { name, fields, .. } => {
+            Stmt::Record {
+                name,
+                fields,
+                derives,
+                ..
+            } => {
                 let type_name = self.qualified(name);
                 let record_fields: Vec<_> = fields
                     .iter()
@@ -1348,7 +1563,9 @@ impl Interpreter {
                 let choices = choice_catalog(&self.environment);
                 let value = Value::RecordType(Arc::new(RecordType {
                     name: type_name,
+                    field_indices: record_field_indices(&record_fields),
                     fields: record_fields,
+                    derives: derives.clone(),
                     catalog,
                     choices,
                 }));
@@ -1549,7 +1766,7 @@ impl Interpreter {
                     )?)),
                 }
             }
-            Expr::Call(callee, arguments, span) => {
+            Expr::Call(callee, arguments, _, span) => {
                 let callee = evaluate_part!(self, callee);
                 let mut evaluated = Vec::with_capacity(arguments.len());
                 for argument in arguments {
@@ -1613,12 +1830,15 @@ impl Interpreter {
                     span.column,
                 )),
             },
+            Expr::Perform(value, _) => self.evaluate(value),
+            Expr::Through(input, stage, span) => {
+                self.evaluate(&crate::ast::lower_through(input, stage, *span))
+            }
             Expr::Get(object, name, span) => match evaluate_part!(self, object) {
                 Value::Record(record) => record
-                    .fields
-                    .iter()
-                    .find(|(field, _)| field == name)
-                    .map(|(_, value)| value.clone())
+                    .field_indices
+                    .get(name)
+                    .map(|index| record.fields[*index].1.clone())
                     .ok_or_else(|| {
                         NivError::new(
                             format!("{} has no field '{name}'", record.type_name),
@@ -1626,6 +1846,29 @@ impl Interpreter {
                             span.column,
                         )
                     }),
+                Value::RecordType(record) => {
+                    let Some(method) = crate::derive_methods::named(name) else {
+                        return Err(NivError::new(
+                            format!("{} has no generated method '{name}'", record.name),
+                            span.line,
+                            span.column,
+                        ));
+                    };
+                    if !record.derives.iter().any(|derive| derive == method.derive) {
+                        return Err(NivError::new(
+                            format!(
+                                "{} needs derive {} for generated method '{name}'",
+                                record.name, method.derive
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    Ok(Value::DerivedMethod(Arc::new(DerivedMethod {
+                        schema: record,
+                        name: name.clone(),
+                    })))
+                }
                 Value::EnumType(enum_type) => {
                     if enum_type.variants.contains(name) {
                         if enum_type.payload_variants.contains(name) {
@@ -1842,6 +2085,13 @@ impl Interpreter {
                         ));
                     }
                     self.authorize_scope(capability, &arguments, span)?;
+                    if let Some(metrics) = &self.metrics {
+                        metrics
+                            .lock()
+                            .unwrap()
+                            .effect_sequence
+                            .push(format!("{capability}:{}", function.name));
+                    }
                 }
                 match function.name {
                     "spawn" => self.task_spawn(arguments, span),
@@ -1854,6 +2104,7 @@ impl Interpreter {
                     "send" => self.channel_send(arguments, span),
                     "receive" => self.channel_receive(arguments, span),
                     "transform" => self.list_transform(arguments, span),
+                    "batch" => self.list_batch(arguments, span),
                     "select" => self.list_select(arguments, span),
                     "fold" => self.list_fold(arguments, span),
                     "any" => self.list_any(arguments, span),
@@ -1881,68 +2132,12 @@ impl Interpreter {
                     _ => (function.call)(arguments, span),
                 }
             }
-            Value::Function(function) => {
-                check_arity(&function.name, function.params.len(), arguments.len(), span)?;
-                if self.call_depth >= self.max_call_depth {
-                    return Err(NivError::new(
-                        format!("call depth limit of {} exceeded", self.max_call_depth),
-                        span.line,
-                        span.column,
-                    ));
-                }
-                self.call_depth += 1;
-                if let FunctionBody::Bytecode(body) = &function.body {
-                    match self.try_jit(&function, body, &arguments, span) {
-                        Ok(Some(value)) => {
-                            self.call_depth -= 1;
-                            return Ok(value);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            self.call_depth -= 1;
-                            return Err(error.with_frame(
-                                function.name.clone(),
-                                span.line,
-                                span.column,
-                            ));
-                        }
-                    }
-                }
-                let environment = self.child_scope(function.closure.clone());
-                for (name, value) in function.params.iter().zip(arguments) {
-                    environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: false,
-                        },
-                    );
-                }
-                let result = (|| match &function.body {
-                    FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
-                        Flow::Continue(_) => Ok(Value::Null),
-                        Flow::Return(value) => Ok(value),
-                    },
-                    FunctionBody::Bytecode(body) => {
-                        let previous = std::mem::replace(&mut self.environment, environment);
-                        self.roots.push(previous.clone());
-                        let result = self.execute_chunk(body);
-                        self.roots.pop();
-                        self.environment = previous;
-                        match result? {
-                            VmFlow::Continue(value) | VmFlow::Return(value) => Ok(value),
-                        }
-                    }
-                })();
-                self.call_depth -= 1;
-                result.map_err(|error: NivError| {
-                    error.with_frame(function.name.clone(), span.line, span.column)
-                })
-            }
+            Value::Function(function) => self.call_function(&function, &arguments, span),
             Value::RecordType(record) => {
                 check_arity(&record.name, record.fields.len(), arguments.len(), span)?;
                 Ok(Value::Record(Arc::new(RecordValue {
                     type_name: record.name.clone(),
+                    field_indices: record.field_indices.clone(),
                     fields: record
                         .fields
                         .iter()
@@ -1992,12 +2187,119 @@ impl Interpreter {
                     })?;
                 self.call(implementation, arguments, span)
             }
+            Value::DerivedMethod(method) => call_derived_method(&method, arguments, span),
             value => Err(NivError::new(
                 format!("{} is not callable", value.type_name()),
                 span.line,
                 span.column,
             )),
         }
+    }
+
+    fn call_function(
+        &mut self,
+        function: &Function,
+        arguments: &[Value],
+        span: Span,
+    ) -> Result<Value, NivError> {
+        check_arity(&function.name, function.params.len(), arguments.len(), span)?;
+        if self.call_depth >= self.max_call_depth {
+            return Err(NivError::new(
+                format!("call depth limit of {} exceeded", self.max_call_depth),
+                span.line,
+                span.column,
+            ));
+        }
+        self.call_depth += 1;
+        if let FunctionBody::Bytecode(body) = &function.body {
+            match self.try_jit(function, body, arguments, span) {
+                Ok(Some(value)) => {
+                    self.call_depth -= 1;
+                    return Ok(value);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.call_depth -= 1;
+                    return Err(error.with_frame(function.name.clone(), span.line, span.column));
+                }
+            }
+        }
+        let fast_slots = function
+            .fast_slots
+            .as_ref()
+            .filter(|_| self.debug_hook.is_none() && self.metrics.is_none());
+        let result =
+            if let (Some(slot_plan), FunctionBody::Bytecode(body)) = (fast_slots, &function.body) {
+                let mut slots = std::iter::repeat_with(|| FastBinding {
+                    value: Value::Null,
+                    mutable: false,
+                    defined: false,
+                })
+                .take(slot_plan.slot_count)
+                .collect::<Vec<_>>();
+                for (name, value) in function.params.iter().zip(arguments) {
+                    let slot = slot_plan.slots_by_name[name];
+                    slots[slot] = FastBinding {
+                        value: value.clone(),
+                        mutable: false,
+                        defined: true,
+                    };
+                }
+                self.fast_frames.push(FastFrame {
+                    plan: Some(slot_plan.clone()),
+                    slots,
+                });
+                let previous = std::mem::replace(&mut self.environment, function.closure.clone());
+                self.roots.push(previous.clone());
+                let execution = self.execute_chunk(body);
+                self.roots.pop();
+                self.environment = previous;
+                self.fast_frames.pop();
+                execution.map(|flow| match flow {
+                    VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                })
+            } else {
+                let environment = self.child_scope(function.closure.clone());
+                for (name, value) in function.params.iter().zip(arguments) {
+                    environment.lock().unwrap().values.insert(
+                        name.clone(),
+                        Binding {
+                            value: value.clone(),
+                            mutable: false,
+                        },
+                    );
+                }
+                (|| match &function.body {
+                    FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
+                        Flow::Continue(_) => Ok(Value::Null),
+                        Flow::Return(value) => Ok(value),
+                    },
+                    FunctionBody::Bytecode(body) => {
+                        let previous = std::mem::replace(&mut self.environment, environment);
+                        self.roots.push(previous.clone());
+                        let isolate_fast_caller = !self.fast_frames.is_empty();
+                        if isolate_fast_caller {
+                            self.fast_frames.push(FastFrame {
+                                plan: None,
+                                slots: Vec::new(),
+                            });
+                        }
+                        let execution = self.execute_chunk(body);
+                        if isolate_fast_caller {
+                            self.fast_frames.pop();
+                        }
+                        self.roots.pop();
+                        self.environment = previous;
+                        execution.map(|flow| match flow {
+                            VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                        })
+                    }
+                })()
+            };
+        self.call_depth -= 1;
+        result.map_err(|error: NivError| {
+            error.with_frame(function.name.clone(), span.line, span.column)
+        })
     }
 
     fn host_invoke(&self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -2171,43 +2473,60 @@ impl Interpreter {
         arguments: &[Value],
         span: Span,
     ) -> Result<Option<Value>, NivError> {
-        let integers = arguments
-            .iter()
-            .map(|value| match value {
-                Value::Int(value) => Some(*value),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(integers) = integers else {
-            return Ok(None);
-        };
-        let mut jit = function.jit.lock().unwrap();
-        if jit.disabled {
+        let jit = &function.jit;
+        if jit.disabled.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        jit.calls = jit.calls.saturating_add(1);
-        if jit.compiled.is_none() && jit.calls >= self.jit_threshold {
+        let calls = jit
+            .calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |calls| {
+                Some(calls.saturating_add(1))
+            })
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        if jit.compiled.get().is_none() && calls >= self.jit_threshold {
             let Some((slots, operations)) =
                 crate::bytecode::integer_native_plan(&function.params, body)
             else {
-                jit.disabled = true;
+                jit.disabled.store(true, Ordering::Relaxed);
                 return Ok(None);
             };
             match CompiledFunction::compile(function.params.len(), slots, &operations) {
                 Ok(compiled) => {
-                    jit.compiled = Some(compiled);
-                    self.jit_compilations = self.jit_compilations.saturating_add(1);
+                    if jit.compiled.set(compiled).is_ok() {
+                        self.jit_compilations = self.jit_compilations.saturating_add(1);
+                    }
                 }
                 Err(_) => {
-                    jit.disabled = true;
+                    jit.disabled.store(true, Ordering::Relaxed);
                     return Ok(None);
                 }
             }
         }
-        let Some(compiled) = &jit.compiled else {
+        let Some(compiled) = jit.compiled.get() else {
             return Ok(None);
         };
-        match compiled.call(&integers) {
+        let mut inline_arguments = [0i64; 8];
+        let mut allocated_arguments = Vec::new();
+        let integers = if arguments.len() <= inline_arguments.len() {
+            for (target, value) in inline_arguments.iter_mut().zip(arguments) {
+                let Value::Int(value) = value else {
+                    return Ok(None);
+                };
+                *target = *value;
+            }
+            &inline_arguments[..arguments.len()]
+        } else {
+            allocated_arguments.reserve(arguments.len());
+            for value in arguments {
+                let Value::Int(value) = value else {
+                    return Ok(None);
+                };
+                allocated_arguments.push(*value);
+            }
+            &allocated_arguments
+        };
+        match compiled.call(integers) {
             Ok(value) => {
                 self.jit_executions = self.jit_executions.saturating_add(1);
                 Ok(Some(Value::Int(value)))
@@ -2234,6 +2553,69 @@ impl Interpreter {
         lookup(&self.environment, name)
     }
 
+    fn load_fast(&self, instruction: usize) -> Option<Value> {
+        let frame = self.fast_frames.last()?;
+        let slot = frame
+            .plan
+            .as_ref()?
+            .instruction_slots
+            .get(instruction)
+            .copied()
+            .flatten()?;
+        frame.slots[slot]
+            .defined
+            .then(|| frame.slots[slot].value.clone())
+    }
+
+    fn define_fast(&mut self, instruction: usize, value: Value, mutable: bool) -> bool {
+        let Some(frame) = self.fast_frames.last_mut() else {
+            return false;
+        };
+        let Some(plan) = frame.plan.as_ref() else {
+            return false;
+        };
+        let Some(slot) = plan.instruction_slots.get(instruction).copied().flatten() else {
+            return false;
+        };
+        frame.slots[slot] = FastBinding {
+            value,
+            mutable,
+            defined: true,
+        };
+        true
+    }
+
+    fn assign_fast(
+        &mut self,
+        instruction: usize,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<bool, NivError> {
+        let Some(frame) = self.fast_frames.last_mut() else {
+            return Ok(false);
+        };
+        let Some(plan) = frame.plan.as_ref() else {
+            return Ok(false);
+        };
+        let Some(slot) = plan.instruction_slots.get(instruction).copied().flatten() else {
+            return Ok(false);
+        };
+        let binding = &mut frame.slots[slot];
+        if !binding.defined {
+            return Ok(false);
+        }
+        if !binding.mutable {
+            return Err(NivError::new(
+                format!("cannot assign to immutable '{name}'"),
+                span.line,
+                span.column,
+            ));
+        }
+        binding.value = value;
+        Ok(true)
+    }
+
     fn task_spawn(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let function = match &arguments[0] {
             Value::Function(function) if function.params.is_empty() => arguments[0].clone(),
@@ -2255,6 +2637,12 @@ impl Interpreter {
         let worker_host = self.host_callback.clone();
         let worker_call_depth_limit = self.max_call_depth;
         let worker_event_loop = self.event_loop.clone();
+        let worker_metrics = self.metrics.clone();
+        let worker_native = self.native_execution_depth > 0;
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.task_spawns = metrics.task_spawns.saturating_add(1);
+        }
         let mut inherited_cancellations = self.inherited_cancellations.clone();
         if let Some(cancellation) = &self.cancellation {
             inherited_cancellations.push(cancellation.clone());
@@ -2269,8 +2657,10 @@ impl Interpreter {
             worker.host_callback = worker_host;
             worker.max_call_depth = worker_call_depth_limit;
             worker.event_loop = worker_event_loop;
+            worker.metrics = worker_metrics;
             worker.cancellation = Some(worker_cancelled);
             worker.inherited_cancellations = inherited_cancellations;
+            worker.native_execution_depth = usize::from(worker_native);
             let value = worker.call(function, vec![], span)?;
             if transferable(&value) {
                 Ok(value)
@@ -2293,6 +2683,10 @@ impl Interpreter {
         span: Span,
         operation: impl FnOnce() -> Result<Value, NivError> + Send + 'static,
     ) -> Value {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.blocking_task_submissions = metrics.blocking_task_submissions.saturating_add(1);
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
         let event_loop = self.event_loop.clone();
@@ -2392,6 +2786,7 @@ impl Interpreter {
         let handle = task.lock().unwrap().take().ok_or_else(|| {
             NivError::new("task has already been awaited", span.line, span.column)
         })?;
+        self.record_task_joins(1);
         Ok(join_task(handle))
     }
 
@@ -2410,12 +2805,15 @@ impl Interpreter {
                 let handle = task.lock().unwrap().take().ok_or_else(|| {
                     NivError::new("task has already been awaited", span.line, span.column)
                 })?;
+                self.record_task_joins(1);
                 return Ok(join_task(handle));
             }
             if Instant::now() >= deadline {
                 task_cancel_flag(&arguments[0]);
+                self.record_task_cancellations(1);
                 return Ok(result_error("task deadline exceeded"));
             }
+            self.record_event_loop_wait();
             self.event_loop
                 .wait_until_change(observed, deadline.saturating_duration_since(Instant::now()));
         }
@@ -2427,12 +2825,14 @@ impl Interpreter {
             other => return Err(expected_value("std.task.cancel", "Task", other, span)),
         };
         task.cancelled.store(true, Ordering::Release);
+        self.record_task_cancellations(1);
         Ok(Value::Null)
     }
 
     fn task_all(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let tasks = task_array(&arguments[0], "std.task.all", span)?;
         ensure_pending_tasks(&tasks, "std.task.all", span)?;
+        self.record_task_joins(tasks.len());
         let mut values = Vec::with_capacity(tasks.len());
         for task in tasks {
             let handle = task
@@ -2476,17 +2876,20 @@ impl Interpreter {
                     .take()
                     .expect("validated task handle");
                 let result = join_task(winner_handle);
+                self.record_task_joins(tasks.len());
                 for (index, task) in tasks.iter().enumerate() {
                     if index == winner {
                         continue;
                     }
                     task.cancelled.store(true, Ordering::Release);
+                    self.record_task_cancellations(1);
                     if let Some(handle) = task.handle.lock().unwrap().take() {
                         let _ = handle.join();
                     }
                 }
                 return Ok(result);
             }
+            self.record_event_loop_wait();
             self.event_loop
                 .wait_until_change(observed, Duration::from_millis(100));
         }
@@ -2518,6 +2921,23 @@ impl Interpreter {
             output.push(self.call(callback.clone(), vec![value.clone()], span)?);
         }
         Ok(Value::Array(Arc::new(output)))
+    }
+
+    fn list_batch(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+        let values = expect_array(&arguments[0], "std.list.batch", span)?;
+        let size = match arguments[1] {
+            Value::Int(value) if (1..=1_048_576).contains(&value) => value as usize,
+            _ => {
+                return Ok(result_error(
+                    "std.list.batch size must be an Int from 1 through 1048576",
+                ));
+            }
+        };
+        let batches = values
+            .chunks(size)
+            .map(|batch| Value::Array(Arc::new(batch.to_vec())))
+            .collect();
+        Ok(Value::Ok(Arc::new(Value::Array(Arc::new(batches)))))
     }
 
     fn list_select(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -2822,306 +3242,490 @@ impl Interpreter {
         )
     }
 
+    #[cfg(feature = "host-runtime")]
+    fn execute_chunk_native(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
+        let instruction_count = chunk.code.len();
+        let trace = if let Some(trace) = self.native_traces.get(&instruction_count) {
+            trace.clone()
+        } else {
+            let trace = Arc::new(
+                CompiledTrace::compile(instruction_count).map_err(|message| {
+                    NivError::new(format!("native trace compilation failed: {message}"), 1, 1)
+                })?,
+            );
+            self.native_traces.insert(instruction_count, trace.clone());
+            self.native_compilations = self.native_compilations.saturating_add(1);
+            trace
+        };
+        self.native_executions = self.native_executions.saturating_add(1);
+        let mut stack = Vec::new();
+        let mut outcome = None;
+        let status = trace.run_with(&mut |program_counter| {
+            if outcome.is_some() {
+                return -3;
+            }
+            let step = catch_unwind(AssertUnwindSafe(
+                || -> Result<(i64, Option<VmFlow>), NivError> {
+                    let mut instruction = usize::try_from(program_counter)
+                        .map_err(|_| NivError::new("native program counter overflow", 1, 1))?;
+                    // Keep value operations in a bounded helper region so hot
+                    // loops do not cross the native ABI once per instruction.
+                    // Each operation still passes through the ordinary checked
+                    // step, preserving cancellation, budgets, diagnostics,
+                    // effects, cleanup, and debug/metric ordering.
+                    for _ in 0..256 {
+                        let item = chunk.code.get(instruction).ok_or_else(|| {
+                            NivError::new(
+                                format!("native trace selected invalid instruction {instruction}"),
+                                1,
+                                1,
+                            )
+                        })?;
+                        match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
+                            BytecodeStep::Next(next) if next < chunk.code.len() => {
+                                instruction = next;
+                            }
+                            BytecodeStep::Next(next) if next == chunk.code.len() => {
+                                return Ok((
+                                    -1,
+                                    Some(VmFlow::Continue(stack.pop().unwrap_or(Value::Null))),
+                                ));
+                            }
+                            BytecodeStep::Next(next) => {
+                                return Err(NivError::new(
+                                    format!(
+                                        "native trace jumped beyond bytecode to instruction {next}"
+                                    ),
+                                    item.span.line,
+                                    item.span.column,
+                                ));
+                            }
+                            BytecodeStep::Return(value) => {
+                                return Ok((-2, Some(VmFlow::Return(value))));
+                            }
+                        }
+                    }
+                    let next = i64::try_from(instruction)
+                        .map_err(|_| NivError::new("native next-instruction overflow", 1, 1))?;
+                    Ok((next, None))
+                },
+            ));
+            match step {
+                Ok(Ok((status, result))) => {
+                    if let Some(result) = result {
+                        outcome = Some(Ok(result));
+                    }
+                    status
+                }
+                Ok(Err(error)) => {
+                    outcome = Some(Err(error));
+                    -3
+                }
+                Err(_) => {
+                    outcome = Some(Err(NivError::new("native runtime helper panicked", 1, 1)));
+                    -3
+                }
+            }
+        });
+        match outcome.take() {
+            Some(outcome) => outcome,
+            None => Err(NivError::new(
+                format!("native trace stopped with status {status} without a runtime outcome"),
+                1,
+                1,
+            )),
+        }
+    }
+
     fn execute_chunk(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
+        #[cfg(feature = "host-runtime")]
+        if self.native_execution_depth > 0 {
+            return self.execute_chunk_native(chunk);
+        }
+        self.execute_chunk_vm(chunk)
+    }
+
+    fn execute_chunk_vm(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
         let mut stack = Vec::new();
         let mut instruction = 0usize;
         while instruction < chunk.code.len() {
-            if self.is_cancelled() {
-                return Err(NivError::new("task cancelled", 1, 1));
+            match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
+                BytecodeStep::Next(next) => instruction = next,
+                BytecodeStep::Return(value) => return Ok(VmFlow::Return(value)),
             }
-            let item = &chunk.code[instruction];
-            self.charge(item.span)?;
-            if self.debug_hook.is_some() {
-                let event = DebugEvent {
-                    instruction,
-                    line: item.span.line,
-                    column: item.span.column,
-                    operation: operation_name(&item.op).into(),
-                    stack_depth: stack.len(),
-                    variables: self.debug_variables(),
-                };
-                if self
-                    .debug_hook
-                    .as_mut()
-                    .is_some_and(|hook| hook(&event) == DebugControl::Terminate)
-                {
-                    return Err(NivError::new(
-                        DEBUGGER_TERMINATED,
-                        item.span.line,
-                        item.span.column,
-                    ));
-                }
-            }
-            if let Some(metrics) = &self.metrics {
-                let mut metrics = metrics.lock().unwrap();
-                metrics.instructions = metrics.instructions.saturating_add(1);
-                let line_hits = metrics.line_hits.entry(item.span.line).or_default();
-                *line_hits = line_hits.saturating_add(1);
-                let operation_hits = metrics
-                    .operation_hits
-                    .entry(operation_name(&item.op).into())
-                    .or_default();
-                *operation_hits = operation_hits.saturating_add(1);
-            }
-            match &item.op {
-                Op::Constant(literal) => stack.push(match literal {
-                    Literal::Int(value) => Value::Int(*value),
-                    Literal::Float(value) => Value::Float(*value),
-                    Literal::String(value) => Value::String(value.clone()),
-                    Literal::Bool(value) => Value::Bool(*value),
-                    Literal::Null => Value::Null,
-                }),
-                Op::Load(name) => stack.push(self.lookup(name).ok_or_else(|| {
-                    NivError::new(
-                        format!("undefined name '{name}'"),
-                        item.span.line,
-                        item.span.column,
-                    )
-                })?),
-                Op::Store(name) => {
-                    let value = stack.last().cloned().unwrap();
-                    assign(&self.environment, name, value, item.span)?;
-                }
-                Op::Define { name, mutable } => {
-                    let value = stack.last().cloned().unwrap();
-                    let replaced = self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: *mutable,
-                        },
-                    );
-                    if replaced.is_some() {
-                        return Err(NivError::new(
-                            format!("'{name}' is already declared in this scope"),
-                            item.span.line,
-                            item.span.column,
-                        ));
-                    }
-                }
-                Op::Pop => {
-                    stack.pop();
-                }
-                Op::Unary(operator) => {
-                    let value = stack.pop().unwrap();
-                    stack.push(match operator {
-                        TokenKind::Minus => negate(value, item.span)?,
-                        TokenKind::Bang => Value::Bool(!expect_bool(value, item.span)?),
-                        _ => unreachable!(),
-                    });
-                }
-                Op::Binary(operator) => {
-                    let right = stack.pop().unwrap();
-                    let left = stack.pop().unwrap();
-                    stack.push(self.binary(left, operator, right, item.span)?);
-                }
-                Op::Jump(target) => {
-                    self.maybe_collect(&stack);
-                    instruction = *target;
-                    continue;
-                }
-                Op::JumpIfFalse(target) => {
-                    if !expect_bool(stack.last().cloned().unwrap(), item.span)? {
-                        self.maybe_collect(&stack);
-                        instruction = *target;
-                        continue;
-                    }
-                }
-                Op::Call(arity) => {
-                    let arguments = stack.split_off(stack.len() - arity);
-                    let callee = stack.pop().unwrap();
-                    stack.push(self.call(callee, arguments, item.span)?);
-                }
-                Op::MakeArray(length) => {
-                    let values = stack.split_off(stack.len() - length);
-                    stack.push(Value::Array(Arc::new(values)));
-                }
-                Op::Index => {
-                    let index = expect_index(stack.pop().unwrap(), item.span)?;
-                    let collection = stack.pop().unwrap();
-                    stack.push(index_value(collection, index, item.span)?);
-                }
-                Op::Coalesce(target) => {
-                    if stack.last().is_some_and(|value| value != &Value::Null) {
-                        self.maybe_collect(&stack);
-                        instruction = *target;
-                        continue;
-                    }
-                }
-                Op::Propagate => match stack.pop().unwrap() {
-                    Value::Ok(value) => stack.push(value.as_ref().clone()),
-                    Value::Err(value) => return Ok(VmFlow::Return(Value::Err(value))),
-                    other => {
-                        return Err(NivError::new(
-                            format!("or give needs a Result, found {}", other.type_name()),
-                            item.span.line,
-                            item.span.column,
-                        ));
-                    }
-                },
-                Op::Get(name) => {
-                    let object = stack.pop().unwrap();
-                    stack.push(get_value(object, name, item.span)?);
-                }
-                Op::Print => {
-                    println!("{}", stack.pop().unwrap());
-                    stack.push(Value::Null);
-                }
-                Op::EnterScope => {
-                    self.environment = self.child_scope(self.environment.clone());
-                }
-                Op::ExitScope => {
-                    let parent = self.environment.lock().unwrap().parent.clone().unwrap();
-                    self.environment = parent;
-                }
-                Op::MakeFunction { name, params, body } => {
-                    stack.push(Value::Function(Arc::new(Function {
-                        name: name.clone(),
-                        params: params.clone(),
-                        body: FunctionBody::Bytecode(body.clone()),
-                        closure: self.environment.clone(),
-                        #[cfg(feature = "host-runtime")]
-                        jit: Mutex::new(JitState::default()),
-                    })));
-                }
-                Op::Return => return Ok(VmFlow::Return(stack.pop().unwrap())),
-                Op::DefineRecord { name, fields } => {
-                    let type_name = self.qualified(name);
-                    let mut catalog = record_catalog(&self.environment);
-                    catalog.insert(type_name.clone(), fields.clone());
-                    let choices = choice_catalog(&self.environment);
-                    let value = Value::RecordType(Arc::new(RecordType {
-                        name: type_name,
-                        fields: fields.clone(),
-                        catalog,
-                        choices,
-                    }));
-                    self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value: value.clone(),
-                            mutable: false,
-                        },
-                    );
-                    stack.push(value);
-                }
-                Op::DefineEnum {
-                    name,
-                    variants,
-                    payload_variants,
-                } => {
-                    let value = Value::EnumType(Arc::new(EnumType {
-                        name: self.qualified(name),
-                        variants: variants.clone(),
-                        payload_variants: payload_variants.iter().cloned().collect(),
-                    }));
-                    self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value: value.clone(),
-                            mutable: false,
-                        },
-                    );
-                    stack.push(value);
-                }
-                Op::DefineProtocol { name, members } => {
-                    let value = Value::ProtocolType(Arc::new(ProtocolType {
-                        name: self.qualified(name),
-                        members: members.clone(),
-                    }));
-                    self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value: value.clone(),
-                            mutable: false,
-                        },
-                    );
-                    stack.push(value);
-                }
-                Op::AdoptProtocol {
-                    protocol,
-                    type_name,
-                    mappings,
-                } => {
-                    let protocol_name = match self.lookup(protocol) {
-                        Some(Value::ProtocolType(protocol)) => protocol.name.clone(),
-                        _ => self.qualified(protocol),
-                    };
-                    let base = type_name.split('<').next().unwrap_or(type_name).to_string();
-                    let qualified = self.qualified(&base);
-                    for (member, implementation_name) in mappings {
-                        let implementation = self.lookup(implementation_name).ok_or_else(|| {
-                            NivError::new(
-                                format!("unknown protocol implementation '{implementation_name}'"),
-                                item.span.line,
-                                item.span.column,
-                            )
-                        })?;
-                        for adopted_name in [&base, &qualified] {
-                            self.protocol_dispatch.insert(
-                                (protocol_name.clone(), member.clone(), adopted_name.clone()),
-                                implementation.clone(),
-                            );
-                        }
-                    }
-                    stack.push(if mappings.is_empty() {
-                        Value::Null
-                    } else {
-                        Value::Bool(true)
-                    });
-                }
-                Op::Match(arms) => {
-                    let subject = stack.pop().unwrap();
-                    match self.execute_bytecode_match(subject, arms, item.span)? {
-                        VmFlow::Continue(value) => stack.push(value),
-                        returned @ VmFlow::Return(_) => return Ok(returned),
-                    }
-                }
-                Op::DefineModule {
-                    name,
-                    body,
-                    exports,
-                } => {
-                    stack.push(self.execute_bytecode_module(name, body, exports, item.span)?);
-                }
-                Op::Iterate { name, body } => {
-                    let iterable = stack.pop().unwrap();
-                    match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
-                        VmFlow::Continue(value) => stack.push(value),
-                        returned @ VmFlow::Return(_) => return Ok(returned),
-                    }
-                }
-                Op::Using { name, body } => {
-                    let resource = stack.pop().unwrap();
-                    match self.execute_bytecode_using(name, resource, body, item.span)? {
-                        VmFlow::Continue(value) => stack.push(value),
-                        returned @ VmFlow::Return(_) => return Ok(returned),
-                    }
-                }
-            }
-            self.maybe_collect(&stack);
-            if matches!(
-                item.op,
-                Op::Constant(_)
-                    | Op::Binary(_)
-                    | Op::Call(_)
-                    | Op::MakeArray(_)
-                    | Op::Index
-                    | Op::Get(_)
-                    | Op::MakeFunction { .. }
-                    | Op::DefineRecord { .. }
-                    | Op::DefineEnum { .. }
-            ) {
-                if let Some(value) = stack.last() {
-                    self.charge_memory(value, item.span)?;
-                }
-            }
-            instruction += 1;
         }
         if self.is_cancelled() {
             return Err(NivError::new("task cancelled", 1, 1));
         }
         Ok(VmFlow::Continue(stack.pop().unwrap_or(Value::Null)))
+    }
+
+    fn execute_bytecode_step(
+        &mut self,
+        chunk: &Chunk,
+        stack: &mut Vec<Value>,
+        instruction: usize,
+    ) -> Result<BytecodeStep, NivError> {
+        if self.is_cancelled() {
+            return Err(NivError::new("task cancelled", 1, 1));
+        }
+        let item = &chunk.code[instruction];
+        self.charge(item.span)?;
+        if self.debug_hook.is_some() {
+            let event = DebugEvent {
+                instruction,
+                line: item.span.line,
+                column: item.span.column,
+                operation: operation_name(&item.op).into(),
+                stack_depth: stack.len(),
+                variables: self.debug_variables(),
+            };
+            if self
+                .debug_hook
+                .as_mut()
+                .is_some_and(|hook| hook(&event) == DebugControl::Terminate)
+            {
+                return Err(NivError::new(
+                    DEBUGGER_TERMINATED,
+                    item.span.line,
+                    item.span.column,
+                ));
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.instructions = metrics.instructions.saturating_add(1);
+            let line_hits = metrics.line_hits.entry(item.span.line).or_default();
+            *line_hits = line_hits.saturating_add(1);
+            let operation_hits = metrics
+                .operation_hits
+                .entry(operation_name(&item.op).into())
+                .or_default();
+            *operation_hits = operation_hits.saturating_add(1);
+        }
+        match &item.op {
+            Op::Constant(literal) => stack.push(match literal {
+                Literal::Int(value) => Value::Int(*value),
+                Literal::Float(value) => Value::Float(*value),
+                Literal::String(value) => Value::String(value.clone()),
+                Literal::Bool(value) => Value::Bool(*value),
+                Literal::Null => Value::Null,
+            }),
+            Op::Load(name) => stack.push(
+                self.load_fast(instruction)
+                    .or_else(|| self.lookup(name))
+                    .ok_or_else(|| {
+                        NivError::new(
+                            format!("undefined name '{name}'"),
+                            item.span.line,
+                            item.span.column,
+                        )
+                    })?,
+            ),
+            Op::Store(name) => {
+                let value = stack.last().cloned().unwrap();
+                if !self.assign_fast(instruction, name, value.clone(), item.span)? {
+                    assign(&self.environment, name, value, item.span)?;
+                }
+            }
+            Op::Define { name, mutable } => {
+                let value = stack.last().cloned().unwrap();
+                if self.define_fast(instruction, value.clone(), *mutable) {
+                    return Ok(BytecodeStep::Next(instruction + 1));
+                }
+                let replaced = self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value,
+                        mutable: *mutable,
+                    },
+                );
+                if replaced.is_some() {
+                    return Err(NivError::new(
+                        format!("'{name}' is already declared in this scope"),
+                        item.span.line,
+                        item.span.column,
+                    ));
+                }
+            }
+            Op::Pop => {
+                stack.pop();
+            }
+            Op::Unary(operator) => {
+                let value = stack.pop().unwrap();
+                stack.push(match operator {
+                    TokenKind::Minus => negate(value, item.span)?,
+                    TokenKind::Bang => Value::Bool(!expect_bool(value, item.span)?),
+                    _ => unreachable!(),
+                });
+            }
+            Op::Binary(operator) => {
+                let right = stack.pop().unwrap();
+                let left = stack.pop().unwrap();
+                stack.push(match (left, right) {
+                    (Value::Int(a), Value::Int(b)) => vm_int_binary(a, operator, b, item.span)?,
+                    (left, right) => self.binary(left, operator, right, item.span)?,
+                });
+            }
+            Op::Jump(target) => {
+                self.maybe_collect(stack);
+                return Ok(BytecodeStep::Next(*target));
+            }
+            Op::JumpIfFalse(target) => {
+                if !expect_bool(stack.last().cloned().unwrap(), item.span)? {
+                    self.maybe_collect(stack);
+                    return Ok(BytecodeStep::Next(*target));
+                }
+            }
+            Op::Call(arity) => {
+                let argument_start = stack.len() - arity;
+                let callee_index = argument_start - 1;
+                if let Value::Function(function) = &stack[callee_index] {
+                    let value =
+                        self.call_function(function, &stack[argument_start..], item.span)?;
+                    stack.truncate(callee_index);
+                    stack.push(value);
+                    return Ok(BytecodeStep::Next(instruction + 1));
+                }
+                let arguments = stack.split_off(stack.len() - arity);
+                let callee = stack.pop().unwrap();
+                stack.push(self.call(callee, arguments, item.span)?);
+            }
+            Op::PerformCall(arity) => {
+                if let Some(metrics) = &self.metrics {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
+                }
+                let argument_start = stack.len() - arity;
+                let callee_index = argument_start - 1;
+                if let Value::Function(function) = &stack[callee_index] {
+                    let value =
+                        self.call_function(function, &stack[argument_start..], item.span)?;
+                    stack.truncate(callee_index);
+                    stack.push(value);
+                    return Ok(BytecodeStep::Next(instruction + 1));
+                }
+                let arguments = stack.split_off(stack.len() - arity);
+                let callee = stack.pop().unwrap();
+                stack.push(self.call(callee, arguments, item.span)?);
+            }
+            Op::MakeArray(length) => {
+                let values = stack.split_off(stack.len() - length);
+                stack.push(Value::Array(Arc::new(values)));
+            }
+            Op::Index => {
+                let index = expect_index(stack.pop().unwrap(), item.span)?;
+                let collection = stack.pop().unwrap();
+                stack.push(index_value(collection, index, item.span)?);
+            }
+            Op::Coalesce(target) => {
+                if stack.last().is_some_and(|value| value != &Value::Null) {
+                    self.maybe_collect(stack);
+                    return Ok(BytecodeStep::Next(*target));
+                }
+            }
+            Op::Propagate => match stack.pop().unwrap() {
+                Value::Ok(value) => stack.push(value.as_ref().clone()),
+                Value::Err(value) => {
+                    return Ok(BytecodeStep::Return(Value::Err(value)));
+                }
+                other => {
+                    return Err(NivError::new(
+                        format!("or give needs a Result, found {}", other.type_name()),
+                        item.span.line,
+                        item.span.column,
+                    ));
+                }
+            },
+            Op::Get(name) => {
+                let object = stack.pop().unwrap();
+                stack.push(get_value(object, name, item.span)?);
+            }
+            Op::Print => {
+                println!("{}", stack.pop().unwrap());
+                stack.push(Value::Null);
+            }
+            Op::EnterScope => {
+                if self
+                    .fast_frames
+                    .last()
+                    .is_none_or(|frame| frame.plan.is_none())
+                {
+                    self.environment = self.child_scope(self.environment.clone());
+                }
+            }
+            Op::ExitScope => {
+                if self
+                    .fast_frames
+                    .last()
+                    .is_none_or(|frame| frame.plan.is_none())
+                {
+                    let parent = self.environment.lock().unwrap().parent.clone().unwrap();
+                    self.environment = parent;
+                }
+            }
+            Op::MakeFunction { name, params, body } => {
+                stack.push(Value::Function(Arc::new(Function {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: FunctionBody::Bytecode(body.clone()),
+                    closure: self.environment.clone(),
+                    fast_slots: fast_local_slots(params, body),
+                    #[cfg(feature = "host-runtime")]
+                    jit: JitState::default(),
+                })));
+            }
+            Op::Return => return Ok(BytecodeStep::Return(stack.pop().unwrap())),
+            Op::DefineRecord {
+                name,
+                fields,
+                derives,
+            } => {
+                let type_name = self.qualified(name);
+                let mut catalog = record_catalog(&self.environment);
+                catalog.insert(type_name.clone(), fields.clone());
+                let choices = choice_catalog(&self.environment);
+                let value = Value::RecordType(Arc::new(RecordType {
+                    name: type_name,
+                    field_indices: record_field_indices(fields),
+                    fields: fields.clone(),
+                    derives: derives.clone(),
+                    catalog,
+                    choices,
+                }));
+                self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                stack.push(value);
+            }
+            Op::DefineEnum {
+                name,
+                variants,
+                payload_variants,
+            } => {
+                let value = Value::EnumType(Arc::new(EnumType {
+                    name: self.qualified(name),
+                    variants: variants.clone(),
+                    payload_variants: payload_variants.iter().cloned().collect(),
+                }));
+                self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                stack.push(value);
+            }
+            Op::DefineProtocol { name, members } => {
+                let value = Value::ProtocolType(Arc::new(ProtocolType {
+                    name: self.qualified(name),
+                    members: members.clone(),
+                }));
+                self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                stack.push(value);
+            }
+            Op::AdoptProtocol {
+                protocol,
+                type_name,
+                mappings,
+            } => {
+                let protocol_name = match self.lookup(protocol) {
+                    Some(Value::ProtocolType(protocol)) => protocol.name.clone(),
+                    _ => self.qualified(protocol),
+                };
+                let base = type_name.split('<').next().unwrap_or(type_name).to_string();
+                let qualified = self.qualified(&base);
+                for (member, implementation_name) in mappings {
+                    let implementation = self.lookup(implementation_name).ok_or_else(|| {
+                        NivError::new(
+                            format!("unknown protocol implementation '{implementation_name}'"),
+                            item.span.line,
+                            item.span.column,
+                        )
+                    })?;
+                    for adopted_name in [&base, &qualified] {
+                        self.protocol_dispatch.insert(
+                            (protocol_name.clone(), member.clone(), adopted_name.clone()),
+                            implementation.clone(),
+                        );
+                    }
+                }
+                stack.push(if mappings.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Bool(true)
+                });
+            }
+            Op::Prepare(_) => {
+                if let Some(metrics) = &self.metrics {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.plan_allocations = metrics.plan_allocations.saturating_add(1);
+                }
+            }
+            Op::Perform => {
+                if let Some(metrics) = &self.metrics {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
+                }
+            }
+            Op::Match(arms) => {
+                let subject = stack.pop().unwrap();
+                match self.execute_bytecode_match(subject, arms, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                }
+            }
+            Op::DefineModule {
+                name,
+                body,
+                exports,
+            } => {
+                stack.push(self.execute_bytecode_module(name, body, exports, item.span)?);
+            }
+            Op::Iterate { name, body } => {
+                let iterable = stack.pop().unwrap();
+                match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                }
+            }
+            Op::Using { name, body } => {
+                let resource = stack.pop().unwrap();
+                match self.execute_bytecode_using(name, resource, body, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                }
+            }
+        }
+        self.maybe_collect(stack);
+        if matches!(
+            item.op,
+            Op::Constant(_)
+                | Op::Binary(_)
+                | Op::Call(_)
+                | Op::PerformCall(_)
+                | Op::MakeArray(_)
+                | Op::Index
+                | Op::Get(_)
+                | Op::MakeFunction { .. }
+                | Op::DefineRecord { .. }
+                | Op::DefineEnum { .. }
+        ) && let Some(value) = stack.last()
+        {
+            self.charge_memory(value, item.span)?;
+        }
+        Ok(BytecodeStep::Next(instruction + 1))
     }
 
     fn is_cancelled(&self) -> bool {
@@ -3351,16 +3955,45 @@ impl Interpreter {
     }
 
     fn charge_memory(&self, value: &Value, span: Span) -> Result<(), NivError> {
+        let bytes = estimated_value_bytes(value).max(1);
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.allocation_work_bytes = metrics.allocation_work_bytes.saturating_add(bytes);
+        }
         let Some(budget) = &self.memory_budget else {
             return Ok(());
         };
-        let bytes = estimated_value_bytes(value).max(1);
         budget
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(bytes)
             })
             .map(|_| ())
             .map_err(|_| NivError::new("memory limit exceeded", span.line, span.column))
+    }
+
+    fn record_task_joins(&self, count: usize) {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.task_joins = metrics
+                .task_joins
+                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn record_task_cancellations(&self, count: usize) {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.task_cancellations = metrics
+                .task_cancellations
+                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn record_event_loop_wait(&self) {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.event_loop_waits = metrics.event_loop_waits.saturating_add(1);
+        }
     }
 
     fn child_scope(&mut self, parent: Env) -> Env {
@@ -3454,7 +4087,7 @@ impl Collector for GenerationalCollector {
             }
         }
         self.cycles = self.cycles.saturating_add(1);
-        if self.pending.is_none() && self.cycles % 8 == 0 {
+        if self.pending.is_none() && self.cycles.is_multiple_of(8) {
             let globals = globals.clone();
             let current = current.clone();
             let roots = roots.to_vec();
@@ -3693,6 +4326,7 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::File(_)
         | Value::TcpListener(_)
         | Value::TlsListener(_)
@@ -3718,12 +4352,142 @@ impl Drop for Interpreter {
         if let Some(cancellation) = &self.cancellation {
             cancellation.store(true, Ordering::Release);
         }
+        // A function owns its captured environment, while that environment can
+        // own the function through a binding. The collector breaks unreachable
+        // cycles during execution; shutdown must also dismantle every tracked
+        // child scope because there is no later collection after Interpreter
+        // fields begin dropping.
+        // Retain every scope while severing parent links so releasing a deep
+        // closure tree cannot recursively drop the entire chain on platforms
+        // with smaller default thread stacks.
+        let environments = self
+            .environments
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        for environment in &environments {
+            let mut scope = environment.lock().unwrap();
+            scope.values.clear();
+            scope.parent = None;
+        }
+        drop(environments);
         let values = {
             let mut globals = self.globals.lock().unwrap();
             std::mem::take(&mut globals.values)
         };
         drop(values);
     }
+}
+
+fn record_field_indices<T>(fields: &[(String, T)]) -> Arc<HashMap<String, usize>> {
+    Arc::new(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.clone(), index))
+            .collect(),
+    )
+}
+
+fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotPlan>> {
+    let mut slots_by_name = HashMap::new();
+    let mut scopes = vec![HashMap::new()];
+    let mut slot_count = 0usize;
+    for parameter in parameters {
+        if scopes[0].contains_key(parameter) {
+            return None;
+        }
+        scopes[0].insert(parameter.clone(), slot_count);
+        slots_by_name.insert(parameter.clone(), slot_count);
+        slot_count += 1;
+    }
+    let mut instruction_slots = Vec::with_capacity(body.code.len());
+    for instruction in &body.code {
+        let slot = match &instruction.op {
+            Op::Constant(_)
+            | Op::Pop
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::Call(_)
+            | Op::PerformCall(_)
+            | Op::MakeArray(_)
+            | Op::Index
+            | Op::Coalesce(_)
+            | Op::Propagate
+            | Op::Get(_)
+            | Op::Print
+            | Op::Return => None,
+            Op::Prepare(_) | Op::Perform => None,
+            Op::Load(name) | Op::Store(name) => scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(name).copied()),
+            Op::Define { name, .. } => {
+                let top_level = scopes.len() == 1;
+                let scope = scopes.last_mut()?;
+                if scope.contains_key(name) {
+                    return None;
+                }
+                let slot = slot_count;
+                scope.insert(name.clone(), slot);
+                if top_level {
+                    slots_by_name.insert(name.clone(), slot);
+                }
+                slot_count += 1;
+                Some(slot)
+            }
+            Op::EnterScope => {
+                scopes.push(HashMap::new());
+                None
+            }
+            Op::ExitScope => {
+                if scopes.len() == 1 {
+                    return None;
+                }
+                scopes.pop();
+                None
+            }
+            Op::Unary(TokenKind::Minus | TokenKind::Bang) => None,
+            Op::Binary(
+                TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::EqualEqual
+                | TokenKind::BangEqual
+                | TokenKind::Greater
+                | TokenKind::GreaterEqual
+                | TokenKind::Less
+                | TokenKind::LessEqual,
+            ) => None,
+            _ => return None,
+        };
+        instruction_slots.push(slot);
+    }
+    if scopes.len() != 1 {
+        return None;
+    }
+    Some(Arc::new(FastSlotPlan {
+        slots_by_name,
+        instruction_slots,
+        slot_count,
+    }))
+}
+
+fn fast_root_slots(chunk: &Chunk) -> Option<FastRootSlots> {
+    let plan = fast_local_slots(&[], chunk)?;
+    let mut depth = 0usize;
+    let mut persistent = Vec::new();
+    for instruction in &chunk.code {
+        match &instruction.op {
+            Op::EnterScope => depth = depth.saturating_add(1),
+            Op::ExitScope => depth = depth.saturating_sub(1),
+            Op::Define { name, .. } if depth == 0 => persistent.push(name.clone()),
+            _ => {}
+        }
+    }
+    Some(FastRootSlots { plan, persistent })
 }
 
 fn lookup(environment: &Env, name: &str) -> Option<Value> {
@@ -3778,6 +4542,7 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Jump(_) => "jump",
         Op::JumpIfFalse(_) => "jump_if_false",
         Op::Call(_) => "call",
+        Op::PerformCall(_) => "perform_call",
         Op::MakeArray(_) => "make_array",
         Op::Index => "index",
         Op::Coalesce(_) => "coalesce",
@@ -3792,6 +4557,8 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::DefineEnum { .. } => "define_enum",
         Op::DefineProtocol { .. } => "define_protocol",
         Op::AdoptProtocol { .. } => "adopt_protocol",
+        Op::Prepare(_) => "prepare",
+        Op::Perform => "perform",
         Op::Match(_) => "choose",
         Op::DefineModule { .. } => "define_module",
         Op::Iterate { .. } => "iterate",
@@ -3849,6 +4616,16 @@ fn int_binary(a: i64, operator: &TokenKind, b: i64, span: Span) -> Result<Value,
         _ => unreachable!(),
     }
 }
+
+fn vm_int_binary(a: i64, operator: &TokenKind, b: i64, span: Span) -> Result<Value, NivError> {
+    match operator {
+        TokenKind::Plus => checked_int(a.checked_add(b), span),
+        TokenKind::EqualEqual => Ok(Value::Bool(a == b)),
+        TokenKind::BangEqual => Ok(Value::Bool(a != b)),
+        _ => int_binary(a, operator, b, span),
+    }
+}
+
 fn float_binary(a: f64, operator: &TokenKind, b: f64, span: Span) -> Result<Value, NivError> {
     match operator {
         TokenKind::Minus => Ok(Value::Float(a - b)),
@@ -3999,10 +4776,7 @@ fn check_arity(name: &str, expected: usize, actual: usize, span: Span) -> Result
     }
 }
 fn native_clock(_: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| Value::Float(duration.as_secs_f64()))
-        .map_err(|_| NivError::new("system clock is before Unix epoch", span.line, span.column))
+    unix_seconds(span).map(Value::Float)
 }
 fn native_len(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     match &arguments[0] {
@@ -4416,6 +5190,7 @@ fn standard_library() -> Value {
         (
             "list".into(),
             native_module(&[
+                ("batch", 2, native_intrinsic, None),
                 ("transform", 2, native_intrinsic, None),
                 ("select", 2, native_intrinsic, None),
                 ("fold", 3, native_intrinsic, None),
@@ -5109,11 +5884,15 @@ fn native_time_add_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, N
 
 fn native_time_now_zoned(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let zone = expect_string(&arguments[0], "std.time.now_zoned", span)?;
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| NivError::new(error.to_string(), span.line, span.column))?
-        .as_secs();
-    let seconds = i64::try_from(seconds)
+    let seconds = unix_seconds(span)?.floor();
+    if seconds > u64::MAX as f64 {
+        return Err(NivError::new(
+            "system time exceeds Int range",
+            span.line,
+            span.column,
+        ));
+    }
+    let seconds = i64::try_from(seconds as u64)
         .map_err(|_| NivError::new("system time exceeds Int range", span.line, span.column))?;
     native_time_from_unix(
         vec![Value::Int(seconds), Value::String(zone.to_string())],
@@ -5236,6 +6015,7 @@ fn decode_record(schema: &RecordType, value: serde_json::Value) -> Result<Value,
     Ok(Value::Record(Arc::new(RecordValue {
         type_name: schema.name.clone(),
         fields,
+        field_indices: schema.field_indices.clone(),
     })))
 }
 
@@ -5280,67 +6060,68 @@ fn decode_schema_value(
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Value::Array(Arc::new(values)));
     }
-    if let Some(arguments) = generic_schema_arguments(schema, "Array") {
-        if arguments.len() == 1 {
-            return decode_schema_value(
-                value,
-                &format!("[{}]", arguments[0]),
-                path,
-                catalog,
-                choices,
-                owner,
-            );
-        }
+    if let Some(arguments) = generic_schema_arguments(schema, "Array")
+        && arguments.len() == 1
+    {
+        return decode_schema_value(
+            value,
+            &format!("[{}]", arguments[0]),
+            path,
+            catalog,
+            choices,
+            owner,
+        );
     }
-    if let Some(arguments) = generic_schema_arguments(schema, "Set") {
-        if arguments.len() == 1 {
-            let Value::Array(values) = decode_schema_value(
-                value,
-                &format!("[{}]", arguments[0]),
-                path,
-                catalog,
-                choices,
-                owner,
-            )?
-            else {
-                unreachable!();
-            };
-            let mut unique = Vec::with_capacity(values.len());
-            for value in values.iter() {
-                if unique.contains(value) {
-                    return Err(format!("{path} contains a duplicate Set value"));
-                }
-                unique.push(value.clone());
+    if let Some(arguments) = generic_schema_arguments(schema, "Set")
+        && arguments.len() == 1
+    {
+        let Value::Array(values) = decode_schema_value(
+            value,
+            &format!("[{}]", arguments[0]),
+            path,
+            catalog,
+            choices,
+            owner,
+        )?
+        else {
+            unreachable!();
+        };
+        let mut unique = Vec::with_capacity(values.len());
+        for value in values.iter() {
+            if unique.contains(value) {
+                return Err(format!("{path} contains a duplicate Set value"));
             }
-            return Ok(Value::Set(Arc::new(unique)));
+            unique.push(value.clone());
         }
+        return Ok(Value::Set(Arc::new(unique)));
     }
-    if let Some(arguments) = generic_schema_arguments(schema, "Map") {
-        if arguments.len() == 2 && arguments[0] == "String" {
-            let serde_json::Value::Object(values) = value else {
-                return Err(format!(
-                    "{path} expects {schema}, found JSON {}",
-                    json_kind(&value)
-                ));
-            };
-            return values
-                .into_iter()
-                .map(|(key, value)| {
-                    Ok((
-                        Value::String(key.clone()),
-                        decode_schema_value(
-                            value,
-                            &arguments[1],
-                            &format!("{path}.{key}"),
-                            catalog,
-                            choices,
-                            owner,
-                        )?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()
-                .map(|entries| Value::Map(Arc::new(entries)));
-        }
+    if let Some(arguments) = generic_schema_arguments(schema, "Map")
+        && arguments.len() == 2
+        && arguments[0] == "String"
+    {
+        let serde_json::Value::Object(values) = value else {
+            return Err(format!(
+                "{path} expects {schema}, found JSON {}",
+                json_kind(&value)
+            ));
+        };
+        return values
+            .into_iter()
+            .map(|(key, value)| {
+                Ok((
+                    Value::String(key.clone()),
+                    decode_schema_value(
+                        value,
+                        &arguments[1],
+                        &format!("{path}.{key}"),
+                        catalog,
+                        choices,
+                        owner,
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(|entries| Value::Map(Arc::new(entries)));
     }
     match schema {
         "Unknown" => {
@@ -5467,6 +6248,8 @@ fn decode_schema_value(
                 &RecordType {
                     name,
                     fields: fields.clone(),
+                    derives: Vec::new(),
+                    field_indices: record_field_indices(fields),
                     catalog: catalog.clone(),
                     choices: choices.clone(),
                 },
@@ -5671,6 +6454,185 @@ fn native_json_stringify(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
         },
         Err(error) => Value::Err(Arc::new(Value::String(error.message))),
     })
+}
+
+fn call_derived_method(
+    method: &DerivedMethod,
+    arguments: Vec<Value>,
+    span: Span,
+) -> Result<Value, NivError> {
+    let metadata = crate::derive_methods::named(&method.name).expect("known derived method");
+    check_arity(
+        &format!("{}.{}", method.schema.name, method.name),
+        metadata.labels.len(),
+        arguments.len(),
+        span,
+    )?;
+    let record_matches = |value: &Value| matches!(value, Value::Record(record) if record.type_name == method.schema.name);
+    match method.name.as_str() {
+        "to_json" | "key" => {
+            if !record_matches(&arguments[0]) {
+                return Err(expected_value(
+                    &method.name,
+                    &method.schema.name,
+                    &arguments[0],
+                    span,
+                ));
+            }
+            native_json_stringify(arguments, span)
+        }
+        "from_json" | "from_row" => native_json_decode(
+            vec![
+                Value::RecordType(method.schema.clone()),
+                arguments[0].clone(),
+            ],
+            span,
+        ),
+        "compare" => {
+            if !record_matches(&arguments[0]) || !record_matches(&arguments[1]) {
+                return Err(NivError::new(
+                    format!(
+                        "{}.compare expects two {} values",
+                        method.schema.name, method.schema.name
+                    ),
+                    span.line,
+                    span.column,
+                ));
+            }
+            Ok(Value::Bool(arguments[0] == arguments[1]))
+        }
+        "display" => {
+            if !record_matches(&arguments[0]) {
+                return Err(expected_value(
+                    &method.name,
+                    &method.schema.name,
+                    &arguments[0],
+                    span,
+                ));
+            }
+            Ok(Value::String(arguments[0].to_string()))
+        }
+        "validate" => {
+            if record_matches(&arguments[0]) {
+                Ok(Value::Ok(Arc::new(Value::Null)))
+            } else {
+                Ok(Value::Err(Arc::new(Value::String(format!(
+                    "expected {}",
+                    method.schema.name
+                )))))
+            }
+        }
+        "to_binary" => {
+            if !record_matches(&arguments[0]) {
+                return Err(expected_value(
+                    &method.name,
+                    &method.schema.name,
+                    &arguments[0],
+                    span,
+                ));
+            }
+            Ok(match native_json_stringify(arguments, span)? {
+                Value::Ok(value) => match value.as_ref() {
+                    Value::String(source) => {
+                        Value::Ok(Arc::new(Value::Bytes(Arc::new(source.as_bytes().to_vec()))))
+                    }
+                    _ => unreachable!("JSON stringify returns text"),
+                },
+                Value::Err(error) => Value::Err(error),
+                _ => unreachable!("JSON stringify returns Result"),
+            })
+        }
+        "from_binary" => {
+            let Value::Bytes(bytes) = &arguments[0] else {
+                return Err(expected_value("from_binary", "Bytes", &arguments[0], span));
+            };
+            let source = match String::from_utf8(bytes.as_ref().clone()) {
+                Ok(source) => source,
+                Err(error) => return Ok(result_error(error)),
+            };
+            native_json_decode(
+                vec![
+                    Value::RecordType(method.schema.clone()),
+                    Value::String(source),
+                ],
+                span,
+            )
+        }
+        "from_arguments" => decode_derived_arguments(&method.schema, &arguments[0], span),
+        _ => unreachable!("complete derived method table"),
+    }
+}
+
+fn decode_derived_arguments(
+    schema: &Arc<RecordType>,
+    value: &Value,
+    span: Span,
+) -> Result<Value, NivError> {
+    let Value::Array(arguments) = value else {
+        return Err(expected_value("from_arguments", "[String]", value, span));
+    };
+    let mut raw = BTreeMap::new();
+    for argument in arguments.iter() {
+        let argument = expect_string(argument, "from_arguments", span)?;
+        let Some((name, value)) = argument
+            .strip_prefix("--")
+            .and_then(|item| item.split_once('='))
+        else {
+            return Ok(Value::Err(Arc::new(Value::String(format!(
+                "argument '{argument}' must use --name=value"
+            )))));
+        };
+        if raw.insert(name.to_string(), value.to_string()).is_some() {
+            return Ok(Value::Err(Arc::new(Value::String(format!(
+                "argument '--{name}' appears more than once"
+            )))));
+        }
+    }
+    let expected = schema
+        .fields
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(unexpected) = raw.keys().find(|name| !expected.contains(name.as_str())) {
+        return Ok(Value::Err(Arc::new(Value::String(format!(
+            "unexpected argument '--{unexpected}'"
+        )))));
+    }
+    let mut object = serde_json::Map::new();
+    for (name, field_type) in &schema.fields {
+        let Some(raw_value) = raw.remove(name) else {
+            if field_type.ends_with('?') {
+                object.insert(name.clone(), serde_json::Value::Null);
+                continue;
+            }
+            return Ok(Value::Err(Arc::new(Value::String(format!(
+                "missing argument '--{name}'"
+            )))));
+        };
+        let field_type = field_type.strip_suffix('?').unwrap_or(field_type);
+        let parsed = match field_type {
+            "String" => serde_json::Value::String(raw_value),
+            "Bool" => match raw_value.as_str() {
+                "yes" | "true" => serde_json::Value::Bool(true),
+                "no" | "false" => serde_json::Value::Bool(false),
+                _ => {
+                    return Ok(Value::Err(Arc::new(Value::String(format!(
+                        "argument '--{name}' expects yes or no"
+                    )))));
+                }
+            },
+            _ => match serde_json::from_str::<serde_json::Value>(&raw_value) {
+                Ok(value @ (serde_json::Value::Number(_) | serde_json::Value::String(_))) => value,
+                _ => serde_json::Value::String(raw_value),
+            },
+        };
+        object.insert(name.clone(), parsed);
+    }
+    let source = serde_json::to_string(&object).expect("JSON object serialization cannot fail");
+    native_json_decode(
+        vec![Value::RecordType(schema.clone()), Value::String(source)],
+        span,
+    )
 }
 
 fn value_to_json(value: &Value, span: Span) -> Result<serde_json::Value, NivError> {
@@ -10157,6 +11119,7 @@ fn transferable(value: &Value) -> bool {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::Module(_)
         | Value::Iterator(_)
         | Value::Transaction(_)
@@ -10440,6 +11403,7 @@ fn stable_key(value: &Value) -> bool {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::Module(_)
         | Value::Iterator(_)
         | Value::Transaction(_)
@@ -10527,6 +11491,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
         | Value::EnumConstructor(_)
         | Value::ProtocolType(_)
         | Value::ProtocolMethod(_)
+        | Value::DerivedMethod(_)
         | Value::Module(_)
         | Value::File(_)
         | Value::TcpListener(_)
@@ -10641,10 +11606,9 @@ fn index_value(collection: Value, index: usize, span: Span) -> Result<Value, Niv
 fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
     match object {
         Value::Record(record) => record
-            .fields
-            .iter()
-            .find(|(field, _)| field == name)
-            .map(|(_, value)| value.clone())
+            .field_indices
+            .get(name)
+            .map(|index| record.fields[*index].1.clone())
             .ok_or_else(|| {
                 NivError::new(
                     format!("{} has no field '{name}'", record.type_name),
@@ -10652,7 +11616,30 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
                     span.column,
                 )
             }),
-        Value::EnumType(enum_type) if enum_type.variants.contains(&name.to_string()) => {
+        Value::RecordType(record) => {
+            let method = crate::derive_methods::named(name).ok_or_else(|| {
+                NivError::new(
+                    format!("{} has no generated method '{name}'", record.name),
+                    span.line,
+                    span.column,
+                )
+            })?;
+            if !record.derives.iter().any(|derive| derive == method.derive) {
+                return Err(NivError::new(
+                    format!(
+                        "{} needs derive {} for generated method '{name}'",
+                        record.name, method.derive
+                    ),
+                    span.line,
+                    span.column,
+                ));
+            }
+            Ok(Value::DerivedMethod(Arc::new(DerivedMethod {
+                schema: record,
+                name: name.to_string(),
+            })))
+        }
+        Value::EnumType(enum_type) if enum_type.variants.iter().any(|variant| variant == name) => {
             if enum_type.payload_variants.contains(name) {
                 Ok(Value::EnumConstructor(Arc::new(EnumConstructor {
                     type_name: enum_type.name.clone(),
@@ -10699,7 +11686,8 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
 
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
-        Stmt::Let { span, .. }
+        Stmt::Prepare { span, .. }
+        | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
@@ -10723,9 +11711,21 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex, mpsc};
 
     use super::{
-        BlockingExecutor, Value, decode_chunks, parse_http_response, parse_http_url,
-        tls_client_stream, tls_server_config,
+        BlockingExecutor, Value, decode_chunks, deterministic_clock, native_clock,
+        parse_http_response, parse_http_url, tls_client_stream, tls_server_config,
     };
+
+    #[test]
+    fn deterministic_clock_is_scoped_and_validated() {
+        let span = crate::ast::Span { line: 1, column: 1 };
+        let guard = deterministic_clock(1_700_000_000.25).unwrap();
+        assert_eq!(
+            native_clock(Vec::new(), span).unwrap(),
+            Value::Float(1_700_000_000.25)
+        );
+        assert!(deterministic_clock(f64::NAN).is_err());
+        drop(guard);
+    }
 
     #[test]
     fn http_parser_enforces_framing_and_status() {

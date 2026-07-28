@@ -32,19 +32,26 @@ const invalid = invoke("nivren_wasm_check", "keep answer: Int = yes");
 assert.equal(invalid.status, 1);
 assert.match(new TextDecoder().decode(invalid.output), /expected Int, found Bool/);
 const formatted = invoke("nivren_wasm_format", "keep answer=42");
-assert.equal(new TextDecoder().decode(formatted.output), "keep answer=42\n");
+assert.equal(new TextDecoder().decode(formatted.output), "keep answer = 42\n");
 const compiled = invoke("nivren_wasm_compile", "40 + 2");
 assert.equal(compiled.status, 0);
 assert.equal(new TextDecoder().decode(compiled.output.slice(0, 4)), "NIVB");
 const executed = invoke("nivren_wasm_run", `
-choice Maybe<Value> { Some(Value), None }
-define double(value: Int) gives Int { give value * 2 }
-keep values = [Maybe.Some(double(21)), Maybe.None]
-choose values[0] { Some(value) => value, None => 0 }
+shape NumberPlan holds { value is Int }
+choice Calculation holds {
+  case Ready carries NumberPlan
+  case Missing
+}
+define double takes { value is Int } gives Int { give value * 2 }
+prepare plan as NumberPlan with { value set 21 }
+choose Calculation.Ready(perform plan) {
+  case Ready carries ready => double with { value set ready.value }
+  case Missing => 0
+}
 `);
-assert.equal(executed.status, 0);
+assert.equal(executed.status, 0, new TextDecoder().decode(executed.output));
 assert.equal(new TextDecoder().decode(executed.output), "42");
 
 assert.equal(api.nivren_wasm_alloc(16 * 1024 * 1024 + 1), 0);
 
-console.log("Nivren WASI host/guest: check, diagnostics, format, compile, and Edition 3 execution passed");
+console.log("Nivren WASI host/guest: check, diagnostics, format, compile, and Edition 4 execution passed");

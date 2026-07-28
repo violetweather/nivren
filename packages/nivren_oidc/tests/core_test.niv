@@ -1,15 +1,25 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-    keep challenge = main.pkce_challenge(verifier) or give
-    assert(challenge == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "RFC 7636 S256 vector")
-    keep flow = main.authorization_url("https://identity.example/authorize", "nivren client", "https://app.example/callback", "openid profile", "state-0123456789", "nonce-0123456789", verifier) or give
-    assert(std.text.starts_with(flow.url, "https://identity.example/authorize?response_type=code&client_id=nivren%20client"), "encoded authorization URL")
-    keep payload = "{\"issuer\":\"https://identity.example\",\"audience\":\"nivren-client\",\"subject\":\"user-42\",\"expires_at\":2000,\"issued_at\":1000,\"nonce\":\"nonce-0123456789\"}"
-    keep claims = main.validate_id_claims(payload, "https://identity.example", "nivren-client", "nonce-0123456789", 1500, 30) or give
-    keep rejected = choose main.validate_claims(claims, "https://wrong.example", "nivren-client", "nonce-0123456789", 1500, 30) { Ok(value) => no, Err(problem) => yes }
+define works
+takes { }
+gives Bool or String
+{
+    keep verifier set "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    keep challenge set main.pkce_challenge with { verifier set verifier } or give
+    assert with { condition set challenge == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM" message set "RFC 7636 S256 vector" }
+    keep flow set main.authorization_url with {
+        endpoint set "https://identity.example/authorize" client_id set "nivren client"
+        redirect_uri set "https://app.example/callback" scope set "openid profile"
+        state set "state-0123456789" nonce set "nonce-0123456789" verifier set verifier
+    } or give
+    assert with { condition set std.text.starts_with with { value set flow.url prefix set "https://identity.example/authorize?response_type=code&client_id=nivren%20client" } message set "encoded authorization URL" }
+    keep payload set "{\"issuer\":\"https://identity.example\",\"audience\":\"nivren-client\",\"subject\":\"user-42\",\"expires_at\":2000,\"issued_at\":1000,\"nonce\":\"nonce-0123456789\"}"
+    keep claims set main.validate_id_claims with { payload_json set payload expected_issuer set "https://identity.example" expected_audience set "nivren-client" expected_nonce set "nonce-0123456789" now set 1500 clock_skew set 30 } or give
+    keep rejected set choose main.validate_claims with { value set claims expected_issuer set "https://wrong.example" expected_audience set "nivren-client" expected_nonce set "nonce-0123456789" now set 1500 clock_skew set 30 } {
+        case Ok carries value => no
+        case Err carries problem => yes
+    }
     give ok(rejected and claims.subject == "user-42")
 }
 
-works()
+works with { }

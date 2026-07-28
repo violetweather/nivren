@@ -1,0 +1,5 @@
+# nivren_database
+
+Production contracts and a capability-scoped host adapter for connection pools, bounded query/execute/transaction requests, ordered migrations, and cursor-based result pages. Requests and pages use derived strict JSON so C, Rust, host-callback, and remote driver adapters share one typed schema.
+
+`open_driver`, `query_driver`, and `execute_driver` declare `Native within "database"`, exchange bounded JSON through opaque owned handles, and close deterministically through `using`. The native CLI includes a bundled SQLite host for `memory://name` and project-rooted `sqlite:relative/path.db` configurations. It supports parameterized query/execute plus explicit begin/commit/rollback and enforces statement, parameter, row, timeout, response, UTF-8, and path limits. PostgreSQL, MySQL, and managed-service hosts still own TLS, cancellation negotiation, connection-string secrecy, and service-specific policy. `nivren_redis` remains the first fully implemented network driver; SQL adapters consume `nivren_sql.Query` and this package's `DriverRequest`.

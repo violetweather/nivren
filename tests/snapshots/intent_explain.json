@@ -1,0 +1,36 @@
+{
+  "schema": "org.nivren.intent.v1",
+  "target": "vm-bytecode",
+  "optimized": true,
+  "summary": {
+    "required_capabilities": [],
+    "resources": [],
+    "effect_count": 0,
+    "materialized_plans": 0,
+    "pure_runtime_plan_allocations": 0,
+    "fused_pipelines": 1,
+    "serial_effect_order": []
+  },
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "pipeline",
+      "operation": "double",
+      "line": 10,
+      "column": 4,
+      "allocation": "none",
+      "capabilities": [],
+      "resources": [],
+      "cancellation": "not-applicable",
+      "retries": "stage-defined",
+      "timeout": "stage-defined",
+      "buffering": "none",
+      "blocking": "never",
+      "target": "vm-bytecode",
+      "fusion": "verified-pure",
+      "effect_order": null,
+      "serializable": true,
+      "portability": "pure-values"
+    }
+  ]
+}

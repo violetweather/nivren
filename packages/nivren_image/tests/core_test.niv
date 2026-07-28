@@ -1,15 +1,18 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep pixels = std.bytes.from_values([255, 0, 0, 0, 255, 0]) or give
-    keep source = main.image(2, 1, pixels) or give
-    keep encoded = main.encode_ppm(source) or give
-    assert(std.bytes.length(encoded) == 17, "canonical PPM byte length")
-    keep decoded = main.decode_ppm(encoded) or give
-    assert(decoded == source, "P6 round trip")
-    keep commented = std.binary.concat(std.bytes.from_string("P6\n# Nivren\n2 1\n255\n"), pixels) or give
-    assert((main.decode_ppm(commented) or give) == source, "commented PPM header")
+define works
+takes { }
+gives Bool or String
+{
+    keep pixels set std.bytes.from_values with { values set [255, 0, 0, 0, 255, 0] } or give
+    keep source set main.image with { width set 2 height set 1 pixels set pixels } or give
+    keep encoded set main.encode_ppm with { value set source } or give
+    assert with { condition set std.bytes.length with { bytes set encoded } == 17 message set "canonical PPM byte length" }
+    keep decoded set main.decode_ppm with { source set encoded } or give
+    assert with { condition set decoded == source message set "P6 round trip" }
+    keep commented set std.binary.concat with { left set std.bytes.from_string with { value set "P6\n# Nivren\n2 1\n255\n" } right set pixels } or give
+    assert with { condition set (main.decode_ppm with { source set commented } or give) == source message set "commented PPM header" }
     give ok(yes)
 }
 
-works()
+works with { }

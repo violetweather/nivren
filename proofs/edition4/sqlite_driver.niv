@@ -1,0 +1,29 @@
+use "../../packages/nivren_database/src/main.niv"
+
+define run_sqlite
+gives Int or String
+needs Native within "database"
+{
+    keep opened set perform main.open_driver with { configuration set "memory://product-proof" } or give
+    using handle = opened {
+        keep created set perform main.execute_driver with {
+            handle set handle
+            request set main.DriverRequest with { operation set "execute" statement set "CREATE TABLE users (name TEXT NOT NULL)" parameters set [] maximum_rows set 0 timeout set 5.0 }
+        } or give
+        keep first set perform main.execute_driver with {
+            handle set handle
+            request set main.DriverRequest with { operation set "execute" statement set "INSERT INTO users (name) VALUES (?)" parameters set ["Ada"] maximum_rows set 0 timeout set 5.0 }
+        } or give
+        keep second set perform main.execute_driver with {
+            handle set handle
+            request set main.DriverRequest with { operation set "execute" statement set "INSERT INTO users (name) VALUES (?)" parameters set ["Lin"] maximum_rows set 0 timeout set 5.0 }
+        } or give
+        keep page set perform main.query_driver with {
+            handle set handle
+            request set main.DriverRequest with { operation set "query" statement set "SELECT name FROM users ORDER BY name" parameters set [] maximum_rows set 10 timeout set 5.0 }
+        } or give
+        give ok(len(page.rows))
+    }
+}
+
+perform run_sqlite with {}

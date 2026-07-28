@@ -1,0 +1,32 @@
+use "../src/main.niv"
+
+define verify
+gives Bool or String
+{
+
+keep plan set main.AddPlan with {
+    left set [1, 2, 3, 4, 5]
+    right set [10, 20, 30, 40, 50]
+    limits set main.ComputeLimits with {
+        maximum_items set 1024
+        workgroup_size set 64
+    }
+}
+keep artifact set main.compile_add with { plan set plan } or give
+assert(artifact.cpu_fallback == [11, 22, 33, 44, 55], "four-lane CPU fallback")
+assert(artifact.target == "webgpu-wgsl", "portable GPU target")
+assert(artifact.workgroups == 1, "bounded workgroups")
+
+keep mismatched set main.AddPlan with {
+    left set [1]
+    right set []
+    limits set main.ComputeLimits with {
+        maximum_items set 8
+        workgroup_size set 4
+    }
+}
+assert(main.validate_plan with { plan set mismatched } == err("GPU vector inputs must have equal lengths"), "reject mismatched vectors")
+give ok(yes)
+}
+
+verify with {}

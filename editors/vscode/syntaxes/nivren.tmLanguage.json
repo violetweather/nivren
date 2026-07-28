@@ -15,11 +15,11 @@
     },
     {
       "name": "keyword.control.nivren",
-      "match": "\\b(?:when|otherwise|repeat|each|within|give|choose|through|start|wait|together|race|using)\\b"
+      "match": "\\b(?:when|otherwise|repeat|each|within|give|choose|case|carries|prepare|perform|through|start|wait|together|race|using|or)\\b"
     },
     {
       "name": "keyword.declaration.nivren",
-      "match": "\\b(?:keep|change|define|gives|needs|shape|choice|protocol|adopt|for|use|expose)\\b"
+      "match": "\\b(?:keep|change|set|to|define|takes|gives|needs|shape|choice|holds|with|from|is|maybe|protocol|adopt|for|use|expose|unsafe)\\b"
     },
     {
       "name": "storage.type.nivren",

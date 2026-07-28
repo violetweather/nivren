@@ -1,5 +1,35 @@
 use "../src/main.niv"
 
-keep health = main.route("GET", "/health", "health")
-keep chosen = main.first_match([health], "GET", "/health")
-assert(chosen != none, "route should be selected")
+define verify
+gives Bool or String
+{
+    keep health set main.route with { method set "GET" path set "/health" name set "health" }
+    keep user set main.route with { method set "GET" path set "/users/:id" name set "user" }
+    keep chosen set main.first_match with { routes set [health] method set "GET" path set "/health" }
+    assert(chosen != none, "exact route should be selected")
+
+    keep selected set main.first_parameterized_match with { routes set [health, user] method set "GET" path set "/users/42" } or give
+    assert(selected != none, "parameterized route should be selected")
+    keep matched set selected ?? main.RouteMatch with {
+        route set health
+        parameters set std.map.remove with {
+            map set std.map.single with { key set "__empty__" value set "" }
+            key set "__empty__"
+        }
+    }
+    assert(std.map.get with { map set matched.parameters key set "id" } == "42", "route parameter")
+
+    keep request set main.RequestContext with {
+        method set "POST"
+        path set "/events"
+        headers set std.map.single with { key set "authorization" value set "Bearer token" }
+        body set "{}"
+    }
+    keep policy set main.RequestPolicy with { maximum_body set 1024 required_headers set ["authorization"] bearer set yes }
+    assert(main.validate_request with { request set request policy set policy } == ok(request), "request policy")
+    keep reply set main.response with { status set 200 body set "ready" } or give
+    assert(reply.status == 200 and reply.body == "ready", "bounded response")
+    give ok(yes)
+}
+
+verify with {}

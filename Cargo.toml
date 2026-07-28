@@ -1,6 +1,6 @@
 [package]
 name = "nivren"
-version = "0.10.0-beta.6"
+version = "0.10.0-beta.7"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ repository = "https://github.com/violetweather/nivren"
 [features]
 default = ["host-runtime"]
 portable-runtime = []
-host-runtime = ["dep:getrandom", "dep:mio", "dep:nivren-jit", "dep:nivren-native", "dep:ring", "dep:rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
+host-runtime = ["dep:getrandom", "dep:mio", "dep:nivren-database-host", "dep:nivren-jit", "dep:nivren-native", "dep:ring", "dep:rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
 
 [dependencies]
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"], optional = true }
@@ -26,6 +26,7 @@ getrandom = { version = "0.3", optional = true }
 webpki-roots = { version = "1.0.9", optional = true }
 nivren-jit = { path = "crates/nivren-jit", optional = true }
 nivren-native = { path = "crates/nivren-native", optional = true }
+nivren-database-host = { path = "crates/nivren-database-host", optional = true }
 ed25519-dalek = "=3.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 ring = { version = "0.17.14", optional = true }
@@ -53,6 +54,16 @@ name = "performance"
 path = "benches/performance.rs"
 harness = false
 
+[[bench]]
+name = "intent_proof"
+path = "benches/intent_proof.rs"
+harness = false
+
+[[bench]]
+name = "compiler_proof"
+path = "benches/compiler_proof.rs"
+harness = false
+
 [profile.release]
 lto = true
 strip = true
@@ -65,6 +76,6 @@ unsafe_code = "forbid"
 all = "warn"
 
 [workspace]
-members = ["crates/nivren-ffi", "crates/nivren-jit", "crates/nivren-native", "crates/nivren-wasm"]
+members = ["crates/nivren-database-host", "crates/nivren-ffi", "crates/nivren-jit", "crates/nivren-native", "crates/nivren-wasm"]
 exclude = ["fuzz"]
 resolver = "3"

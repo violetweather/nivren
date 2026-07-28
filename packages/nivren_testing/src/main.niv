@@ -1,35 +1,53 @@
-define expect_equal<Value: Comparable>(actual: Value, expected: Value, label: String) gives Result<Null, String> {
+define expect_equal<Value: Comparable>
+takes { actual is Value expected is Value label is String }
+gives Null or String
+{
     when actual == expected { give ok(none) }
     give err(label + ": values differ")
 }
 
-define expect_yes(condition: Bool, label: String) gives Result<Null, String> {
+define expect_yes
+takes { condition is Bool label is String }
+gives Null or String
+{
     when condition { give ok(none) }
     give err(label + ": expected yes")
 }
 
-define expect_no(condition: Bool, label: String) gives Result<Null, String> {
+define expect_no
+takes { condition is Bool label is String }
+gives Null or String
+{
     when !condition { give ok(none) }
     give err(label + ": expected no")
 }
 
-shape Gate { signal: Channel }
+shape Gate holds { signal is Channel }
 
-define gate() gives Gate needs Channel {
-    give Gate(std.channels.create(1))
-}
+define gate
+gives Gate
+needs Channel
+{ give Gate with { signal set perform std.channels.create with { capacity set 1 } } }
 
-define open(value: Gate) gives Result<Null, String> needs Channel {
-    give std.channels.send(value.signal, none, 5.0)
-}
+define open
+takes { value is Gate }
+gives Null or String
+needs Channel
+{ give perform std.channels.send with { channel set value.signal value set none timeout set 5.0 } }
 
-define pass(value: Gate) gives Result<Null, String> needs Channel {
-    keep signal = std.channels.receive(value.signal, 5.0) or give
+define pass
+takes { value is Gate }
+gives Null or String
+needs Channel
+{
+    keep signal set perform std.channels.receive with { channel set value.signal timeout set 5.0 } or give
     give ok(none)
 }
 
-define checkpoint(events: Channel, label: String) gives Result<Null, String> needs Channel {
-    give std.channels.send(events, label, 5.0)
-}
+define checkpoint
+takes { events is Channel label is String }
+gives Null or String
+needs Channel
+{ give perform std.channels.send with { channel set events value set label timeout set 5.0 } }
 
 expose { Gate, expect_equal, expect_yes, expect_no, gate, open, pass, checkpoint }

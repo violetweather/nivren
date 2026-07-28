@@ -1,0 +1,15 @@
+use "../../packages/nivren_gpu/src/main.niv"
+
+define compute
+gives [Int] or String
+needs Native within "gpu"
+{
+    keep plan set main.AddPlan with {
+        left set [1, 2, 3, 4]
+        right set [10, 20, 30, 40]
+        limits set main.ComputeLimits with { maximum_items set 1024 workgroup_size set 64 }
+    }
+    give perform main.execute_gpu with { plan set plan }
+}
+
+perform compute with {}

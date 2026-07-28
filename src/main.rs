@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         [] => repl(),
         [command] if command == "repl" => repl(),
         [command] if command == "lsp" => lsp(),
+        [command] if command == "dap" => dap(),
         [command] if command == "version" || command == "--version" || command == "-V" => {
             println!("Nivren {}", nivren::VERSION);
             ExitCode::SUCCESS
@@ -29,6 +30,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         [command] if command == "run" => run_file("."),
+        [command, flag] if command == "run" && flag == "--native" => run_native_file("."),
+        [command, flag, path] if command == "run" && flag == "--native" => run_native_file(path),
         [command, path] if command == "run" => run_file(path),
         [command, flag, output, path] if command == "run" && flag == "--crash-report" => {
             run_with_crash_report(path, output)
@@ -40,9 +43,21 @@ fn main() -> ExitCode {
         [command, path] if command == "dev" => run_project(path),
         [command] if command == "ship" => ship_project("."),
         [command, path] if command == "ship" => ship_project(path),
+        [command, action] if command == "workspace" => workspace_action(action, "."),
+        [command, action, path] if command == "workspace" => workspace_action(action, path),
         [command, path] if command == "check" => check_file(path),
         [command] if command == "build" => build_project("."),
         [command, flag] if command == "build" && flag == "--standalone" => build_standalone("."),
+        [command, standalone, native]
+            if command == "build" && standalone == "--standalone" && native == "--native" =>
+        {
+            build_native_standalone(".")
+        }
+        [command, standalone, native, path]
+            if command == "build" && standalone == "--standalone" && native == "--native" =>
+        {
+            build_native_standalone(path)
+        }
         [command, flag, path] if command == "build" && flag == "--standalone" => {
             build_standalone(path)
         }
@@ -54,6 +69,28 @@ fn main() -> ExitCode {
         }
         [command, flag, registry, root, path] if command == "install" && flag == "--trusted" => {
             install_trusted_project(path, registry, root)
+        }
+        [command, flag] if command == "install" && flag == "--offline" => {
+            install_offline_project(".")
+        }
+        [command, flag, path] if command == "install" && flag == "--offline" => {
+            install_offline_project(path)
+        }
+        [command, action] if command == "cache" && action == "list" => cache_list("."),
+        [command, action, path] if command == "cache" && action == "list" => cache_list(path),
+        [command, action] if command == "cache" && action == "prune" => cache_prune("."),
+        [command, action, path] if command == "cache" && action == "prune" => cache_prune(path),
+        [command, action] if command == "authority" && action == "lock" => authority_lock("."),
+        [command, action, path] if command == "authority" && action == "lock" => {
+            authority_lock(path)
+        }
+        [command, action] if command == "authority" && action == "check" => authority_check("."),
+        [command, action, path] if command == "authority" && action == "check" => {
+            authority_check(path)
+        }
+        [command, action] if command == "authority" && action == "report" => authority_report("."),
+        [command, action, path] if command == "authority" && action == "report" => {
+            authority_report(path)
         }
         [command, registry] if command == "install" => install_project(".", registry),
         [command, registry, path] if command == "install" => install_project(path, registry),
@@ -67,6 +104,14 @@ fn main() -> ExitCode {
         }
         [command, action, query, registry] if command == "registry" && action == "search" => {
             registry_search(query, registry)
+        }
+        [command, action, name, version, registry] if command == "registry" && action == "yank" => {
+            registry_set_yanked(name, version, registry, true)
+        }
+        [command, action, name, version, registry]
+            if command == "registry" && action == "unyank" =>
+        {
+            registry_set_yanked(name, version, registry, false)
         }
         [command, action, name, version, registry, destination]
             if command == "registry" && action == "fetch" =>
@@ -107,8 +152,43 @@ fn main() -> ExitCode {
         {
             registry_envelope(package, provenance, authorization, output)
         }
+        [
+            command,
+            action,
+            operation,
+            name,
+            version,
+            generation,
+            issued,
+            expires,
+            reason,
+            secret,
+            output,
+        ] if command == "registry" && action == "sign-admin" => registry_sign_admin(
+            operation, name, version, generation, issued, expires, reason, secret, output,
+        ),
+        [command, action, document, public, now, minimum]
+            if command == "registry" && action == "verify-admin" =>
+        {
+            registry_verify_admin(document, public, now, minimum)
+        }
+        [command, action, registry, now, minimum]
+            if command == "registry" && action == "recover-admin" =>
+        {
+            registry_recover_admin(registry, now, minimum)
+        }
         [command, action] if command == "release" && action == "check" => release_check("."),
         [command, action, path] if command == "release" && action == "check" => release_check(path),
+        [command, action, manifest, secret, output]
+            if command == "release" && action == "sign-channel" =>
+        {
+            release_sign_channel(manifest, secret, output)
+        }
+        [command, action, manifest, public, now, minimum]
+            if command == "release" && action == "verify-channel" =>
+        {
+            release_verify_channel(manifest, public, now, minimum)
+        }
         [command, path] if command == "fmt" => format_path(path, false),
         [command, flag, path] if command == "fmt" && flag == "--check" => format_path(path, true),
         [command, language, path, output] if command == "bindgen" && language == "c" => {
@@ -117,6 +197,10 @@ fn main() -> ExitCode {
         [command] if command == "doc" => document_project("."),
         [command, path] if command == "doc" => document_project(path),
         [command, path] if command == "disasm" => disassemble_path(path),
+        [command, path] if command == "explain" => explain_path(path, true),
+        [command, flag, path] if command == "explain" && flag == "--no-optimize" => {
+            explain_path(path, false)
+        }
         [command, path, output] if command == "sourcemap" => source_map_path(path, output),
         [command, path] if command == "debug" => debug_path(path),
         [command, path, output] if command == "inspect" => inspect_path(path, output),
@@ -128,26 +212,119 @@ fn main() -> ExitCode {
         [command, flag, output, path] if command == "coverage" && flag == "--json" => {
             observe_path(path, true, Some(output))
         }
-        [command] if command == "test" => test_path("tests/niv", None),
+        [command] if command == "bench" => benchmark_path(".", None),
+        [command, path] if command == "bench" => benchmark_path(path, None),
+        [command, flag, output, path] if command == "bench" && flag == "--json" => {
+            benchmark_path(path, Some(output))
+        }
+        [command] if command == "test" => test_path("tests/niv", None, None),
+        [command, flag] if command == "test" && flag == "--property" => {
+            test_path("tests/property", None, None)
+        }
+        [command, flag, path] if command == "test" && flag == "--property" => {
+            test_path(path, None, None)
+        }
+        [command, flag] if command == "test" && flag == "--compat" => {
+            test_path("tests/compat", None, None)
+        }
+        [command, flag, path] if command == "test" && flag == "--compat" => {
+            test_path(path, None, None)
+        }
+        [command, flag] if command == "test" && flag == "--fuzz-smoke" => {
+            test_path("tests/fuzz", None, None)
+        }
+        [command, flag, path] if command == "test" && flag == "--fuzz-smoke" => {
+            test_path(path, None, None)
+        }
+        [command, flag, seconds] if command == "test" && flag == "--time" => {
+            test_path_with_time("tests/niv", seconds)
+        }
+        [command, flag, seconds, path] if command == "test" && flag == "--time" => {
+            test_path_with_time(path, seconds)
+        }
         [command, flag] if command == "test" && flag == "--snapshots" => {
-            test_path("tests/niv", Some(false))
+            test_path("tests/niv", Some(false), None)
         }
         [command, flag, path] if command == "test" && flag == "--snapshots" => {
-            test_path(path, Some(false))
+            test_path(path, Some(false), None)
         }
         [command, flag] if command == "test" && flag == "--accept-snapshots" => {
-            test_path("tests/niv", Some(true))
+            test_path("tests/niv", Some(true), None)
         }
         [command, flag, path] if command == "test" && flag == "--accept-snapshots" => {
-            test_path(path, Some(true))
+            test_path(path, Some(true), None)
         }
-        [command, path] if command == "test" => test_path(path, None),
+        [command, path] if command == "test" => test_path(path, None, None),
         [path] if path.ends_with(".niv") => run_file(path),
         [path] if path.ends_with(".nivb") => run_file(path),
         _ => {
             eprintln!("error: invalid command\n");
             help();
             ExitCode::from(64)
+        }
+    }
+}
+
+fn release_sign_channel(manifest: &str, secret: &str, output: &str) -> ExitCode {
+    let result = fs::read(manifest)
+        .map_err(|error| format!("cannot read channel manifest: {error}"))
+        .and_then(|bytes| {
+            nivren::channel::ChannelManifest::decode(&bytes).map_err(|error| error.message)
+        })
+        .and_then(|mut manifest| {
+            let secret = fs::read_to_string(secret)
+                .map_err(|error| format!("cannot read channel signing key: {error}"))?;
+            manifest
+                .sign(secret.trim())
+                .map_err(|error| error.message)?;
+            manifest.encode().map_err(|error| error.message)
+        })
+        .and_then(|bytes| {
+            write_atomic(Path::new(output), &bytes).map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(()) => {
+            println!("signed {output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn release_verify_channel(manifest: &str, public: &str, now: &str, minimum: &str) -> ExitCode {
+    let result = fs::read(manifest)
+        .map_err(|error| format!("cannot read channel manifest: {error}"))
+        .and_then(|bytes| {
+            nivren::channel::ChannelManifest::decode(&bytes).map_err(|error| error.message)
+        })
+        .and_then(|manifest| {
+            let public = fs::read_to_string(public)
+                .map_err(|error| format!("cannot read channel public key: {error}"))?;
+            let now = now
+                .parse::<u64>()
+                .map_err(|_| "invalid Unix time".to_string())?;
+            let minimum = minimum
+                .parse::<u64>()
+                .map_err(|_| "invalid minimum generation".to_string())?;
+            manifest
+                .verify(public.trim(), now, minimum)
+                .map_err(|error| error.message)?;
+            Ok(manifest)
+        });
+    match result {
+        Ok(manifest) => {
+            println!(
+                "verified {} {} generation {}",
+                manifest.channel, manifest.version, manifest.generation
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
         }
     }
 }
@@ -181,6 +358,16 @@ fn generate_c_bindings(path: &str, output: &str) -> ExitCode {
     }
 }
 
+fn dap() -> ExitCode {
+    match nivren::dap::serve() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            ExitCode::from(70)
+        }
+    }
+}
+
 fn run_embedded_application() -> Option<ExitCode> {
     let executable = env::current_exe().ok()?;
     let bytes = fs::read(&executable).ok()?;
@@ -193,8 +380,19 @@ fn run_embedded_application() -> Option<ExitCode> {
             return Some(ExitCode::from(70));
         }
     };
-    let result = nivren::bundle::decode(&application.bundle)
-        .and_then(|chunk| project_interpreter(&manifest).run_bytecode(&chunk));
+    let native = application
+        .manifest
+        .lines()
+        .next()
+        .is_some_and(|line| line == "# nivren-standalone-engine = native");
+    let result = nivren::bundle::decode(&application.bundle).and_then(|chunk| {
+        let mut interpreter = project_interpreter(&manifest);
+        if native {
+            interpreter.run_native(&chunk)
+        } else {
+            interpreter.run_bytecode(&chunk)
+        }
+    });
     Some(match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
@@ -220,6 +418,39 @@ fn run_file(path: &str) -> ExitCode {
             .run_bytecode(&chunk)
             .map_err(|error| vec![error])
     }) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(errors) => {
+            report(path, &source, &errors);
+            ExitCode::from(70)
+        }
+    }
+}
+
+fn run_native_file(path: &str) -> ExitCode {
+    if is_project_path(Path::new(path)) {
+        return run_native_project(path);
+    }
+    let source = if is_bundle_path(Path::new(path)) {
+        String::new()
+    } else {
+        match read_source(path) {
+            Ok(source) => source,
+            Err(code) => return code,
+        }
+    };
+    let result = if is_bundle_path(Path::new(path)) {
+        fs::read(path)
+            .map_err(|error| vec![NivError::new(error.to_string(), 1, 1)])
+            .and_then(|bytes| nivren::bundle::decode(&bytes).map_err(|error| vec![error]))
+    } else {
+        compile_file(Path::new(path))
+    }
+    .and_then(|chunk| {
+        Interpreter::new()
+            .run_native(&chunk)
+            .map_err(|error| vec![error])
+    });
+    match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(errors) => {
             report(path, &source, &errors);
@@ -274,10 +505,47 @@ fn run_project(path: &str) -> ExitCode {
     }
 }
 
+fn run_native_project(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    let entry = manifest.entry_path();
+    let source = fs::read_to_string(&entry).unwrap_or_default();
+    let result = compile_project(Path::new(path)).and_then(|(manifest, chunk)| {
+        project_interpreter(&manifest)
+            .run_native(&chunk)
+            .map_err(|error| vec![error])
+    });
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(errors) => {
+            report(&entry.display().to_string(), &source, &errors);
+            ExitCode::from(70)
+        }
+    }
+}
+
 fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
     let interpreter = Interpreter::new()
         .with_capabilities(manifest.capabilities.iter().cloned())
         .with_capability_scopes(manifest.capability_scopes.clone());
+    let interpreter = if manifest.capabilities.contains("Native") {
+        let database_root = manifest.root.join(".nivren").join("database");
+        match nivren_database_host::SqliteHost::new(database_root) {
+            Ok(host) => interpreter.with_host_callback(host.callback()),
+            Err(error) => interpreter.with_host_callback(move |operation, _| {
+                Err(format!(
+                    "cannot initialize the built-in SQLite host for {operation}: {error}"
+                ))
+            }),
+        }
+    } else {
+        interpreter
+    };
     let interpreter = if let Some(limit) = manifest.instruction_limit {
         interpreter.with_instruction_limit(limit)
     } else {
@@ -301,6 +569,158 @@ fn install_project(path: &str, registry: &str) -> ExitCode {
     match nivren::package::install_dependencies(&manifest, Path::new(registry)) {
         Ok(count) => {
             println!("installed {count} package(s)");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn install_offline_project(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::install_offline_dependencies(&manifest) {
+        Ok(count) => {
+            println!("verified {count} cached package(s); no network used");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn cache_list(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::cache_entries(&manifest) {
+        Ok(entries) => {
+            for entry in &entries {
+                println!(
+                    "{} {} {} {} bytes {}",
+                    entry.name,
+                    entry.version,
+                    entry.sha256,
+                    entry.bytes,
+                    if entry.reachable {
+                        "reachable"
+                    } else {
+                        "unused"
+                    }
+                );
+            }
+            println!("{} cached package(s)", entries.len());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn cache_prune(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::prune_cache(&manifest) {
+        Ok((removed, bytes)) => {
+            println!("removed {removed} unused package(s), {bytes} archive bytes");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn authority_lock(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::write_authority_lock(&manifest) {
+        Ok(()) => {
+            println!(
+                "wrote {}",
+                manifest
+                    .root
+                    .join(nivren::project::AUTHORITY_LOCKFILE_NAME)
+                    .display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn authority_check(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    let expected = match nivren::package::installed_authority_lockfile(&manifest) {
+        Ok(contents) => contents,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    let lock = manifest.root.join(nivren::project::AUTHORITY_LOCKFILE_NAME);
+    match fs::read_to_string(&lock) {
+        Ok(actual) if actual == expected => {
+            println!("authority lock is current");
+            ExitCode::SUCCESS
+        }
+        Ok(_) => {
+            eprintln!("error: authority lock is stale; review and run 'niv authority lock'");
+            ExitCode::FAILURE
+        }
+        Err(_) => {
+            eprintln!("error: authority lock is missing; run 'niv authority lock'");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn authority_report(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::installed_authority_lockfile(&manifest) {
+        Ok(contents) => {
+            print!("{contents}");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -351,13 +771,16 @@ fn release_check(path: &str) -> ExitCode {
     match nivren::release::audit(Path::new(path), now) {
         Ok(audit) if audit.blockers.is_empty() => {
             println!(
-                "1.0 release gate passed: {} pilots, {} conformance cases",
-                audit.pilots, audit.conformance_cases
+                "Edition 4 {} release gate passed: {}/{} evidence gates, {} conformance cases",
+                audit.release_track,
+                audit.evidence_passed,
+                audit.evidence_required,
+                audit.conformance_cases
             );
             ExitCode::SUCCESS
         }
         Ok(audit) => {
-            eprintln!("1.0 release gate blocked:");
+            eprintln!("Edition 4 {} release gate blocked:", audit.release_track);
             for blocker in audit.blockers {
                 eprintln!("- {blocker}");
             }
@@ -419,6 +842,14 @@ fn build_project(path: &str) -> ExitCode {
 }
 
 fn build_standalone(path: &str) -> ExitCode {
+    build_standalone_engine(path, false)
+}
+
+fn build_native_standalone(path: &str) -> ExitCode {
+    build_standalone_engine(path, true)
+}
+
+fn build_standalone_engine(path: &str, native: bool) -> ExitCode {
     let (manifest, chunk) = match compile_project(Path::new(path)) {
         Ok(result) => result,
         Err(errors) => {
@@ -440,7 +871,12 @@ fn build_standalone(path: &str) -> ExitCode {
             return ExitCode::from(74);
         }
     };
-    let application = match nivren::standalone::attach(&current, &bundle, &manifest.source()) {
+    let manifest_source = if native {
+        format!("# nivren-standalone-engine = native\n{}", manifest.source())
+    } else {
+        manifest.source()
+    };
+    let application = match nivren::standalone::attach(&current, &bundle, &manifest_source) {
         Ok(application) => application,
         Err(error) => {
             report(path, "", &[error]);
@@ -463,14 +899,14 @@ fn build_standalone(path: &str) -> ExitCode {
         let permissions = env::current_exe()
             .and_then(fs::metadata)
             .map(|metadata| metadata.permissions());
-        if let Ok(permissions) = permissions {
-            if let Err(error) = fs::set_permissions(&output, permissions) {
-                eprintln!(
-                    "error: cannot make {} executable: {error}",
-                    output.display()
-                );
-                return ExitCode::from(73);
-            }
+        if let Ok(permissions) = permissions
+            && let Err(error) = fs::set_permissions(&output, permissions)
+        {
+            eprintln!(
+                "error: cannot make {} executable: {error}",
+                output.display()
+            );
+            return ExitCode::from(73);
         }
     }
     println!("standalone {}", output.display());
@@ -534,6 +970,49 @@ fn build_aot(path: &str) -> ExitCode {
         eprintln!("error: cannot create {}: {error}", directory.display());
         return ExitCode::from(73);
     }
+    let extension = if cfg!(windows) { "obj" } else { "o" };
+    let program_object = directory.join(format!("program.{extension}"));
+    let program_bytes = match nivren_jit::TraceObject::compile("nivren_program", chunk.code.len()) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("error: cannot compile complete program ahead of time: {error}");
+            return ExitCode::from(70);
+        }
+    };
+    if let Err(error) = write_atomic(&program_object, &program_bytes) {
+        eprintln!("error: cannot write {}: {error}", program_object.display());
+        return ExitCode::from(73);
+    }
+    let bundle = match nivren::bundle::encode(&chunk) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(70);
+        }
+    };
+    let program_bundle = directory.join("program.nivb");
+    if let Err(error) = write_atomic(&program_bundle, &bundle) {
+        eprintln!("error: cannot write {}: {error}", program_bundle.display());
+        return ExitCode::from(73);
+    }
+    let header = directory.join("nivren_program.h");
+    let header_bytes = b"#ifndef NIVREN_PROGRAM_H\n#define NIVREN_PROGRAM_H\n#include <stdint.h>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\ntypedef int64_t (*NivrenTraceCallback)(void *context, uint64_t instruction);\nint64_t nivren_program(void *context, NivrenTraceCallback callback);\n#ifdef __cplusplus\n}\n#endif\n#endif\n";
+    if let Err(error) = write_atomic(&header, header_bytes) {
+        eprintln!("error: cannot write {}: {error}", header.display());
+        return ExitCode::from(73);
+    }
+    let metadata = format!(
+        "{{\n  \"abi\": \"nivren-trace-v1\",\n  \"bytecode\": \"program.nivb\",\n  \"entry\": \"nivren_program\",\n  \"instructions\": {},\n  \"object\": \"program.{}\"\n}}\n",
+        chunk.code.len(),
+        extension
+    );
+    let metadata_path = directory.join("program.json");
+    if let Err(error) = write_atomic(&metadata_path, metadata.as_bytes()) {
+        eprintln!("error: cannot write {}: {error}", metadata_path.display());
+        return ExitCode::from(73);
+    }
+    println!("aot {}", program_object.display());
+    println!("aot {}", program_bundle.display());
     let mut emitted = 0usize;
     for instruction in &chunk.code {
         let nivren::bytecode::Op::MakeFunction { name, params, body } = &instruction.op else {
@@ -554,7 +1033,6 @@ fn build_aot(path: &str) -> ExitCode {
                 return ExitCode::from(70);
             }
         };
-        let extension = if cfg!(windows) { "obj" } else { "o" };
         let output = directory.join(format!("{name}.{extension}"));
         if let Err(error) = write_atomic(&output, &bytes) {
             eprintln!("error: cannot write {}: {error}", output.display());
@@ -563,10 +1041,7 @@ fn build_aot(path: &str) -> ExitCode {
         println!("aot {}", output.display());
         emitted += 1;
     }
-    if emitted == 0 {
-        eprintln!("error: no pure explicitly typed Int functions are eligible for native AOT");
-        return ExitCode::from(65);
-    }
+    println!("aot optimized-kernels {emitted}");
     ExitCode::SUCCESS
 }
 
@@ -594,11 +1069,11 @@ fn new_project(path: &str) -> ExitCode {
         fs::write(root.join("niv.toml"), manifest_source)?;
         fs::write(
             root.join("src/main.niv"),
-            "define main() gives Null {\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain()\n",
+            "define main\ngives Null\n{\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain with {}\n",
         )?;
         fs::write(
             root.join("tests/niv/main_test.niv"),
-            "define answer() gives Int { give 42 }\nassert(answer() == 42, \"answer\")\n",
+            "define answer\ngives Int\n{\n    give 42\n}\n\nassert(answer with {} == 42, \"answer\")\n",
         )?;
         Ok(())
     })();
@@ -649,7 +1124,7 @@ fn ship_project(path: &str) -> ExitCode {
     };
     let tests = manifest.root.join("tests/niv");
     if tests.exists() {
-        let tested = test_path(&tests.display().to_string(), None);
+        let tested = test_path(&tests.display().to_string(), None, None);
         if tested != ExitCode::SUCCESS {
             return tested;
         }
@@ -663,6 +1138,47 @@ fn ship_project(path: &str) -> ExitCode {
         return packaged;
     }
     build_standalone(path)
+}
+
+fn workspace_action(action: &str, path: &str) -> ExitCode {
+    let workspace = match nivren::workspace::Workspace::load(Path::new(path)) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    if !matches!(action, "check" | "build" | "test" | "bench" | "ship") {
+        eprintln!("error: workspace action must be check, build, test, bench, or ship");
+        return ExitCode::from(64);
+    }
+    for member in &workspace.members {
+        let member_path = member.root.display().to_string();
+        println!("workspace {action}: {}", member.name);
+        let result = match action {
+            "check" => check_project(&member_path, false),
+            "build" => build_project(&member_path),
+            "test" => {
+                let tests = member.root.join("tests/niv");
+                if tests.exists() {
+                    test_path(&tests.display().to_string(), None, None)
+                } else {
+                    check_project(&member_path, false)
+                }
+            }
+            "bench" => benchmark_path(&member_path, None),
+            "ship" => ship_project(&member_path),
+            _ => unreachable!(),
+        };
+        if result != ExitCode::SUCCESS {
+            return result;
+        }
+    }
+    println!(
+        "workspace {action}: {} member(s) passed",
+        workspace.members.len()
+    );
+    ExitCode::SUCCESS
 }
 
 fn package_project(path: &str) -> ExitCode {
@@ -751,6 +1267,22 @@ fn registry_search(query: &str, registry_path: &str) -> ExitCode {
         }
         Err(error) => {
             report(registry_path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn registry_set_yanked(name: &str, version: &str, registry: &str, yanked: bool) -> ExitCode {
+    match nivren::package::set_yanked(name, version, Path::new(registry), yanked) {
+        Ok(()) => {
+            println!(
+                "{} {name} {version}",
+                if yanked { "yanked" } else { "unyanked" }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(registry, "", &[error]);
             ExitCode::from(65)
         }
     }
@@ -916,6 +1448,123 @@ fn registry_envelope(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn registry_sign_admin(
+    operation: &str,
+    name: &str,
+    version: &str,
+    generation: &str,
+    issued: &str,
+    expires: &str,
+    reason_path: &str,
+    secret_path: &str,
+    output: &str,
+) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        let generation = generation
+            .parse::<u64>()
+            .map_err(|_| "invalid admin generation".to_string())?;
+        let issued_at = issued
+            .parse::<u64>()
+            .map_err(|_| "invalid admin issue time".to_string())?;
+        let expires_at = expires
+            .parse::<u64>()
+            .map_err(|_| "invalid admin expiry time".to_string())?;
+        let reason = fs::read_to_string(reason_path)
+            .map_err(|error| format!("cannot read admin reason: {error}"))?;
+        let secret = fs::read_to_string(secret_path)
+            .map_err(|error| format!("cannot read registry root secret: {error}"))?;
+        let secret = nivren::trust::parse_secret_key(&secret).map_err(|error| error.message)?;
+        let action = nivren::trust::sign_admin_action(
+            secret,
+            nivren::trust::RegistryAdminAction {
+                format: 1,
+                action: operation.into(),
+                package: name.into(),
+                version: version.into(),
+                generation,
+                issued_at,
+                expires_at,
+                reason: reason.trim().into(),
+                signature: String::new(),
+            },
+        )
+        .map_err(|error| error.message)?;
+        let encoded = serde_json::to_vec_pretty(&action)
+            .map_err(|error| format!("cannot encode admin action: {error}"))?;
+        write_atomic(Path::new(output), &encoded).map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(()) => {
+            println!("signed {output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn registry_verify_admin(document: &str, public: &str, now: &str, minimum: &str) -> ExitCode {
+    let result = (|| -> Result<nivren::trust::RegistryAdminAction, String> {
+        let action = serde_json::from_slice::<nivren::trust::RegistryAdminAction>(
+            &fs::read(document).map_err(|error| format!("cannot read admin action: {error}"))?,
+        )
+        .map_err(|error| format!("invalid admin action: {error}"))?;
+        let public = fs::read_to_string(public)
+            .map_err(|error| format!("cannot read registry root public key: {error}"))?;
+        let public = nivren::trust::parse_public_key(&public).map_err(|error| error.message)?;
+        let now = now
+            .parse::<u64>()
+            .map_err(|_| "invalid Unix time".to_string())?;
+        let minimum = minimum
+            .parse::<u64>()
+            .map_err(|_| "invalid minimum generation".to_string())?;
+        nivren::trust::verify_admin_action(&action, public, now, minimum)
+            .map_err(|error| error.message)?;
+        Ok(action)
+    })();
+    match result {
+        Ok(action) => {
+            println!(
+                "verified registry {} for {} {} generation {}",
+                action.action, action.package, action.version, action.generation
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn registry_recover_admin(registry: &str, now: &str, minimum: &str) -> ExitCode {
+    let result = now
+        .parse::<u64>()
+        .map_err(|_| NivError::new("invalid Unix time", 1, 1))
+        .and_then(|now| {
+            minimum
+                .parse::<u64>()
+                .map_err(|_| NivError::new("invalid minimum generation", 1, 1))
+                .map(|minimum| (now, minimum))
+        })
+        .and_then(|(now, minimum)| {
+            nivren::registry_server::recover_admin(Path::new(registry), now, minimum)
+        });
+    match result {
+        Ok(generation) => {
+            println!("recovered registry admin generation {generation}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            ExitCode::from(65)
+        }
+    }
+}
+
 fn disassemble_path(path: &str) -> ExitCode {
     let chunk = if is_bundle_path(Path::new(path)) {
         match fs::read(path)
@@ -1035,6 +1684,8 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
     let elapsed = started.elapsed();
     let metrics = interpreter.execution_metrics().unwrap_or_default();
     let jit = interpreter.jit_stats();
+    let native = interpreter.native_stats();
+    let heap = interpreter.heap_stats();
     if let Some(output) = output {
         let executable = if coverage {
             let mut lines = BTreeSet::new();
@@ -1056,6 +1707,43 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
             "line_hits": metrics.line_hits,
             "operation_hits": metrics.operation_hits,
             "jit": { "compilations": jit.compilations, "executions": jit.executions },
+            "execution": {
+                "instructions": metrics.instructions,
+                "operation_hits": metrics.operation_hits,
+                "line_hits": metrics.line_hits,
+            },
+            "memory": {
+                "allocation_work_bytes": metrics.allocation_work_bytes,
+                "plan_allocations": metrics.plan_allocations,
+                "heap": {
+                    "tracked_environments": heap.tracked_environments,
+                    "live_environments": heap.live_environments,
+                    "collections": heap.collections,
+                    "minor_collections": heap.minor_collections,
+                    "major_collections": heap.major_collections,
+                    "concurrent_marking": heap.concurrent_marking,
+                },
+            },
+            "effects": {
+                "perform_boundaries": metrics.perform_boundaries,
+                "count": metrics.effect_sequence.len(),
+                "sequence": metrics.effect_sequence,
+            },
+            "async_tasks": {
+                "spawns": metrics.task_spawns,
+                "blocking_submissions": metrics.blocking_task_submissions,
+                "joins": metrics.task_joins,
+                "cancellations": metrics.task_cancellations,
+                "event_loop_waits": metrics.event_loop_waits,
+            },
+            "engines": {
+                "jit": { "compilations": jit.compilations, "executions": jit.executions },
+                "native": {
+                    "compilations": native.compilations,
+                    "executions": native.executions,
+                    "fallbacks": native.fallbacks,
+                },
+            },
             "coverage": if coverage { Some(serde_json::json!({
                 "executable": executable.len(),
                 "hit": executable.len().saturating_sub(missed.len()),
@@ -1115,7 +1803,115 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
             "  native tier: {} compilation(s), {} execution(s)",
             jit.compilations, jit.executions
         );
+        println!(
+            "  memory: {} allocation-work byte(s), {} plan allocation(s), {} live environment(s)",
+            metrics.allocation_work_bytes, metrics.plan_allocations, heap.live_environments
+        );
+        println!(
+            "  effects: {} perform boundary/boundaries, {} observed effect(s)",
+            metrics.perform_boundaries,
+            metrics.effect_sequence.len()
+        );
+        println!(
+            "  async: {} spawn(s), {} blocking submission(s), {} join(s), {} cancellation(s), {} event-loop wait(s)",
+            metrics.task_spawns,
+            metrics.blocking_task_submissions,
+            metrics.task_joins,
+            metrics.task_cancellations,
+            metrics.event_loop_waits
+        );
     }
+    ExitCode::SUCCESS
+}
+
+fn benchmark_path(path: &str, output: Option<&str>) -> ExitCode {
+    const WARMUPS: usize = 2;
+    const SAMPLES: usize = 15;
+    let (manifest, chunk) = if is_bundle_path(Path::new(path)) {
+        match fs::read(path)
+            .map_err(|error| NivError::new(error.to_string(), 1, 1))
+            .and_then(|bytes| nivren::bundle::decode(&bytes))
+        {
+            Ok(chunk) => (None, chunk),
+            Err(error) => {
+                report(path, "", &[error]);
+                return ExitCode::from(65);
+            }
+        }
+    } else if is_project_path(Path::new(path)) {
+        match compile_project(Path::new(path)) {
+            Ok((manifest, chunk)) => (Some(manifest), chunk),
+            Err(errors) => {
+                report(path, "", &errors);
+                return ExitCode::from(65);
+            }
+        }
+    } else {
+        match compile_file(Path::new(path)) {
+            Ok(chunk) => (None, chunk),
+            Err(errors) => {
+                let source = fs::read_to_string(path).unwrap_or_default();
+                report(path, &source, &errors);
+                return ExitCode::from(65);
+            }
+        }
+    };
+
+    for _ in 0..WARMUPS {
+        let mut interpreter = manifest
+            .as_ref()
+            .map_or_else(Interpreter::new, project_interpreter);
+        if let Err(error) = interpreter.run_bytecode(&chunk) {
+            report(path, "", &[error]);
+            return ExitCode::from(70);
+        }
+    }
+
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let mut interpreter = manifest
+            .as_ref()
+            .map_or_else(Interpreter::new, project_interpreter);
+        let started = Instant::now();
+        if let Err(error) = interpreter.run_bytecode(&chunk) {
+            report(path, "", &[error]);
+            return ExitCode::from(70);
+        }
+        samples.push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    }
+    samples.sort_unstable();
+    let minimum = samples[0];
+    let median = samples[SAMPLES / 2];
+    let p95 = samples[(SAMPLES * 95).div_ceil(100) - 1];
+    let report = serde_json::json!({
+        "schema": "org.nivren.benchmark.v1",
+        "path": path,
+        "engine": "vm",
+        "warmups": WARMUPS,
+        "samples": SAMPLES,
+        "minimum_nanoseconds": minimum,
+        "median_nanoseconds": median,
+        "p95_nanoseconds": p95,
+    });
+    if let Some(output) = output {
+        let bytes = serde_json::to_vec_pretty(&report).expect("benchmark JSON is representable");
+        return match write_atomic(Path::new(output), &bytes) {
+            Ok(()) => {
+                println!("wrote {output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: cannot write {output}: {error}");
+                ExitCode::from(73)
+            }
+        };
+    }
+    println!(
+        "bench {path}: median {:.3} ms, p95 {:.3} ms, minimum {:.3} ms ({SAMPLES} samples)",
+        median as f64 / 1_000_000.0,
+        p95 as f64 / 1_000_000.0,
+        minimum as f64 / 1_000_000.0,
+    );
     ExitCode::SUCCESS
 }
 
@@ -1448,6 +2244,59 @@ fn inspect_path(path: &str, output: &str) -> ExitCode {
     }
 }
 
+fn explain_path(path: &str, optimized: bool) -> ExitCode {
+    let output = if is_project_path(Path::new(path)) {
+        let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                report(path, "", &[error]);
+                return ExitCode::from(65);
+            }
+        };
+        let program = match nivren::modules::load_project(&manifest.root, &manifest.entry_path()) {
+            Ok(program) => program,
+            Err(errors) => {
+                report(path, "", &errors);
+                return ExitCode::from(65);
+            }
+        };
+        if let Err(errors) = nivren::typecheck::check(&program) {
+            report(path, "", &errors);
+            return ExitCode::from(65);
+        }
+        let optimization = if optimized {
+            nivren::intent::Optimization::Enabled
+        } else {
+            nivren::intent::Optimization::Disabled
+        };
+        let graph = nivren::intent::analyze(&program, optimization);
+        if let Err(message) = graph.validate() {
+            report(path, "", &[NivError::new(message, 1, 1)]);
+            return ExitCode::from(70);
+        }
+        graph.to_json()
+    } else {
+        let source = match read_source(path) {
+            Ok(source) => source,
+            Err(code) => return code,
+        };
+        match nivren::compiler::Compiler::new().explain(&source, optimized) {
+            Ok(output) => output,
+            Err(errors) => {
+                for error in errors {
+                    eprintln!(
+                        "{path}:{}:{}: error: {}",
+                        error.line, error.column, error.message
+                    );
+                }
+                return ExitCode::from(65);
+            }
+        }
+    };
+    print!("{output}");
+    ExitCode::SUCCESS
+}
+
 fn executable_lines(chunk: &nivren::bytecode::Chunk, lines: &mut BTreeSet<usize>) {
     for instruction in &chunk.code {
         lines.insert(instruction.span.line);
@@ -1600,11 +2449,11 @@ fn check_project(path: &str, write_lock: bool) -> ExitCode {
                     return ExitCode::from(65);
                 }
             };
-            if fs::read_to_string(&lockfile).ok().as_deref() != Some(expected_lock.as_str()) {
-                if let Err(error) = fs::write(&lockfile, expected_lock) {
-                    eprintln!("error: cannot write {}: {error}", lockfile.display());
-                    return ExitCode::from(73);
-                }
+            if fs::read_to_string(&lockfile).ok().as_deref() != Some(expected_lock.as_str())
+                && let Err(error) = fs::write(&lockfile, expected_lock)
+            {
+                eprintln!("error: cannot write {}: {error}", lockfile.display());
+                return ExitCode::from(73);
             }
             println!(
                 "fresh {} {} ({})",
@@ -1689,7 +2538,25 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-fn test_path(path: &str, snapshots: Option<bool>) -> ExitCode {
+fn test_path_with_time(path: &str, seconds: &str) -> ExitCode {
+    match seconds.parse::<f64>() {
+        Ok(seconds) => test_path(path, None, Some(seconds)),
+        Err(_) => {
+            eprintln!("error: deterministic test time must be a finite nonnegative number");
+            ExitCode::from(64)
+        }
+    }
+}
+
+fn test_path(path: &str, snapshots: Option<bool>, deterministic_time: Option<f64>) -> ExitCode {
+    let _clock = match deterministic_time.map(nivren::runtime::deterministic_clock) {
+        Some(Ok(clock)) => Some(clock),
+        Some(Err(error)) => {
+            report(path, "", &[error]);
+            return ExitCode::from(64);
+        }
+        None => None,
+    };
     let manifest = match enclosing_manifest(Path::new(path)) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -1954,8 +2821,18 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages, authority, and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv cache <list|prune> [project]\n  niv authority <lock|check|report> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry sign-admin <yank|unyank> <name> <version> <generation> <issued> <expires> <reason-file> <root-secret-file> <output>\n  niv registry verify-admin <action> <root-key> <unix-time> <minimum-generation>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
+    );
+    println!(
+        "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>"
+    );
+    println!(
+        "\nTest profiles:\n  niv test --property [path]\n  niv test --compat [path]\n  niv test --fuzz-smoke [path]\n  niv test --time <unix-seconds> [path]"
+    );
+    println!("\nDependency cache:\n  niv cache list [project]\n  niv cache prune [project]");
+    println!(
+        "\nRegistry recovery:\n  niv registry recover-admin <registry> <unix-time> <minimum-generation>"
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");
 }

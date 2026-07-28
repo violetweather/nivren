@@ -9,7 +9,7 @@ use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
-pub const BYTECODE_VERSION: u16 = 5;
+pub const BYTECODE_VERSION: u16 = 7;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chunk {
@@ -38,6 +38,9 @@ pub enum Op {
     Jump(usize),
     JumpIfFalse(usize),
     Call(usize),
+    /// A call fused with its visible `perform` boundary. This has the same
+    /// stack behavior as `Call` without a second dispatch in effect-heavy code.
+    PerformCall(usize),
     MakeArray(usize),
     Index,
     Coalesce(usize),
@@ -55,6 +58,7 @@ pub enum Op {
     DefineRecord {
         name: String,
         fields: Vec<(String, String)>,
+        derives: Vec<String>,
     },
     DefineEnum {
         name: String,
@@ -84,6 +88,12 @@ pub enum Op {
         type_name: String,
         mappings: Vec<(String, String)>,
     },
+    /// Marks an explicitly materialized immutable plan while leaving its typed
+    /// payload at the top of the stack.
+    Prepare(String),
+    /// Marks the visible execution boundary while leaving the result at the
+    /// top of the stack.
+    Perform,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,6 +173,23 @@ impl Compiler {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Prepare {
+                name,
+                plan_type,
+                initializer,
+                span,
+                ..
+            } => {
+                self.expression(initializer);
+                self.emit(Op::Prepare(plan_type.clone()), *span);
+                self.emit(
+                    Op::Define {
+                        name: name.clone(),
+                        mutable: false,
+                    },
+                    *span,
+                );
+            }
             Stmt::Let {
                 name,
                 mutable,
@@ -296,7 +323,11 @@ impl Compiler {
                 self.emit(Op::Return, *span);
             }
             Stmt::Record {
-                name, fields, span, ..
+                name,
+                fields,
+                derives,
+                span,
+                ..
             } => {
                 self.emit(
                     Op::DefineRecord {
@@ -305,6 +336,7 @@ impl Compiler {
                             .iter()
                             .map(|field| (field.name.clone(), schema_name(&field.ty)))
                             .collect(),
+                        derives: derives.clone(),
                     },
                     *span,
                 );
@@ -422,7 +454,7 @@ impl Compiler {
                     self.patch(jump, self.code.len());
                 }
             }
-            Expr::Call(callee, arguments, span) => {
+            Expr::Call(callee, arguments, _, span) => {
                 self.expression(callee);
                 for argument in arguments {
                     self.expression(argument);
@@ -450,6 +482,22 @@ impl Compiler {
             Expr::Propagate(value, span) => {
                 self.expression(value);
                 self.emit(Op::Propagate, *span);
+            }
+            Expr::Perform(value, span) => match value.as_ref() {
+                Expr::Call(callee, arguments, _, _) => {
+                    self.expression(callee);
+                    for argument in arguments {
+                        self.expression(argument);
+                    }
+                    self.emit(Op::PerformCall(arguments.len()), *span);
+                }
+                _ => {
+                    self.expression(value);
+                    self.emit(Op::Perform, *span);
+                }
+            },
+            Expr::Through(input, stage, span) => {
+                self.expression(&crate::ast::lower_through(input, stage, *span));
             }
             Expr::Get(object, name, span) => {
                 self.expression(object);
@@ -656,7 +704,7 @@ fn stack_effect(op: &Op) -> isize {
         | Op::DefineModule { .. } => 1,
         Op::Pop => -1,
         Op::Binary(_) | Op::Index => -1,
-        Op::Call(arguments) => -(*arguments as isize),
+        Op::Call(arguments) | Op::PerformCall(arguments) => -(*arguments as isize),
         Op::MakeArray(values) => 1 - (*values as isize),
         Op::Store(_)
         | Op::Define { .. }
@@ -673,6 +721,7 @@ fn stack_effect(op: &Op) -> isize {
         | Op::Match(_)
         | Op::Iterate { .. }
         | Op::Using { .. } => 0,
+        Op::Prepare(_) | Op::Perform => 0,
     }
 }
 
@@ -696,6 +745,7 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Jump(_) => "jump",
             Op::JumpIfFalse(_) => "jump_if_false",
             Op::Call(_) => "call",
+            Op::PerformCall(_) => "perform_call",
             Op::MakeArray(_) => "make_array",
             Op::Index => "index",
             Op::Coalesce(_) => "coalesce",
@@ -714,6 +764,8 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Using { .. } => "using",
             Op::DefineProtocol { .. } => "define_protocol",
             Op::AdoptProtocol { .. } => "adopt_protocol",
+            Op::Prepare(_) => "prepare",
+            Op::Perform => "perform",
         }
     }
     fn walk(chunk: &Chunk, prefix: &str, mappings: &mut Vec<serde_json::Value>) {
@@ -810,7 +862,8 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
 
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
-        Stmt::Let { span, .. }
+        Stmt::Prepare { span, .. }
+        | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }

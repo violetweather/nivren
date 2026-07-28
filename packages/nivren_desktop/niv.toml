@@ -1,0 +1,4 @@
+[package]
+name = "nivren_desktop"
+version = "1.0.0"
+entry = "src/main.niv"

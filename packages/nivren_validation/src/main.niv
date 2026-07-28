@@ -1,18 +1,47 @@
-shape Violation { field: String, message: String }
+shape Violation holds {
+    field is String
+    message is String
+} with Json, Compare, Display, Validate
 
-define required(field: String, value: String) gives Result<String, Violation> {
-    when value != "" { give ok(value) }
-    give err(Violation(field, "is required"))
+define required
+takes {
+    field is String
+    value is String
+}
+gives String or Violation
+{
+    when value != "" {
+        give ok(value)
+    }
+    give err(Violation with { field set field message set "is required" })
 }
 
-define positive(field: String, value: Int) gives Result<Int, Violation> {
-    when value > 0 { give ok(value) }
-    give err(Violation(field, "must be positive"))
+define positive
+takes {
+    field is String
+    value is Int
+}
+gives Int or Violation
+{
+    when value > 0 {
+        give ok(value)
+    }
+    give err(Violation with { field set field message set "must be positive" })
 }
 
-define range(field: String, value: Int, minimum: Int, maximum: Int) gives Result<Int, Violation> {
-    when value >= minimum and value <= maximum { give ok(value) }
-    give err(Violation(field, "is outside the allowed range"))
+define range
+takes {
+    field is String
+    value is Int
+    minimum is Int
+    maximum is Int
+}
+gives Int or Violation
+{
+    when value >= minimum and value <= maximum {
+        give ok(value)
+    }
+    give err(Violation with { field set field message set "is outside the allowed range" })
 }
 
 expose { Violation, required, positive, range }

@@ -1,441 +1,533 @@
-choice Response {
-    Text(String),
-    Error(String),
-    Integer(Int),
-    Boolean(Bool),
-    Double(Float),
-    BigNumber(BigInt),
-    Bulk(Bytes),
-    BlobError(Bytes),
-    Verbatim(Bytes),
-    Array([Response]),
-    Map([[Response]]),
-    Set([Response]),
-    Push([Response]),
-    Null
+choice Response holds {
+    case Text carries String
+    case Error carries String
+    case Integer carries Int
+    case Boolean carries Bool
+    case Double carries Float
+    case BigNumber carries BigInt
+    case Bulk carries Bytes
+    case BlobError carries Bytes
+    case Verbatim carries Bytes
+    case Array carries [Response]
+    case Map carries [[Response]]
+    case Set carries [Response]
+    case Push carries [Response]
+    case Null
 }
 
-choice Connection {
-    Plain(TcpStream),
-    Secure(TlsStream)
+choice Connection holds {
+    case Plain carries TcpStream
+    case Secure carries TlsStream
 }
 
-shape Pool {
-    idle: [Connection],
-    maximum: Int
+shape Pool holds {
+    idle is [Connection]
+    maximum is Int
 }
 
-shape Lease {
-    connection: Connection,
-    pool: Pool
+shape Lease holds {
+    connection is Connection
+    pool is Pool
 }
 
-shape Redirect {
-    kind: String,
-    slot: Int,
-    host: String,
-    port: Int
+shape Redirect holds {
+    kind is String
+    slot is Int
+    host is String
+    port is Int
 }
 
-shape Client {
-    connection: Connection,
-    username: String,
-    password: String,
-    secure: Bool,
-    tls_options: Map<String, String>,
-    timeout: Float,
-    maximum: Int,
-    redirects: Int
+shape Client holds {
+    connection is Connection
+    username is String
+    password is String
+    secure is Bool
+    tls_options is Map<String, String>
+    timeout is Float
+    maximum is Int
+    redirects is Int
 }
 
-shape Outcome {
-    response: Response,
-    client: Client
+shape Outcome holds {
+    response is Response
+    client is Client
 }
 
-define tail(value: String) gives Result<String, String> {
-    keep bytes = std.bytes.from_string(value)
-    keep sliced = std.bytes.slice(bytes, 1, std.bytes.length(bytes)) or give
-    give std.bytes.to_string(sliced)
+define tail
+takes { value is String }
+gives String or String
+{
+    keep bytes set std.bytes.from_string with { value set value }
+    keep sliced set std.bytes.slice with { bytes set bytes offset set 1 length set std.bytes.length with { bytes set bytes } } or give
+    give std.bytes.to_string with { bytes set sliced }
 }
 
-define bulk(value: String) gives Result<String, String> {
-    keep length = std.bytes.length(std.bytes.from_string(value))
-    keep prefix = std.text.concat("$", std.int.format(length)) or give
-    keep header = std.text.concat(prefix, "\r\n") or give
-    keep body = std.text.concat(header, value) or give
-    give std.text.concat(body, "\r\n")
+define bulk
+takes { value is String }
+gives String or String
+{
+    keep length set std.bytes.length with { bytes set std.bytes.from_string with { value set value } }
+    keep prefix set std.text.concat with { left set "$" right set std.int.format with { value set length } } or give
+    keep header set std.text.concat with { left set prefix right set "\r\n" } or give
+    keep body set std.text.concat with { left set header right set value } or give
+    give std.text.concat with { left set body right set "\r\n" }
 }
 
-define command(parts: [String]) gives Result<String, String> {
-    when len(parts) == 0 { give err("Redis command requires at least one part") }
-    when len(parts) > 1024 { give err("Redis command exceeds 1024 parts") }
-    keep count = std.text.concat("*", std.int.format(len(parts))) or give
-    change encoded = std.text.concat(count, "\r\n") or give
+define command
+takes { parts is [String] }
+gives String or String
+{
+    when len with { value set parts } == 0 { give err with { problem set "Redis command requires at least one part" } }
+    when len with { value set parts } > 1024 { give err with { problem set "Redis command exceeds 1024 parts" } }
+    keep count set std.text.concat with { left set "*" right set std.int.format with { value set len with { value set parts } } } or give
+    change encoded set std.text.concat with { left set count right set "\r\n" } or give
     each part within parts {
-        keep item = bulk(part) or give
-        encoded = std.text.concat(encoded, item) or give
+        keep item set bulk with { value set part } or give
+        change encoded to std.text.concat with { left set encoded right set item } or give
     }
-    give ok(encoded)
+    give ok with { value set encoded }
 }
 
-define connect(host: String, port: Int, timeout: Float) gives Result<TcpStream, String> needs Network {
-    give std.net.connect(host, port, timeout)
+define connect
+takes { host is String, port is Int, timeout is Float }
+gives TcpStream or String
+needs Network
+{
+    give std.net.connect with { host set host port set port timeout set timeout }
 }
 
-define open(host: String, port: Int, timeout: Float) gives Result<Connection, String> needs Network {
-    keep stream = std.net.connect(host, port, timeout) or give
-    give ok(Connection.Plain(stream))
+define open
+takes { host is String, port is Int, timeout is Float }
+gives Connection or String
+needs Network
+{
+    keep stream set std.net.connect with { host set host port set port timeout set timeout } or give
+    give ok with { value set Connection.Plain(stream) }
 }
 
-define open_secure(host: String, port: Int, timeout: Float, options: Map<String, String>) gives Result<Connection, String> needs Network {
-    keep stream = std.net.tls_connect(host, port, timeout, options) or give
-    give ok(Connection.Secure(stream))
+define open_secure
+takes { host is String, port is Int, timeout is Float, options is Map<String, String> }
+gives Connection or String
+needs Network
+{
+    keep stream set std.net.tls_connect with { host set host port set port timeout set timeout options set options } or give
+    give ok with { value set Connection.Secure(stream) }
 }
 
-define write_connection(connection: Connection, encoded: String, timeout: Float) gives Result<Null, String> needs Network {
+define write_connection
+takes { connection is Connection, encoded is String, timeout is Float }
+gives Null or String
+needs Network
+{
     give choose connection {
-        Plain(stream) => std.net.write_ready(stream, encoded, 65536, timeout),
-        Secure(stream) => std.net.tls_write_ready(stream, encoded, 65536, timeout)
+        case Plain carries stream => std.net.write_ready with { stream set stream value set encoded chunk_size set 65536 timeout set timeout }
+        case Secure carries stream => std.net.tls_write_ready with { stream set stream value set encoded chunk_size set 65536 timeout set timeout }
     }
 }
 
-define read_line_connection(connection: Connection, maximum: Int, timeout: Float) gives Result<String, String> needs Network {
+define read_line_connection
+takes { connection is Connection, maximum is Int, timeout is Float }
+gives String or String
+needs Network
+{
     give choose connection {
-        Plain(stream) => std.net.read_line(stream, maximum, timeout),
-        Secure(stream) => std.net.tls_read_line(stream, maximum, timeout)
+        case Plain carries stream => std.net.read_line with { stream set stream maximum set maximum timeout set timeout }
+        case Secure carries stream => std.net.tls_read_line with { stream set stream maximum set maximum timeout set timeout }
     }
 }
 
-define read_exact_connection(connection: Connection, length: Int, timeout: Float) gives Result<Bytes, String> needs Network {
+define read_exact_connection
+takes { connection is Connection, length is Int, timeout is Float }
+gives Bytes or String
+needs Network
+{
     give choose connection {
-        Plain(stream) => std.net.read_exact_bytes(stream, length, timeout),
-        Secure(stream) => std.net.tls_read_exact_bytes(stream, length, timeout)
+        case Plain carries stream => std.net.read_exact_bytes with { stream set stream length set length timeout set timeout }
+        case Secure carries stream => std.net.tls_read_exact_bytes with { stream set stream length set length timeout set timeout }
     }
 }
 
-define close(connection: Connection) gives Result<Null, String> needs Network {
+define close
+takes { connection is Connection }
+gives Null or String
+needs Network
+{
     give choose connection {
-        Plain(stream) => std.net.close(stream),
-        Secure(stream) => std.net.tls_close(stream)
+        case Plain carries stream => std.net.close with { stream set stream }
+        case Secure carries stream => std.net.tls_close with { stream set stream }
     }
 }
 
-define send_chunk(stream: TcpStream, parts: [String], timeout: Float, maximum: Int) gives Result<String, String> needs Network {
-    keep encoded = command(parts) or give
-    std.net.write_ready(stream, encoded, 65536, timeout) or give
-    give std.net.read_ready(stream, maximum, timeout)
+define send_chunk
+takes { stream is TcpStream, parts is [String], timeout is Float, maximum is Int }
+gives String or String
+needs Network
+{
+    keep encoded set command with { parts set parts } or give
+    std.net.write_ready with { stream set stream value set encoded chunk_size set 65536 timeout set timeout } or give
+    give std.net.read_ready with { stream set stream maximum set maximum timeout set timeout }
 }
 
-define receive_nested(stream: TcpStream, timeout: Float, maximum: Int, depth: Int) gives Result<Response, String> needs Network {
-    when depth > 128 { give err("RESP nesting exceeds 128 levels") }
-    keep line = std.net.read_line(stream, 65536, timeout) or give
-    when len(line) == 0 { give err("empty RESP header") }
-    keep marker = line[0]
-    keep content = tail(line) or give
-    when marker == "+" { give ok(Response.Text(content)) }
-    when marker == "-" { give ok(Response.Error(content)) }
+define receive_nested
+takes { stream is TcpStream, timeout is Float, maximum is Int, depth is Int }
+gives Response or String
+needs Network
+{
+    when depth > 128 { give err with { problem set "RESP nesting exceeds 128 levels" } }
+    keep line set std.net.read_line with { stream set stream maximum set 65536 timeout set timeout } or give
+    when len with { value set line } == 0 { give err with { problem set "empty RESP header" } }
+    keep marker set line[0]
+    keep content set tail with { value set line } or give
+    when marker == "+" { give ok with { value set Response.Text(content) } }
+    when marker == "-" { give ok with { value set Response.Error(content) } }
     when marker == ":" {
-        keep number = std.int.parse(content) or give
-        give ok(Response.Integer(number))
+        keep number set std.int.parse with { source set content } or give
+        give ok with { value set Response.Integer(number) }
     }
     when marker == "$" {
-        keep length = std.int.parse(content) or give
-        when length == -1 { give ok(Response.Null) }
-        when length < 0 or length > maximum { give err("RESP bulk length exceeds configured limit") }
-        keep data = std.net.read_exact_bytes(stream, length, timeout) or give
-        keep ending = std.net.read_exact_bytes(stream, 2, timeout) or give
-        when ending != std.bytes.from_string("\r\n") { give err("RESP bulk value is missing its terminator") }
-        give ok(Response.Bulk(data))
+        keep length set std.int.parse with { source set content } or give
+        when length == -1 { give ok with { value set Response.Null } }
+        when length < 0 or length > maximum { give err with { problem set "RESP bulk length exceeds configured limit" } }
+        keep data set std.net.read_exact_bytes with { stream set stream length set length timeout set timeout } or give
+        keep ending set std.net.read_exact_bytes with { stream set stream length set 2 timeout set timeout } or give
+        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set "RESP bulk value is missing its terminator" } }
+        give ok with { value set Response.Bulk(data) }
     }
     when marker == "*" {
-        keep length = std.int.parse(content) or give
-        when length == -1 { give ok(Response.Null) }
+        keep length set std.int.parse with { source set content } or give
+        when length == -1 { give ok with { value set Response.Null } }
         when length < 0 or length > maximum or length > 1000000 {
-            give err("RESP array length exceeds configured limit")
+            give err with { problem set "RESP array length exceeds configured limit" }
         }
-        change values: [Response] = []
-        change index = 0
+        change values is [Response] set []
+        change index set 0
         repeat index < length {
-            keep value = receive_nested(stream, timeout, maximum, depth + 1) or give
-            values = append(values, value)
-            index = index + 1
+            keep value set receive_nested with { stream set stream timeout set timeout maximum set maximum depth set depth + 1 } or give
+            change values to append with { values set values value set value }
+            change index to index + 1
         }
-        give ok(Response.Array(values))
+        give ok with { value set Response.Array(values) }
     }
-    give err("unknown RESP response marker")
+    give err with { problem set "unknown RESP response marker" }
 }
 
-define receive(stream: TcpStream, timeout: Float, maximum: Int) gives Result<Response, String> needs Network {
+define receive
+takes { stream is TcpStream, timeout is Float, maximum is Int }
+gives Response or String
+needs Network
+{
     when maximum < 0 or maximum > 16777216 {
-        give err("RESP maximum must be between 0 and 16777216")
+        give err with { problem set "RESP maximum must be between 0 and 16777216" }
     }
-    give receive_nested(stream, timeout, maximum, 0)
+    give receive_nested with { stream set stream timeout set timeout maximum set maximum depth set 0 }
 }
 
-define receive_connection_nested(connection: Connection, timeout: Float, maximum: Int, depth: Int) gives Result<Response, String> needs Network {
-    when depth > 128 { give err("RESP nesting exceeds 128 levels") }
-    keep line = read_line_connection(connection, 65536, timeout) or give
-    when len(line) == 0 { give err("empty RESP header") }
-    keep marker = line[0]
-    keep content = tail(line) or give
-    when marker == "+" { give ok(Response.Text(content)) }
-    when marker == "-" { give ok(Response.Error(content)) }
+define receive_connection_nested
+takes { connection is Connection, timeout is Float, maximum is Int, depth is Int }
+gives Response or String
+needs Network
+{
+    when depth > 128 { give err with { problem set "RESP nesting exceeds 128 levels" } }
+    keep line set read_line_connection with { connection set connection maximum set 65536 timeout set timeout } or give
+    when len with { value set line } == 0 { give err with { problem set "empty RESP header" } }
+    keep marker set line[0]
+    keep content set tail with { value set line } or give
+    when marker == "+" { give ok with { value set Response.Text(content) } }
+    when marker == "-" { give ok with { value set Response.Error(content) } }
     when marker == ":" {
-        keep number = std.int.parse(content) or give
-        give ok(Response.Integer(number))
+        keep number set std.int.parse with { source set content } or give
+        give ok with { value set Response.Integer(number) }
     }
     when marker == "_" {
-        when content != "" { give err("RESP3 null must not contain a value") }
-        give ok(Response.Null)
+        when content != "" { give err with { problem set "RESP3 null must not contain a value" } }
+        give ok with { value set Response.Null }
     }
     when marker == "#" {
-        when content == "t" { give ok(Response.Boolean(yes)) }
-        when content == "f" { give ok(Response.Boolean(no)) }
-        give err("invalid RESP3 boolean")
+        when content == "t" { give ok with { value set Response.Boolean(yes) } }
+        when content == "f" { give ok with { value set Response.Boolean(no) } }
+        give err with { problem set "invalid RESP3 boolean" }
     }
     when marker == "," {
-        keep number = std.float.parse(content) or give
-        give ok(Response.Double(number))
+        keep number set std.float.parse with { source set content } or give
+        give ok with { value set Response.Double(number) }
     }
     when marker == "(" {
-        keep number = std.bigint.parse(content) or give
-        give ok(Response.BigNumber(number))
+        keep number set std.bigint.parse with { source set content } or give
+        give ok with { value set Response.BigNumber(number) }
     }
     when marker == "$" {
-        keep length = std.int.parse(content) or give
-        when length == -1 { give ok(Response.Null) }
-        when length < 0 or length > maximum { give err("RESP bulk length exceeds configured limit") }
-        keep data = read_exact_connection(connection, length, timeout) or give
-        keep ending = read_exact_connection(connection, 2, timeout) or give
-        when ending != std.bytes.from_string("\r\n") { give err("RESP bulk value is missing its terminator") }
-        give ok(Response.Bulk(data))
+        keep length set std.int.parse with { source set content } or give
+        when length == -1 { give ok with { value set Response.Null } }
+        when length < 0 or length > maximum { give err with { problem set "RESP bulk length exceeds configured limit" } }
+        keep data set read_exact_connection with { connection set connection length set length timeout set timeout } or give
+        keep ending set read_exact_connection with { connection set connection length set 2 timeout set timeout } or give
+        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set "RESP bulk value is missing its terminator" } }
+        give ok with { value set Response.Bulk(data) }
     }
     when marker == "!" or marker == "=" {
-        keep length = std.int.parse(content) or give
-        when length < 0 or length > maximum { give err("RESP3 blob length exceeds configured limit") }
-        keep data = read_exact_connection(connection, length, timeout) or give
-        keep ending = read_exact_connection(connection, 2, timeout) or give
-        when ending != std.bytes.from_string("\r\n") { give err("RESP3 blob value is missing its terminator") }
-        when marker == "!" { give ok(Response.BlobError(data)) }
-        give ok(Response.Verbatim(data))
+        keep length set std.int.parse with { source set content } or give
+        when length < 0 or length > maximum { give err with { problem set "RESP3 blob length exceeds configured limit" } }
+        keep data set read_exact_connection with { connection set connection length set length timeout set timeout } or give
+        keep ending set read_exact_connection with { connection set connection length set 2 timeout set timeout } or give
+        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set "RESP3 blob value is missing its terminator" } }
+        when marker == "!" { give ok with { value set Response.BlobError(data) } }
+        give ok with { value set Response.Verbatim(data) }
     }
     when marker == "*" {
-        keep length = std.int.parse(content) or give
-        when length == -1 { give ok(Response.Null) }
+        keep length set std.int.parse with { source set content } or give
+        when length == -1 { give ok with { value set Response.Null } }
         when length < 0 or length > maximum or length > 1000000 {
-            give err("RESP array length exceeds configured limit")
+            give err with { problem set "RESP array length exceeds configured limit" }
         }
-        change values: [Response] = []
-        change index = 0
+        change values is [Response] set []
+        change index set 0
         repeat index < length {
-            keep value = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
-            values = append(values, value)
-            index = index + 1
+            keep value set receive_connection_nested with { connection set connection timeout set timeout maximum set maximum depth set depth + 1 } or give
+            change values to append with { values set values value set value }
+            change index to index + 1
         }
-        give ok(Response.Array(values))
+        give ok with { value set Response.Array(values) }
     }
     when marker == "~" or marker == ">" {
-        keep length = std.int.parse(content) or give
+        keep length set std.int.parse with { source set content } or give
         when length < 0 or length > maximum or length > 1000000 {
-            give err("RESP3 collection length exceeds configured limit")
+            give err with { problem set "RESP3 collection length exceeds configured limit" }
         }
-        change values: [Response] = []
-        change index = 0
+        change values is [Response] set []
+        change index set 0
         repeat index < length {
-            keep value = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
-            values = append(values, value)
-            index = index + 1
+            keep value set receive_connection_nested with { connection set connection timeout set timeout maximum set maximum depth set depth + 1 } or give
+            change values to append with { values set values value set value }
+            change index to index + 1
         }
-        when marker == "~" { give ok(Response.Set(values)) }
-        give ok(Response.Push(values))
+        when marker == "~" { give ok with { value set Response.Set(values) } }
+        give ok with { value set Response.Push(values) }
     }
     when marker == "%" {
-        keep length = std.int.parse(content) or give
+        keep length set std.int.parse with { source set content } or give
         when length < 0 or length > maximum or length > 1000000 {
-            give err("RESP3 map length exceeds configured limit")
+            give err with { problem set "RESP3 map length exceeds configured limit" }
         }
-        change entries: [[Response]] = []
-        change index = 0
+        change entries is [[Response]] set []
+        change index set 0
         repeat index < length {
-            keep key = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
-            keep value = receive_connection_nested(connection, timeout, maximum, depth + 1) or give
-            entries = append(entries, [key, value])
-            index = index + 1
+            keep key set receive_connection_nested with { connection set connection timeout set timeout maximum set maximum depth set depth + 1 } or give
+            keep value set receive_connection_nested with { connection set connection timeout set timeout maximum set maximum depth set depth + 1 } or give
+            change entries to append with { values set entries value set [key, value] }
+            change index to index + 1
         }
-        give ok(Response.Map(entries))
+        give ok with { value set Response.Map(entries) }
     }
-    give err("unknown RESP response marker")
+    give err with { problem set "unknown RESP response marker" }
 }
 
-define receive_connection(connection: Connection, timeout: Float, maximum: Int) gives Result<Response, String> needs Network {
+define receive_connection
+takes { connection is Connection, timeout is Float, maximum is Int }
+gives Response or String
+needs Network
+{
     when maximum < 0 or maximum > 16777216 {
-        give err("RESP maximum must be between 0 and 16777216")
+        give err with { problem set "RESP maximum must be between 0 and 16777216" }
     }
-    give receive_connection_nested(connection, timeout, maximum, 0)
+    give receive_connection_nested with { connection set connection timeout set timeout maximum set maximum depth set 0 }
 }
 
-define auth_status(message: String) gives Result<Null, String> {
-    when message == "OK" { give ok(none) }
-    give err("Redis AUTH returned an unexpected status")
+define auth_status
+takes { message is String }
+gives Null or String
+{
+    when message == "OK" { give ok with { value set none } }
+    give err with { problem set "Redis AUTH returned an unexpected status" }
 }
 
-define authenticate(connection: Connection, username: String, password: String, timeout: Float, maximum: Int) gives Result<Null, String> needs Network {
-    change parts = ["AUTH", password]
+define authenticate
+takes { connection is Connection, username is String, password is String, timeout is Float, maximum is Int }
+gives Null or String
+needs Network
+{
+    change parts set ["AUTH", password]
     when username != "" { parts = ["AUTH", username, password] }
-    keep encoded = command(parts) or give
-    write_connection(connection, encoded, timeout) or give
-    keep response = receive_connection(connection, timeout, maximum) or give
+    keep encoded set command with { parts set parts } or give
+    write_connection with { connection set connection encoded set encoded timeout set timeout } or give
+    keep response set receive_connection with { connection set connection timeout set timeout maximum set maximum } or give
     give choose response {
-        Text(message) => auth_status(message),
-        Error(problem) => err(problem),
-        Integer(number) => err("Redis AUTH returned an unexpected integer"),
-        Boolean(value) => err("Redis AUTH returned an unexpected boolean"),
-        Double(number) => err("Redis AUTH returned an unexpected double"),
-        BigNumber(number) => err("Redis AUTH returned an unexpected big number"),
-        Bulk(data) => err("Redis AUTH returned an unexpected bulk value"),
-        BlobError(data) => err("Redis AUTH returned a blob error"),
-        Verbatim(data) => err("Redis AUTH returned an unexpected verbatim value"),
-        Array(values) => err("Redis AUTH returned an unexpected array"),
-        Map(entries) => err("Redis AUTH returned an unexpected map"),
-        Set(values) => err("Redis AUTH returned an unexpected set"),
-        Push(values) => err("Redis AUTH returned an unexpected push"),
-        Null => err("Redis AUTH returned null")
+        case Text carries message => auth_status with { message set message }
+        case Error carries problem => err with { problem set problem }
+        case Integer carries number => err with { problem set "Redis AUTH returned an unexpected integer" }
+        case Boolean carries value => err with { problem set "Redis AUTH returned an unexpected boolean" }
+        case Double carries number => err with { problem set "Redis AUTH returned an unexpected double" }
+        case BigNumber carries number => err with { problem set "Redis AUTH returned an unexpected big number" }
+        case Bulk carries data => err with { problem set "Redis AUTH returned an unexpected bulk value" }
+        case BlobError carries data => err with { problem set "Redis AUTH returned a blob error" }
+        case Verbatim carries data => err with { problem set "Redis AUTH returned an unexpected verbatim value" }
+        case Array carries values => err with { problem set "Redis AUTH returned an unexpected array" }
+        case Map carries entries => err with { problem set "Redis AUTH returned an unexpected map" }
+        case Set carries values => err with { problem set "Redis AUTH returned an unexpected set" }
+        case Push carries values => err with { problem set "Redis AUTH returned an unexpected push" }
+        case Null => err with { problem set "Redis AUTH returned null" }
     }
 }
 
-define pipeline(connection: Connection, commands: [[String]], timeout: Float, maximum: Int) gives Result<[Response], String> needs Network {
-    when len(commands) == 0 { give ok([]) }
-    when len(commands) > 4096 { give err("Redis pipeline exceeds 4096 commands") }
-    change encoded = ""
+define pipeline
+takes { connection is Connection, commands is [[String]], timeout is Float, maximum is Int }
+gives [Response] or String
+needs Network
+{
+    when len with { value set commands } == 0 { give ok with { value set [] } }
+    when len with { value set commands } > 4096 { give err with { problem set "Redis pipeline exceeds 4096 commands" } }
+    change encoded set ""
     each parts within commands {
-        keep frame = command(parts) or give
-        encoded = std.text.concat(encoded, frame) or give
+        keep frame set command with { parts set parts } or give
+        change encoded to std.text.concat with { left set encoded right set frame } or give
     }
-    write_connection(connection, encoded, timeout) or give
-    change responses: [Response] = []
-    change index = 0
-    repeat index < len(commands) {
-        keep response = receive_connection(connection, timeout, maximum) or give
-        responses = append(responses, response)
-        index = index + 1
+    write_connection with { connection set connection encoded set encoded timeout set timeout } or give
+    change responses is [Response] set []
+    change index set 0
+    repeat index < len with { value set commands } {
+        keep response set receive_connection with { connection set connection timeout set timeout maximum set maximum } or give
+        change responses to append with { values set responses value set response }
+        change index to index + 1
     }
-    give ok(responses)
+    give ok with { value set responses }
 }
 
-define pool(maximum: Int) gives Result<Pool, String> {
-    when maximum < 1 or maximum > 1024 { give err("Redis pool size must be from 1 through 1024") }
-    give ok(Pool([], maximum))
+define pool
+takes { maximum is Int }
+gives Pool or String
+{
+    when maximum < 1 or maximum > 1024 { give err with { problem set "Redis pool size must be from 1 through 1024" } }
+    give ok with { value set Pool([], maximum) }
 }
 
-define pool_add(pool_value: Pool, connection: Connection) gives Result<Pool, String> {
-    when len(pool_value.idle) >= pool_value.maximum { give err("Redis pool is full") }
-    give ok(Pool(append(pool_value.idle, connection), pool_value.maximum))
+define pool_add
+takes { pool_value is Pool, connection is Connection }
+gives Pool or String
+{
+    when len with { value set pool_value.idle } >= pool_value.maximum { give err with { problem set "Redis pool is full" } }
+    give ok with { value set Pool(append with { values set pool_value.idle value set connection }, pool_value.maximum) }
 }
 
-define pool_take(pool_value: Pool) gives Result<Lease, String> {
-    when len(pool_value.idle) == 0 { give err("Redis pool is empty") }
-    keep connection = pool_value.idle[0]
-    change remaining: [Connection] = []
-    change index = 1
-    repeat index < len(pool_value.idle) {
-        remaining = append(remaining, pool_value.idle[index])
-        index = index + 1
+define pool_take
+takes { pool_value is Pool }
+gives Lease or String
+{
+    when len with { value set pool_value.idle } == 0 { give err with { problem set "Redis pool is empty" } }
+    keep connection set pool_value.idle[0]
+    change remaining is [Connection] set []
+    change index set 1
+    repeat index < len with { value set pool_value.idle } {
+        change remaining to append with { values set remaining value set pool_value.idle[index] }
+        change index to index + 1
     }
-    give ok(Lease(connection, Pool(remaining, pool_value.maximum)))
+    give ok with { value set Lease(connection, Pool(remaining, pool_value.maximum)) }
 }
 
-define redirect(message: String) gives Result<Redirect, String> {
-    keep words = std.text.split(message, " ", 4) or give
-    when len(words) != 3 { give err("invalid Redis cluster redirect") }
-    keep kind = words[0]
-    when kind != "MOVED" and kind != "ASK" { give err("response is not a Redis cluster redirect") }
-    keep slot = std.int.parse(words[1]) or give
-    when slot < 0 or slot > 16383 { give err("Redis cluster slot must be from 0 through 16383") }
-    keep target = std.text.split_last(words[2], ":") or give
-    change host = target[0]
-    when len(host) >= 2 and host[0] == "[" and host[len(host) - 1] == "]" {
-        keep bytes = std.bytes.from_string(host)
-        keep inner = std.bytes.slice(bytes, 1, std.bytes.length(bytes) - 1) or give
-        host = std.bytes.to_string(inner) or give
+define redirect
+takes { message is String }
+gives Redirect or String
+{
+    keep words set std.text.split with { value set message separator set " " maximum set 4 } or give
+    when len with { value set words } != 3 { give err with { problem set "invalid Redis cluster redirect" } }
+    keep kind set words[0]
+    when kind != "MOVED" and kind != "ASK" { give err with { problem set "response is not a Redis cluster redirect" } }
+    keep slot set std.int.parse with { source set words[1] } or give
+    when slot < 0 or slot > 16383 { give err with { problem set "Redis cluster slot must be from 0 through 16383" } }
+    keep target set std.text.split_last with { value set words[2] separator set ":" } or give
+    change host set target[0]
+    when len with { value set host } >= 2 and host[0] == "[" and host[len with { value set host } - 1] == "]" {
+        keep bytes set std.bytes.from_string with { value set host }
+        keep inner set std.bytes.slice with { bytes set bytes offset set 1 length set std.bytes.length with { bytes set bytes } - 1 } or give
+        change host to std.bytes.to_string with { bytes set inner } or give
     }
-    when host == "" { give err("Redis cluster redirect host cannot be empty") }
-    keep port = std.int.parse(target[1]) or give
-    when port < 1 or port > 65535 { give err("Redis cluster redirect port must be from 1 through 65535") }
-    give ok(Redirect(kind, slot, host, port))
+    when host == "" { give err with { problem set "Redis cluster redirect host cannot be empty" } }
+    keep port set std.int.parse with { source set target[1] } or give
+    when port < 1 or port > 65535 { give err with { problem set "Redis cluster redirect port must be from 1 through 65535" } }
+    give ok with { value set Redirect(kind, slot, host, port) }
 }
 
-define open_configured(host: String, port: Int, username: String, password: String, secure: Bool, options: Map<String, String>, timeout: Float, maximum: Int) gives Result<Connection, String> needs Network {
-    change connection = open(host, port, timeout) or give
-    when secure { connection = open_secure(host, port, timeout, options) or give }
-    when password != "" { authenticate(connection, username, password, timeout, maximum) or give }
-    give ok(connection)
+define open_configured
+takes { host is String, port is Int, username is String, password is String, secure is Bool, options is Map<String, String>, timeout is Float, maximum is Int }
+gives Connection or String
+needs Network
+{
+    change connection set open with { host set host port set port timeout set timeout } or give
+    when secure { connection = open_secure with { host set host port set port timeout set timeout options set options } or give }
+    when password != "" { authenticate with { connection set connection username set username password set password timeout set timeout maximum set maximum } or give }
+    give ok with { value set connection }
 }
 
-define client(host: String, port: Int, username: String, password: String, secure: Bool, options: Map<String, String>, timeout: Float, maximum: Int, redirects: Int) gives Result<Client, String> needs Network {
-    when redirects < 0 or redirects > 32 { give err("Redis redirect limit must be from 0 through 32") }
-    when maximum < 1 or maximum > 16777216 { give err("RESP maximum must be from 1 through 16777216") }
-    keep connection = open_configured(host, port, username, password, secure, options, timeout, maximum) or give
-    give ok(Client(connection, username, password, secure, options, timeout, maximum, redirects))
+define client
+takes { host is String, port is Int, username is String, password is String, secure is Bool, options is Map<String, String>, timeout is Float, maximum is Int, redirects is Int }
+gives Client or String
+needs Network
+{
+    when redirects < 0 or redirects > 32 { give err with { problem set "Redis redirect limit must be from 0 through 32" } }
+    when maximum < 1 or maximum > 16777216 { give err with { problem set "RESP maximum must be from 1 through 16777216" } }
+    keep connection set open_configured with { host set host port set port username set username password set password secure set secure options set options timeout set timeout maximum set maximum } or give
+    give ok with { value set Client(connection, username, password, secure, options, timeout, maximum, redirects) }
 }
 
-define execute(client_value: Client, parts: [String]) gives Result<Outcome, String> needs Network {
-    change connection = client_value.connection
-    change attempts = 0
-    change asking = no
+define execute
+takes { client_value is Client, parts is [String] }
+gives Outcome or String
+needs Network
+{
+    change connection set client_value.connection
+    change attempts set 0
+    change asking set no
     repeat attempts <= client_value.redirects {
         when asking {
-            keep acknowledged = pipeline(connection, [["ASKING"]], client_value.timeout, client_value.maximum) or give
-            keep accepted = choose acknowledged[0] {
-                Text(message) => message == "OK",
-                Error(problem) => no,
-                Integer(number) => no,
-                Boolean(value) => no,
-                Double(number) => no,
-                BigNumber(number) => no,
-                Bulk(data) => no,
-                BlobError(data) => no,
-                Verbatim(data) => no,
-                Array(values) => no,
-                Map(entries) => no,
-                Set(values) => no,
-                Push(values) => no,
-                Null => no
+            keep acknowledged set pipeline with { connection set connection commands set [["ASKING"]] timeout set client_value.timeout maximum set client_value.maximum } or give
+            keep accepted set choose acknowledged[0] {
+                case Text carries message => message == "OK"
+                case Error carries problem => no
+                case Integer carries number => no
+                case Boolean carries value => no
+                case Double carries number => no
+                case BigNumber carries number => no
+                case Bulk carries data => no
+                case BlobError carries data => no
+                case Verbatim carries data => no
+                case Array carries values => no
+                case Map carries entries => no
+                case Set carries values => no
+                case Push carries values => no
+                case Null => no
             }
-            when !accepted { give err("Redis cluster ASKING was rejected") }
+            when !accepted { give err with { problem set "Redis cluster ASKING was rejected" } }
         }
-        keep responses = pipeline(connection, [parts], client_value.timeout, client_value.maximum) or give
-        keep response = responses[0]
-        keep problem = choose response {
-            Error(message) => message,
-            Text(message) => "",
-            Integer(number) => "",
-            Boolean(value) => "",
-            Double(number) => "",
-            BigNumber(number) => "",
-            Bulk(data) => "",
-            BlobError(data) => "",
-            Verbatim(data) => "",
-            Array(values) => "",
-            Map(entries) => "",
-            Set(values) => "",
-            Push(values) => "",
-            Null => ""
+        keep responses set pipeline with { connection set connection commands set [parts] timeout set client_value.timeout maximum set client_value.maximum } or give
+        keep response set responses[0]
+        keep problem set choose response {
+            case Error carries message => message
+            case Text carries message => ""
+            case Integer carries number => ""
+            case Boolean carries value => ""
+            case Double carries number => ""
+            case BigNumber carries number => ""
+            case Bulk carries data => ""
+            case BlobError carries data => ""
+            case Verbatim carries data => ""
+            case Array carries values => ""
+            case Map carries entries => ""
+            case Set carries values => ""
+            case Push carries values => ""
+            case Null => ""
         }
-        keep moved = std.text.starts_with(problem, "MOVED ")
-        keep asked = std.text.starts_with(problem, "ASK ")
+        keep moved set std.text.starts_with with { value set problem prefix set "MOVED " }
+        keep asked set std.text.starts_with with { value set problem prefix set "ASK " }
         when !moved and !asked {
-            keep next = Client(connection, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum, client_value.redirects)
-            give ok(Outcome(response, next))
+            keep next set Client(connection, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum, client_value.redirects)
+            give ok with { value set Outcome(response, next) }
         }
-        when attempts == client_value.redirects { give err("Redis cluster redirect limit exceeded") }
-        keep destination = redirect(problem) or give
-        close(connection)
-        connection = open_configured(destination.host, destination.port, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum) or give
-        asking = destination.kind == "ASK"
-        attempts = attempts + 1
+        when attempts == client_value.redirects { give err with { problem set "Redis cluster redirect limit exceeded" } }
+        keep destination set redirect with { message set problem } or give
+        close with { connection set connection }
+        change connection to open_configured with { host set destination.host port set destination.port username set client_value.username password set client_value.password secure set client_value.secure options set client_value.tls_options timeout set client_value.timeout maximum set client_value.maximum } or give
+        change asking to destination.kind == "ASK"
+        change attempts to attempts + 1
     }
-    give err("Redis cluster redirect limit exceeded")
+    give err with { problem set "Redis cluster redirect limit exceeded" }
 }
 
 expose {

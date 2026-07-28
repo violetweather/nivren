@@ -1,48 +1,60 @@
-shape Authorization { url: String, state: String, nonce: String, verifier: String }
-shape CoreClaims { issuer: String, audience: String, subject: String, expires_at: Int, issued_at: Int, nonce: String }
+shape Authorization holds { url is String state is String nonce is String verifier is String }
+shape CoreClaims holds { issuer is String audience is String subject is String expires_at is Int issued_at is Int nonce is String }
 
-define join(left: String, right: String) gives Result<String, String> {
-    give std.text.concat(left, right)
+define join
+takes { left is String right is String }
+gives String or String
+{ give std.text.concat with { left set left right set right } }
+
+define parameter
+takes { name is String value is String }
+gives String or String
+{
+    keep encoded set std.web.encode_component with { value set value } or give
+    keep prefix set join with { left set name right set "=" } or give
+    give join with { left set prefix right set encoded }
 }
 
-define parameter(name: String, value: String) gives Result<String, String> {
-    keep encoded = std.web.encode_component(value) or give
-    keep prefix = join(name, "=") or give
-    give join(prefix, encoded)
-}
-
-define pkce_challenge(verifier: String) gives Result<String, String> {
+define pkce_challenge
+takes { verifier is String }
+gives String or String
+{
     when len(verifier) < 43 or len(verifier) > 128 { give err("PKCE verifier must contain 43 through 128 characters") }
-    keep encoded = std.web.encode_component(verifier) or give
+    keep encoded set std.web.encode_component with { value set verifier } or give
     when encoded != verifier { give err("PKCE verifier must use only RFC 3986 unreserved characters") }
-    keep digest = std.crypto.sha256(std.bytes.from_string(verifier)) or give
-    give std.encoding.base64url(digest)
+    keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set verifier } } or give
+    give std.encoding.base64url with { bytes set digest }
 }
 
-define authorization_url(endpoint: String, client_id: String, redirect_uri: String, scope: String, state: String, nonce: String, verifier: String) gives Result<Authorization, String> {
-    when !std.text.starts_with(endpoint, "https://") { give err("OIDC authorization endpoint must use HTTPS") }
-    when len(std.text.split(endpoint, "?", 2) or give) != 1 { give err("OIDC authorization endpoint must not contain a query") }
+define authorization_url
+takes { endpoint is String client_id is String redirect_uri is String scope is String state is String nonce is String verifier is String }
+gives Authorization or String
+{
+    when !std.text.starts_with with { value set endpoint prefix set "https://" } { give err("OIDC authorization endpoint must use HTTPS") }
+    when len(std.text.split with { value set endpoint separator set "?" maximum set 2 } or give) != 1 { give err("OIDC authorization endpoint must not contain a query") }
     when client_id == "" or redirect_uri == "" or scope == "" { give err("OIDC client, redirect URI, and scope must not be empty") }
     when len(state) < 16 or len(state) > 256 or len(nonce) < 16 or len(nonce) > 256 { give err("OIDC state and nonce must each contain 16 through 256 characters") }
-    keep challenge = pkce_challenge(verifier) or give
-    change url = join(endpoint, "?response_type=code") or give
-    url = join(url, "&") or give
-    url = join(url, parameter("client_id", client_id) or give) or give
-    url = join(url, "&") or give
-    url = join(url, parameter("redirect_uri", redirect_uri) or give) or give
-    url = join(url, "&") or give
-    url = join(url, parameter("scope", scope) or give) or give
-    url = join(url, "&") or give
-    url = join(url, parameter("state", state) or give) or give
-    url = join(url, "&") or give
-    url = join(url, parameter("nonce", nonce) or give) or give
-    url = join(url, "&") or give
-    url = join(url, parameter("code_challenge", challenge) or give) or give
-    url = join(url, "&code_challenge_method=S256") or give
+    keep challenge set pkce_challenge with { verifier set verifier } or give
+    change url set join with { left set endpoint right set "?response_type=code" } or give
+    each item within [
+        parameter with { name set "client_id" value set client_id } or give,
+        parameter with { name set "redirect_uri" value set redirect_uri } or give,
+        parameter with { name set "scope" value set scope } or give,
+        parameter with { name set "state" value set state } or give,
+        parameter with { name set "nonce" value set nonce } or give,
+        parameter with { name set "code_challenge" value set challenge } or give,
+        "code_challenge_method=S256"
+    ] {
+        change url to join with { left set url right set "&" } or give
+        change url to join with { left set url right set item } or give
+    }
     give ok(Authorization(url, state, nonce, verifier))
 }
 
-define validate_claims(value: CoreClaims, expected_issuer: String, expected_audience: String, expected_nonce: String, now: Int, clock_skew: Int) gives Result<CoreClaims, String> {
+define validate_claims
+takes { value is CoreClaims expected_issuer is String expected_audience is String expected_nonce is String now is Int clock_skew is Int }
+gives CoreClaims or String
+{
     when clock_skew < 0 or clock_skew > 300 { give err("OIDC clock skew must be 0 through 300 seconds") }
     when value.issuer != expected_issuer { give err("OIDC issuer does not match") }
     when value.audience != expected_audience { give err("OIDC audience does not match") }
@@ -53,9 +65,12 @@ define validate_claims(value: CoreClaims, expected_issuer: String, expected_audi
     give ok(value)
 }
 
-define validate_id_claims(payload_json: String, expected_issuer: String, expected_audience: String, expected_nonce: String, now: Int, clock_skew: Int) gives Result<CoreClaims, String> {
-    keep value = std.json.decode(CoreClaims, payload_json) or give
-    give validate_claims(value, expected_issuer, expected_audience, expected_nonce, now, clock_skew)
+define validate_id_claims
+takes { payload_json is String expected_issuer is String expected_audience is String expected_nonce is String now is Int clock_skew is Int }
+gives CoreClaims or String
+{
+    keep value set std.json.decode with { schema set CoreClaims source set payload_json } or give
+    give validate_claims with { value set value expected_issuer set expected_issuer expected_audience set expected_audience expected_nonce set expected_nonce now set now clock_skew set clock_skew }
 }
 
 expose { Authorization, CoreClaims, pkce_challenge, authorization_url, validate_claims, validate_id_claims }

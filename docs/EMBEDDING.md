@@ -1,6 +1,6 @@
 # Embedding Nivren
 
-Nivren ships `nivren.h` plus shared and static libraries on every tier-one native release. ABI version 2 preserves the synchronous UTF-8 compiler/run surface and adds an event-loop wake bridge for asynchronous execution.
+Nivren ships `nivren.h` plus shared and static libraries on every tier-one native release. ABI version 3 preserves the existing UTF-8 compiler/run surface and adds complete-program native execution without VM fallback.
 
 ## Schema-driven C and C++ views
 
@@ -24,9 +24,11 @@ Generated headers are C11 and C++17 compatible, deterministic for the same check
 
 `nivren_check_utf8`, `nivren_format_utf8`, `nivren_compile_utf8`, and `nivren_run_utf8` copy no caller input after returning. Results are owned `NivrenBuffer` values and must be released exactly once with `nivren_buffer_free`.
 
+`nivren_run_native_utf8` checks and compiles the same source, then executes every verified bytecode construct through Cranelift native control. Unsupported compilation is a checked status-1 result; it never redirects to `nivren_run_utf8`. The direct integer JIT remains an optimized kernel tier inside native execution.
+
 `nivren_run_host_utf8` installs a synchronous host callback for `std.host.invoke`, `std.host.open`, `std.host.call`, and `std.host.close`. Nivren copies a callback response before invoking its paired host free callback. Long-lived native identifiers remain opaque inside `NativeHandle` and are deterministically released by `using`.
 
-Nivren programs can load a C dynamic library directly with `std.native.open`. `NativeLibrary` owns the loader handle, keeps every resolved symbol scoped to one call, and is deterministically unloaded by `using` or `std.native.close`. Edition 3 exposes finite all-`int64_t` and all-`double` signatures of zero through six arguments plus a fixed pointer/length buffer ABI. `call_buffer` lends immutable input and initialized bounded output only for the duration of the call, validates the returned length, and copies out owned `Bytes`. The operation is capability-gated and deliberately trusts that the library export matches the selected ABI; generated shape/choice views remain the inspectable typed schema layer.
+Nivren programs can load a C dynamic library directly with `std.native.open`. `NativeLibrary` owns the loader handle, keeps every resolved symbol scoped to one call, and is deterministically unloaded by `using` or `std.native.close`. Edition 4 exposes finite all-`int64_t` and all-`double` signatures of zero through six arguments plus a fixed pointer/length buffer ABI. `call_buffer` lends immutable input and initialized bounded output only for the duration of the call, validates the returned length, and copies out owned `Bytes`. The operation is capability-gated and deliberately trusts that the library export matches the selected ABI; generated shape/choice views remain the inspectable typed schema layer.
 
 ## Async execution and wakeup
 
@@ -49,4 +51,4 @@ This bridge is deliberately small: it integrates Nivren execution with an existi
 
 ## Status and compatibility
 
-`nivren_abi_version()` returns `2`. Status `0` is success, `1` is a checked language/runtime error, `2` is invalid host input, and `3` is a caught internal panic. New ABI versions add symbols without changing the layout or ownership of existing versioned contracts; consumers should feature-detect the reported version before calling newer symbols.
+`nivren_abi_version()` returns `3`. Status `0` is success, `1` is a checked language/runtime error, `2` is invalid host input, and `3` is a caught internal panic. New ABI versions add symbols without changing the layout or ownership of existing versioned contracts; consumers should feature-detect the reported version before calling newer symbols.

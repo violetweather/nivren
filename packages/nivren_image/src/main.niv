@@ -1,77 +1,92 @@
-shape Image { width: Int, height: Int, pixels: Bytes }
-shape Token { text: String, next: Int }
+shape Image holds { width is Int height is Int pixels is Bytes }
+shape Token holds { text is String next is Int }
 
-define whitespace(value: Int) gives Bool {
+define whitespace
+takes { value is Int }
+gives Bool
+{
     give value == 9 or value == 10 or value == 13 or value == 32
 }
 
-define next_token(source: Bytes, offset: Int) gives Result<Token, String> {
-    change index = offset
-    change skipping = yes
-    repeat skipping and index < std.bytes.length(source) {
-        keep value = std.bytes.get(source, index) or give
-        when whitespace(value) {
-            index = index + 1
+define next_token
+takes { source is Bytes offset is Int }
+gives Token or String
+{
+    change index set offset
+    change skipping set yes
+    repeat skipping and index < std.bytes.length with { bytes set source } {
+        keep value set std.bytes.get with { bytes set source index set index } or give
+        when whitespace with { value set value } {
+            change index to index + 1
         } otherwise when value == 35 {
-            repeat index < std.bytes.length(source) and (std.bytes.get(source, index) or give) != 10 {
-                index = index + 1
+            repeat index < std.bytes.length with { bytes set source } and (std.bytes.get with { bytes set source index set index } or give) != 10 {
+                change index to index + 1
             }
         } otherwise {
-            skipping = no
+            change skipping to no
         }
     }
-    when index >= std.bytes.length(source) { give err("PPM header ended before its fields were complete") }
-    change values: [Int] = []
-    repeat index < std.bytes.length(source) {
-        keep value = std.bytes.get(source, index) or give
-        when whitespace(value) or value == 35 {
-            keep token_bytes = std.bytes.from_values(values) or give
-            keep text = std.bytes.to_string(token_bytes) or give
+    when index >= std.bytes.length with { bytes set source } { give err("PPM header ended before its fields were complete") }
+    change values is [Int] set []
+    repeat index < std.bytes.length with { bytes set source } {
+        keep value set std.bytes.get with { bytes set source index set index } or give
+        when whitespace with { value set value } or value == 35 {
+            keep token_bytes set std.bytes.from_values with { values set values } or give
+            keep text set std.bytes.to_string with { bytes set token_bytes } or give
             give ok(Token(text, index))
         }
         when value > 127 { give err("PPM header must contain ASCII fields") }
         when len(values) >= 32 { give err("PPM header field exceeds 32 bytes") }
-        values = append(values, value)
-        index = index + 1
+        change values to append with { values set values value set value }
+        change index to index + 1
     }
     give err("PPM header is missing its pixel separator")
 }
 
-define image(width: Int, height: Int, pixels: Bytes) gives Result<Image, String> {
+define image
+takes { width is Int height is Int pixels is Bytes }
+gives Image or String
+{
     when width < 1 or width > 4096 or height < 1 or height > 4096 {
         give err("image dimensions must each be 1 through 4096")
     }
-    keep expected = width * height * 3
+    keep expected set width * height * 3
     when expected > 16777216 { give err("RGB pixel payload exceeds 16 MiB") }
-    when std.bytes.length(pixels) != expected { give err("RGB pixels must contain exactly width * height * 3 bytes") }
+    when std.bytes.length with { bytes set pixels } != expected { give err("RGB pixels must contain exactly width * height * 3 bytes") }
     give ok(Image(width, height, pixels))
 }
 
-define encode_ppm(value: Image) gives Result<Bytes, String> {
-    keep checked = image(value.width, value.height, value.pixels) or give
-    keep header = "P6\n" + std.int.format(checked.width) + " " + std.int.format(checked.height) + "\n255\n"
-    give std.binary.concat(std.bytes.from_string(header), checked.pixels)
+define encode_ppm
+takes { value is Image }
+gives Bytes or String
+{
+    keep checked set image with { width set value.width height set value.height pixels set value.pixels } or give
+    keep header set "P6\n" + std.int.format with { value set checked.width } + " " + std.int.format with { value set checked.height } + "\n255\n"
+    give std.binary.concat with { left set std.bytes.from_string with { value set header } right set checked.pixels }
 }
 
-define decode_ppm(source: Bytes) gives Result<Image, String> {
-    when std.bytes.length(source) > 16777216 { give err("PPM input exceeds 16 MiB") }
-    keep magic = next_token(source, 0) or give
+define decode_ppm
+takes { source is Bytes }
+gives Image or String
+{
+    when std.bytes.length with { bytes set source } > 16777216 { give err("PPM input exceeds 16 MiB") }
+    keep magic set next_token with { source set source offset set 0 } or give
     when magic.text != "P6" { give err("PPM image must use binary P6 encoding") }
-    keep width_token = next_token(source, magic.next) or give
-    keep height_token = next_token(source, width_token.next) or give
-    keep maximum_token = next_token(source, height_token.next) or give
-    keep width = std.int.parse(width_token.text) or give
-    keep height = std.int.parse(height_token.text) or give
-    keep maximum = std.int.parse(maximum_token.text) or give
+    keep width_token set next_token with { source set source offset set magic.next } or give
+    keep height_token set next_token with { source set source offset set width_token.next } or give
+    keep maximum_token set next_token with { source set source offset set height_token.next } or give
+    keep width set std.int.parse with { source set width_token.text } or give
+    keep height set std.int.parse with { source set height_token.text } or give
+    keep maximum set std.int.parse with { source set maximum_token.text } or give
     when maximum != 255 { give err("PPM channel maximum must be 255") }
-    keep separator = std.bytes.get(source, maximum_token.next) or give
-    when !whitespace(separator) { give err("PPM header must end with whitespace") }
-    change pixel_start = maximum_token.next + 1
-    when separator == 13 and pixel_start < std.bytes.length(source) and (std.bytes.get(source, pixel_start) or give) == 10 {
-        pixel_start = pixel_start + 1
+    keep separator set std.bytes.get with { bytes set source index set maximum_token.next } or give
+    when !whitespace with { value set separator } { give err("PPM header must end with whitespace") }
+    change pixel_start set maximum_token.next + 1
+    when separator == 13 and pixel_start < std.bytes.length with { bytes set source } and (std.bytes.get with { bytes set source index set pixel_start } or give) == 10 {
+        change pixel_start to pixel_start + 1
     }
-    keep pixels = std.bytes.slice(source, pixel_start, std.bytes.length(source)) or give
-    give image(width, height, pixels)
+    keep pixels set std.bytes.slice with { bytes set source offset set pixel_start length set std.bytes.length with { bytes set source } } or give
+    give image with { width set width height set height pixels set pixels }
 }
 
 expose { Image, image, encode_ppm, decode_ppm }

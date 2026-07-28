@@ -1,135 +1,150 @@
-shape Context { trace_id: String, span_id: String, flags: String }
-shape OtlpValue { stringValue: String }
-shape OtlpAttribute { key: String, value: OtlpValue }
-shape OtlpSpan {
-    traceId: String,
-    spanId: String,
-    flags: Int,
-    name: String,
-    startTimeUnixNano: String,
-    endTimeUnixNano: String,
-    attributes: [OtlpAttribute]
+shape Context holds { trace_id is String span_id is String flags is String }
+shape OtlpValue holds { stringValue is String }
+shape OtlpAttribute holds { key is String value is OtlpValue }
+shape OtlpSpan holds {
+    traceId is String spanId is String flags is Int name is String
+    startTimeUnixNano is String endTimeUnixNano is String attributes is [OtlpAttribute]
 }
-shape OtlpScopeSpans { spans: [OtlpSpan] }
-shape OtlpResourceSpans { scopeSpans: [OtlpScopeSpans] }
-shape OtlpExportRequest { resourceSpans: [OtlpResourceSpans] }
+shape OtlpScopeSpans holds { spans is [OtlpSpan] }
+shape OtlpResourceSpans holds { scopeSpans is [OtlpScopeSpans] }
+shape OtlpExportRequest holds { resourceSpans is [OtlpResourceSpans] }
 
-define validate_hex(value: String, bytes: Int, label: String) gives Result<String, String> {
-    keep decoded = std.encoding.unhex(value) or give
-    when std.bytes.length(decoded) != bytes { give err(label + " has the wrong width") }
-    change nonzero = no
-    change index = 0
-    repeat index < std.bytes.length(decoded) {
-        keep byte = std.bytes.get(decoded, index) or give
-        when byte != 0 { nonzero = yes }
-        index = index + 1
+define validate_hex
+takes { value is String bytes is Int label is String }
+gives String or String
+{
+    keep decoded set std.encoding.unhex with { source set value } or give
+    when std.bytes.length with { bytes set decoded } != bytes { give err(label + " has the wrong width") }
+    change nonzero set no
+    change index set 0
+    repeat index < std.bytes.length with { bytes set decoded } {
+        keep byte set std.bytes.get with { bytes set decoded index set index } or give
+        when byte != 0 { change nonzero to yes }
+        change index to index + 1
     }
     when !nonzero { give err(label + " must not be all zero") }
     give ok(value)
 }
 
-define context(trace_id: String, span_id: String, sampled: Bool) gives Result<Context, String> {
-    keep trace = validate_hex(trace_id, 16, "trace id") or give
-    keep span = validate_hex(span_id, 8, "span id") or give
-    change flags = "00"
-    when sampled { flags = "01" }
+define context
+takes { trace_id is String span_id is String sampled is Bool }
+gives Context or String
+{
+    keep trace set validate_hex with { value set trace_id bytes set 16 label set "trace id" } or give
+    keep span set validate_hex with { value set span_id bytes set 8 label set "span id" } or give
+    change flags set "00"
+    when sampled { change flags to "01" }
     give ok(Context(trace, span, flags))
 }
 
-define fresh(sampled: Bool) gives Result<Context, String> needs Random {
-    keep trace_id = std.encoding.hex(std.crypto.random_bytes(16) or give) or give
-    keep span_id = std.encoding.hex(std.crypto.random_bytes(8) or give) or give
-    give context(trace_id, span_id, sampled)
+define fresh
+takes { sampled is Bool }
+gives Context or String
+needs Random
+{
+    keep trace_id set std.encoding.hex with { bytes set perform std.crypto.random_bytes with { length set 16 } or give } or give
+    keep span_id set std.encoding.hex with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
+    give context with { trace_id set trace_id span_id set span_id sampled set sampled }
 }
 
-define child(parent: Context) gives Result<Context, String> needs Random {
-    keep span_id = std.encoding.hex(std.crypto.random_bytes(8) or give) or give
-    give context(parent.trace_id, span_id, parent.flags == "01")
+define child
+takes { parent is Context }
+gives Context or String
+needs Random
+{
+    keep span_id set std.encoding.hex with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
+    give context with { trace_id set parent.trace_id span_id set span_id sampled set parent.flags == "01" }
 }
 
-define parse(value: String) gives Result<Context, String> {
-    keep parts = std.text.split(value, "-", 5) or give
+define parse
+takes { value is String }
+gives Context or String
+{
+    keep parts set std.text.split with { value set value separator set "-" maximum set 5 } or give
     when len(parts) != 4 or parts[0] != "00" { give err("traceparent must use W3C version 00") }
     when parts[3] != "00" and parts[3] != "01" { give err("trace flags must be 00 or 01") }
-    keep parsed = context(parts[1], parts[2], parts[3] == "01") or give
+    keep parsed set context with { trace_id set parts[1] span_id set parts[2] sampled set parts[3] == "01" } or give
     give ok(parsed)
 }
 
-define traceparent(value: Context) gives Result<String, String> {
-    keep prefix = std.text.concat("00-", value.trace_id) or give
-    keep middle = std.text.concat(prefix, "-") or give
-    keep with_span = std.text.concat(middle, value.span_id) or give
-    keep suffix = std.text.concat(with_span, "-") or give
-    give std.text.concat(suffix, value.flags)
+define traceparent
+takes { value is Context }
+gives String or String
+{
+    keep prefix set std.text.concat with { left set "00-" right set value.trace_id } or give
+    keep middle set std.text.concat with { left set prefix right set "-" } or give
+    keep with_span set std.text.concat with { left set middle right set value.span_id } or give
+    keep suffix set std.text.concat with { left set with_span right set "-" } or give
+    give std.text.concat with { left set suffix right set value.flags }
 }
 
-define headers(value: Context) gives Result<Map<String, String>, String> {
-    give ok(std.map.single("traceparent", traceparent(value) or give))
-}
+define headers
+takes { value is Context }
+gives Map<String, String> or String
+{ give ok(std.map.single with { key set "traceparent" value set traceparent with { value set value } or give }) }
 
-define otlp_attribute(key: String, value: String) gives Result<OtlpAttribute, String> {
+define otlp_attribute
+takes { key is String value is String }
+gives OtlpAttribute or String
+{
     when len(key) == 0 or len(key) > 256 { give err("OTLP attribute key must use 1 through 256 bytes") }
     when len(value) > 4096 { give err("OTLP string attribute exceeds 4096 bytes") }
     give ok(OtlpAttribute(key, OtlpValue(value)))
 }
 
-define canonical_unix_nanos(value: String) gives Result<String, String> {
-    when len(value) == 0 or len(value) > 19 or std.text.starts_with(value, "-") {
+define canonical_unix_nanos
+takes { value is String }
+gives String or String
+{
+    when len(value) == 0 or len(value) > 19 or std.text.starts_with with { value set value prefix set "-" } {
         give err("OTLP timestamp must be a nonnegative canonical Int64 decimal string")
     }
-    keep parsed = std.bigint.parse(value) or give
-    when std.bigint.format(parsed) != value {
+    keep parsed set std.bigint.parse with { source set value } or give
+    when std.bigint.format with { value set parsed } != value {
         give err("OTLP timestamp must be a nonnegative canonical Int64 decimal string")
     }
     give ok(value)
 }
 
-define otlp_span(value: Context, name: String, start_unix_nano: String, end_unix_nano: String, attributes: [OtlpAttribute]) gives Result<OtlpSpan, String> {
+define otlp_span
+takes { value is Context name is String start_unix_nano is String end_unix_nano is String attributes is [OtlpAttribute] }
+gives OtlpSpan or String
+{
     when len(name) == 0 or len(name) > 256 { give err("OTLP span name must use 1 through 256 bytes") }
     when len(attributes) > 128 { give err("OTLP span supports at most 128 attributes") }
-    keep started_at = canonical_unix_nanos(start_unix_nano) or give
-    keep ended_at = canonical_unix_nanos(end_unix_nano) or give
-    keep started_number = std.bigint.parse(started_at) or give
-    keep ended_number = std.bigint.parse(ended_at) or give
-    when ended_number < started_number {
-        give err("OTLP span end must not precede its start")
-    }
+    keep started_at set canonical_unix_nanos with { value set start_unix_nano } or give
+    keep ended_at set canonical_unix_nanos with { value set end_unix_nano } or give
+    keep started_number set std.bigint.parse with { source set started_at } or give
+    keep ended_number set std.bigint.parse with { source set ended_at } or give
+    when ended_number < started_number { give err("OTLP span end must not precede its start") }
     each attribute within attributes {
         when len(attribute.key) == 0 or len(attribute.key) > 256 { give err("OTLP attribute key must use 1 through 256 bytes") }
         when len(attribute.value.stringValue) > 4096 { give err("OTLP string attribute exceeds 4096 bytes") }
     }
-    change flags = 0
-    when value.flags == "01" { flags = 1 }
+    change flags set 0
+    when value.flags == "01" { change flags to 1 }
     give ok(OtlpSpan(value.trace_id, value.span_id, flags, name, started_at, ended_at, attributes))
 }
 
-define encode_otlp_json(span: OtlpSpan) gives Result<String, String> {
-    keep scope = OtlpScopeSpans([span])
-    keep resource = OtlpResourceSpans([scope])
-    give std.json.stringify(OtlpExportRequest([resource]))
+define encode_otlp_json
+takes { span is OtlpSpan }
+gives String or String
+{
+    keep scope set OtlpScopeSpans([span])
+    keep resource set OtlpResourceSpans([scope])
+    give std.json.stringify with { value set OtlpExportRequest([resource]) }
 }
 
-define export_otlp_json(endpoint: String, request_headers: Map<String, String>, span: OtlpSpan, timeout: Float) gives Result<String, String> needs Network {
+define export_otlp_json
+takes { endpoint is String request_headers is Map<String, String> span is OtlpSpan timeout is Float }
+gives String or String
+needs Network
+{
     when len(endpoint) == 0 or len(endpoint) > 4096 { give err("OTLP endpoint must use 1 through 4096 bytes") }
-    keep body = encode_otlp_json(span) or give
-    keep typed = std.map.set(request_headers, "Content-Type", "application/json")
-    keep response = std.web.request("POST", endpoint, typed, body, timeout, 1048576) or give
-    give ok(std.map.get(response, "status") ?? "missing status")
+    keep body set encode_otlp_json with { span set span } or give
+    keep typed set std.map.set with { map set request_headers key set "Content-Type" value set "application/json" }
+    keep response set perform std.web.request with { method set "POST" url set endpoint headers set typed body set body timeout set timeout maximum set 1048576 } or give
+    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
 }
 
-expose {
-    Context,
-    OtlpValue,
-    OtlpAttribute,
-    OtlpSpan,
-    context,
-    fresh,
-    child,
-    parse,
-    traceparent,
-    headers,
-    otlp_attribute,
-    otlp_span,
-    encode_otlp_json,
-    export_otlp_json
-}
+expose { Context, OtlpValue, OtlpAttribute, OtlpSpan, context, fresh, child, parse, traceparent, headers, otlp_attribute, otlp_span, encode_otlp_json, export_otlp_json }

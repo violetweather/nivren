@@ -32,6 +32,7 @@ NivrenBuffer nivren_check_utf8(const uint8_t *source, size_t length);
 NivrenBuffer nivren_format_utf8(const uint8_t *source, size_t length);
 NivrenBuffer nivren_compile_utf8(const uint8_t *source, size_t length);
 NivrenBuffer nivren_run_utf8(const uint8_t *source, size_t length);
+NivrenBuffer nivren_run_native_utf8(const uint8_t *source, size_t length);
 NivrenBuffer nivren_run_host_utf8(
     const uint8_t *source,
     size_t length,

@@ -1,11 +1,14 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep labels = std.map.single("route", "/health")
-    keep value = main.sample("nivren_requests_total", "Handled requests", "counter", 42.0, labels) or give
-    keep output = main.encode([value]) or give
-    assert(output == "# HELP nivren_requests_total Handled requests\n# TYPE nivren_requests_total counter\nnivren_requests_total{route=\"/health\"} 42\n", "Prometheus text encoding")
+define works
+takes { }
+gives Bool or String
+{
+    keep labels set std.map.single with { key set "route" value set "/health" }
+    keep value set main.sample with { name set "nivren_requests_total" help set "Handled requests" kind set "counter" value set 42.0 labels set labels } or give
+    keep output set main.encode with { samples set [value] } or give
+    assert with { condition set output == "# HELP nivren_requests_total Handled requests\n# TYPE nivren_requests_total counter\nnivren_requests_total{route=\"/health\"} 42\n" message set "Prometheus text encoding" }
     give ok(yes)
 }
 
-works()
+works with { }

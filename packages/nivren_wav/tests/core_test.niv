@@ -1,12 +1,15 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep source = main.Audio(48000, 2, [0, 32767, -32768, 42])
-    keep encoded = main.encode_pcm16(source) or give
-    assert(std.bytes.length(encoded) == 52, "WAV byte length")
-    keep decoded = main.decode_pcm16(encoded) or give
-    assert(decoded == source, "PCM16 round trip")
+define works
+takes { }
+gives Bool or String
+{
+    keep source set main.Audio(48000, 2, [0, 32767, -32768, 42])
+    keep encoded set main.encode_pcm16 with { value set source } or give
+    assert with { condition set std.bytes.length with { bytes set encoded } == 52 message set "WAV byte length" }
+    keep decoded set main.decode_pcm16 with { source set encoded } or give
+    assert with { condition set decoded == source message set "PCM16 round trip" }
     give ok(yes)
 }
 
-works()
+works with { }

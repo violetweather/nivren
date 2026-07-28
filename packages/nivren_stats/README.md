@@ -1,6 +1,6 @@
 # nivren_stats
 
-Official small-data descriptive statistics for Nivren Edition 3.
+Official small-data descriptive statistics for Nivren Edition 4.
 
 The package provides deterministic sum, mean, population variance, minimum, maximum, and min-max normalization over bounded in-memory `[Float]` values. Empty or zero-range operations return typed errors. It uses no ambient capabilities or hidden native code, and numeric conversion remains explicit.
 

@@ -59,6 +59,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           sh -n install/install.sh
+          sh tools/test_unix_installer.sh
           root="$RUNNER_TEMP/nivren-uninstall-root"
           bin="$RUNNER_TEMP/nivren-uninstall-bin"
           mkdir -p "$root/versions/1/bin" "$bin"
@@ -77,12 +78,25 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile("install/install.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
           $root = Join-Path $env:RUNNER_TEMP "nivren-uninstall-root"
-          New-Item -ItemType Directory -Force (Join-Path $root "bin") | Out-Null
+          $bin = Join-Path $root "bin"
+          New-Item -ItemType Directory -Force $bin, (Join-Path $root "versions\1.0.0\bin"), (Join-Path $root "versions\2.0.0\bin") | Out-Null
+          Copy-Item (Get-Command pwsh).Source (Join-Path $root "versions\1.0.0\bin\niv.exe")
+          Copy-Item (Get-Command pwsh).Source (Join-Path $root "versions\2.0.0\bin\niv.exe")
           Set-Content -LiteralPath (Join-Path $root ".nivren-install-root") -Value "nivren-managed-root-v1" -NoNewline
+          Set-Content -LiteralPath (Join-Path $root "current-version") -Value "2.0.0" -NoNewline
+          Set-Content -LiteralPath (Join-Path $root "previous-version") -Value "1.0.0" -NoNewline
+          & "install/install.ps1" -Rollback -InstallRoot $root
+          if ((Get-Content -Raw (Join-Path $root "current-version")) -ne "1.0.0") { throw "rollback did not activate the previous version" }
+          if ((Get-Content -Raw (Join-Path $root "previous-version")) -ne "2.0.0") { throw "rollback did not preserve the replaced version" }
+          if (-not (Test-Path (Join-Path $root "install-receipt.json"))) { throw "rollback receipt is missing" }
           & "install/install.ps1" -Uninstall -InstallRoot $root
           if (Test-Path $root) { throw "uninstaller left its managed root behind" }
+          tools/test_windows_installer.ps1
       - name: Test release source
-        run: cargo test --workspace --all-targets --locked
+        run: |
+          cargo test --workspace --all-targets --locked
+          python tools/test_release_packager.py
+          python tools/test_verify_release_artifacts.py
       - name: Enforce the 1.0 release policy
         if: startsWith(github.ref_name, 'v1.')
         run: cargo run --locked -- release check .
@@ -208,6 +222,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Enforce Edition 4 Product Proof for stable releases
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: cargo run --locked -- release check .
+      - name: Verify beta release disclosure
+        if: ${{ contains(github.ref_name, '-') }}
+        run: |
+          grep -F "Product Proof is not complete" docs/RELEASES.md
+          grep -F "prerelease" docs/RELEASES.md
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -236,6 +259,8 @@ jobs:
       - name: Write checksums
         working-directory: release-assets
         run: sha256sum nivren-* > SHA256SUMS
+      - name: Verify the complete release set
+        run: python tools/verify_release_artifacts.py release-assets "${RELEASE_LABEL}"
       - name: Sign release provenance
         uses: actions/attest@v4
         with:
@@ -243,4 +268,11 @@ jobs:
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" release-assets/* --verify-tag --generate-notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_flags=(--verify-tag --generate-notes)
+          if [[ "${{ github.ref_name }}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "${{ github.ref_name }}" release-assets/* "${release_flags[@]}"

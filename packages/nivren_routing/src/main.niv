@@ -1,18 +1,180 @@
-shape Route { method: String, path: String, name: String }
+shape Route holds {
+    method is String
+    path is String
+    name is String
+} with Json, Compare, Display, Validate
 
-define route(method: String, path: String, name: String) gives Route {
-    give Route(method, path, name)
+shape RouteMatch holds {
+    route is Route
+    parameters is Map<String, String>
+} with Json, Compare, Display, Validate
+
+shape RequestContext holds {
+    method is String
+    path is String
+    headers is Map<String, String>
+    body is String
+} with Json, Compare, Display, Validate
+
+shape RequestPolicy holds {
+    maximum_body is Int
+    required_headers is [String]
+    bearer is Bool
+} with Json, Compare, Display, Validate
+
+shape Response holds {
+    status is Int
+    headers is Map<String, String>
+    body is String
+} with Json, Compare, Display, Validate
+
+define route
+takes {
+    method is String
+    path is String
+    name is String
+}
+gives Route
+{
+    give Route with {
+        method set method
+        path set path
+        name set name
+    }
 }
 
-define matches(candidate: Route, method: String, path: String) gives Bool {
+define matches
+takes {
+    candidate is Route
+    method is String
+    path is String
+}
+gives Bool
+{
     give candidate.method == method and candidate.path == path
 }
 
-define first_match(routes: [Route], method: String, path: String) gives Route? {
-    each candidate within routes {
-        when matches(candidate, method, path) { give candidate }
+define first_match
+takes {
+    routes is [Route]
+    method is String
+    path is String
+}
+gives maybe Route
+{
+    each candidate in routes {
+        when matches with { candidate set candidate method set method path set path } {
+            give candidate
+        }
     }
     give none
 }
 
-expose { Route, route, matches, first_match }
+define match_route
+takes {
+    candidate is Route
+    method is String
+    path is String
+}
+gives maybe RouteMatch or String
+{
+    when candidate.method != method {
+        give ok(none)
+    }
+    keep expected set std.text.split with { value set candidate.path separator set "/" maximum set 128 } or give
+    keep actual set std.text.split with { value set path separator set "/" maximum set 128 } or give
+    when len(expected) != len(actual) {
+        give ok(none)
+    }
+    change parameters set std.map.remove with {
+        map set std.map.single with { key set "__empty__" value set "" }
+        key set "__empty__"
+    }
+    change index set 0
+    repeat while index < len(expected) {
+        keep expected_part set expected[index]
+        keep actual_part set actual[index]
+        when std.text.starts_with with { value set expected_part prefix set ":" } {
+            keep name_parts set std.text.split with { value set expected_part separator set ":" maximum set 2 } or give
+            when len(name_parts) != 2 or len(name_parts[1]) < 1 or len(actual_part) < 1 {
+                give err("route parameter names and values must not be empty")
+            }
+            change parameters to std.map.set with { map set parameters key set name_parts[1] value set actual_part }
+        } otherwise {
+            when expected_part != actual_part {
+                give ok(none)
+            }
+        }
+        change index to index + 1
+    }
+    give ok(RouteMatch with { route set candidate parameters set parameters })
+}
+
+define first_parameterized_match
+takes {
+    routes is [Route]
+    method is String
+    path is String
+}
+gives maybe RouteMatch or String
+{
+    each candidate in routes {
+        keep selected set match_route with { candidate set candidate method set method path set path } or give
+        when selected != none {
+            give ok(selected)
+        }
+    }
+    give ok(none)
+}
+
+define validate_request
+takes {
+    request is RequestContext
+    policy is RequestPolicy
+}
+gives RequestContext or String
+{
+    when policy.maximum_body < 0 or policy.maximum_body > 16777216 {
+        give err("request maximum_body must be from 0 through 16777216")
+    }
+    when len(request.body) > policy.maximum_body {
+        give err("request body exceeds its policy ceiling")
+    }
+    each header in policy.required_headers {
+        when !std.map.contains with { map set request.headers key set header } {
+            give err("request is missing required header " + header)
+        }
+    }
+    when policy.bearer {
+        when !std.map.contains with { map set request.headers key set "authorization" } {
+            give err("request requires bearer authorization")
+        }
+        keep authorization set std.map.get with { map set request.headers key set "authorization" }
+        when !std.text.starts_with with { value set authorization prefix set "Bearer " } {
+            give err("request bearer authorization is malformed")
+        }
+    }
+    give ok(request)
+}
+
+define response
+takes {
+    status is Int
+    body is String
+}
+gives Response or String
+{
+    when status < 100 or status > 599 {
+        give err("response status must be from 100 through 599")
+    }
+    when len(body) > 16777216 {
+        give err("response body exceeds 16 MiB")
+    }
+    give ok(Response with {
+        status set status
+        headers set std.map.single with { key set "content-type" value set "text/plain; charset=utf-8" }
+        body set body
+    })
+}
+
+expose { Route, RouteMatch, RequestContext, RequestPolicy, Response, route, matches, first_match, match_route, first_parameterized_match, validate_request, response }

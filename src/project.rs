@@ -9,6 +9,7 @@ use crate::error::NivError;
 
 pub const MANIFEST_NAME: &str = "niv.toml";
 pub const LOCKFILE_NAME: &str = "niv.lock";
+pub const AUTHORITY_LOCKFILE_NAME: &str = "niv.authority.lock";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
@@ -19,6 +20,7 @@ pub struct Manifest {
     pub dependencies: BTreeMap<String, String>,
     pub capabilities: BTreeSet<String>,
     pub capability_scopes: BTreeMap<String, String>,
+    pub unsafe_modules: BTreeSet<String>,
     pub instruction_limit: Option<u64>,
     pub memory_limit: Option<u64>,
 }
@@ -50,6 +52,7 @@ impl Manifest {
         let mut dependencies = BTreeMap::new();
         let mut capabilities = BTreeSet::new();
         let mut capability_scopes = BTreeMap::new();
+        let mut unsafe_modules = BTreeSet::new();
         let mut instruction_limit = None;
         let mut memory_limit = None;
         for (index, raw_line) in source.lines().enumerate() {
@@ -62,7 +65,7 @@ impl Manifest {
                 section = line[1..line.len() - 1].trim().to_string();
                 if !matches!(
                     section.as_str(),
-                    "package" | "dependencies" | "capabilities" | "limits"
+                    "package" | "dependencies" | "capabilities" | "unsafe" | "limits"
                 ) {
                     return Err(project_error(
                         format!("unknown manifest section [{section}]"),
@@ -73,10 +76,10 @@ impl Manifest {
             }
             if !matches!(
                 section.as_str(),
-                "package" | "dependencies" | "capabilities" | "limits"
+                "package" | "dependencies" | "capabilities" | "unsafe" | "limits"
             ) {
                 return Err(project_error(
-                    "manifest values must be inside [package], [dependencies], [capabilities], or [limits]",
+                    "manifest values must be inside [package], [dependencies], [capabilities], [unsafe], or [limits]",
                     line_number,
                 ));
             }
@@ -177,6 +180,35 @@ impl Manifest {
                 if value != "allow" {
                     capability_scopes.insert(key.to_string(), value);
                 }
+            } else if section == "unsafe" {
+                if !matches!(
+                    key,
+                    "memory"
+                        | "layouts"
+                        | "allocators"
+                        | "atomics"
+                        | "threads"
+                        | "simd"
+                        | "devices"
+                        | "ffi"
+                ) {
+                    return Err(project_error(
+                        format!("unknown unsafe module '{key}'"),
+                        line_number,
+                    ));
+                }
+                if value != "allow" {
+                    return Err(project_error(
+                        format!("unsafe module '{key}' must be explicitly set to \"allow\""),
+                        line_number,
+                    ));
+                }
+                if !unsafe_modules.insert(key.to_string()) {
+                    return Err(project_error(
+                        format!("duplicate unsafe module '{key}'"),
+                        line_number,
+                    ));
+                }
             } else {
                 if !matches!(key, "instructions" | "memory_bytes") {
                     return Err(project_error(format!("unknown limit '{key}'"), line_number));
@@ -212,6 +244,12 @@ impl Manifest {
         if dependencies.contains_key(&name) {
             return Err(project_error("a package cannot depend on itself", 1));
         }
+        if !unsafe_modules.is_empty() && !capabilities.contains("Native") {
+            return Err(project_error(
+                "declared unsafe modules require an explicit Native capability grant",
+                1,
+            ));
+        }
         let version = required(&values, "version")?;
         if !valid_version(&version) {
             return Err(project_error(
@@ -238,6 +276,7 @@ impl Manifest {
             dependencies,
             capabilities,
             capability_scopes,
+            unsafe_modules,
             instruction_limit,
             memory_limit,
         })
@@ -290,6 +329,12 @@ impl Manifest {
                 output.push_str(&format!("{capability} = \"{grant}\"\n"));
             }
         }
+        if !self.unsafe_modules.is_empty() {
+            output.push_str("\n[unsafe]\n");
+            for module in &self.unsafe_modules {
+                output.push_str(&format!("{module} = \"allow\"\n"));
+            }
+        }
         if self.instruction_limit.is_some() || self.memory_limit.is_some() {
             output.push_str("\n[limits]\n");
             if let Some(instructions) = self.instruction_limit {
@@ -339,6 +384,10 @@ impl Manifest {
             if let Some(scope) = self.capability_scopes.get(capability) {
                 hash_part(&mut digest, scope.as_bytes());
             }
+        }
+        for module in &self.unsafe_modules {
+            hash_part(&mut digest, b"unsafe");
+            hash_part(&mut digest, module.as_bytes());
         }
         if let Some(instructions) = self.instruction_limit {
             hash_part(&mut digest, &instructions.to_le_bytes());

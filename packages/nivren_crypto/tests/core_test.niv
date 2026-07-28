@@ -1,19 +1,19 @@
 use "../src/main.niv"
 
-keep digest = main.fingerprint("Nivren")
-choose digest {
-    Ok(value) => assert(std.bytes.length(value) == 32, "SHA-256 digest width"),
-    Err(problem) => assert(no, problem),
+keep digest_width set choose main.fingerprint with { text set "Nivren" } {
+    case Ok carries value => std.bytes.length with { bytes set value } == 32
+    case Err carries problem => no
 }
+assert with { condition set digest_width message set "SHA-256 digest width" }
 
-keep valid = choose main.sign("secret", "message") {
-    Ok(value) => main.verify("secret", "message", value) == ok(yes),
-    Err(problem) => no,
+keep valid set choose main.sign with { key set "secret" message set "message" } {
+    case Ok carries value => main.verify with { key set "secret" message set "message" tag set value } == ok(yes)
+    case Err carries problem => no
 }
-assert(valid, "matching tag")
+assert with { condition set valid message set "matching tag" }
 
-keep invalid = choose main.sign("secret", "message") {
-    Ok(value) => main.verify("secret", "changed", value) == ok(no),
-    Err(problem) => no,
+keep invalid set choose main.sign with { key set "secret" message set "message" } {
+    case Ok carries value => main.verify with { key set "secret" message set "changed" tag set value } == ok(no)
+    case Err carries problem => no
 }
-assert(invalid, "changed message")
+assert with { condition set invalid message set "changed message" }

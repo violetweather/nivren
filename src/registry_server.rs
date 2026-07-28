@@ -9,10 +9,21 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::NivError;
-use crate::trust::{Advisory, PublishEnvelope, RegistryStatus, parse_public_key, verify_release};
+use crate::trust::{
+    Advisory, PublishEnvelope, RegistryAdminAction, RegistryStatus, parse_public_key,
+    verify_admin_action, verify_release,
+};
 
 const MAX_HEADER: usize = 64 * 1024;
 const MAX_BODY: usize = 66 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackageOwnership {
+    format: u16,
+    package: String,
+    publisher: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -135,6 +146,33 @@ fn handle_request(
                 ),
             }
         }
+        ("POST", "/v1/admin") => {
+            if parsed.headers.get("content-type").map(String::as_str)
+                != Some("application/vnd.nivren.admin-v1+json")
+            {
+                return response(
+                    415,
+                    "Unsupported Media Type",
+                    "text/plain",
+                    b"invalid content type\n",
+                );
+            }
+            let _guard = publication_lock.lock().unwrap();
+            match apply_admin(&parsed.body, registry, now, minimum_generation) {
+                Ok(generation) => response(
+                    200,
+                    "OK",
+                    "application/json",
+                    format!("{{\"generation\":{generation}}}\n").as_bytes(),
+                ),
+                Err(error) => response(
+                    422,
+                    "Unprocessable Content",
+                    "text/plain",
+                    format!("{}\n", error.message).as_bytes(),
+                ),
+            }
+        }
         ("GET", path) if path.starts_with("/v1/search/") => {
             let query = &path["/v1/search/".len()..];
             match crate::package::search(query, registry).and_then(|results| {
@@ -192,7 +230,30 @@ fn publish(
         now,
         minimum_generation,
     )?;
+    let ownership_path = registry
+        .join("v1/owners")
+        .join(format!("{}.json", package.name));
+    if ownership_path.exists() {
+        let ownership: PackageOwnership = read_json(&ownership_path, "package ownership")?;
+        if ownership.format != 1
+            || ownership.package != package.name
+            || ownership.publisher != envelope.authorization.publisher
+        {
+            return Err(server_error(format!(
+                "package '{}' is owned by a different publisher",
+                package.name
+            )));
+        }
+    }
     crate::package::publish(&envelope.package, registry)?;
+    write_immutable_json(
+        &ownership_path,
+        &PackageOwnership {
+            format: 1,
+            package: package.name.clone(),
+            publisher: envelope.authorization.publisher.clone(),
+        },
+    )?;
     let provenance_path = registry
         .join("v1/provenance")
         .join(&package.name)
@@ -206,6 +267,93 @@ fn publish(
         "/v1/packages/{}/{}.nivpkg",
         package.name, package.version
     ))
+}
+
+fn apply_admin(
+    body: &[u8],
+    registry: &Path,
+    now: u64,
+    configured_minimum: u64,
+) -> Result<u64, NivError> {
+    if body.len() > 64 * 1024 {
+        return Err(server_error("registry admin action exceeds 64 KiB"));
+    }
+    let action: RegistryAdminAction = serde_json::from_slice(body)
+        .map_err(|error| server_error(format!("invalid registry admin action: {error}")))?;
+    let (root, persisted) = admin_trust_state(registry)?;
+    verify_admin_action(&action, root, now, configured_minimum.max(persisted))?;
+    let admin = registry.join("v1/admin");
+    fs::create_dir_all(&admin)
+        .map_err(|error| server_error(format!("cannot create admin log: {error}")))?;
+    let pending = admin.join("pending.json");
+    if pending.exists() {
+        return Err(server_error(
+            "registry admin recovery is required before another action",
+        ));
+    }
+    write_atomic_bytes(&pending, body)?;
+    complete_admin(registry, &action, &pending)
+}
+
+pub fn recover_admin(registry: &Path, now: u64, configured_minimum: u64) -> Result<u64, NivError> {
+    let pending = registry.join("v1/admin/pending.json");
+    let body = fs::read(&pending)
+        .map_err(|error| server_error(format!("cannot read pending admin action: {error}")))?;
+    if body.len() > 64 * 1024 {
+        return Err(server_error("registry admin action exceeds 64 KiB"));
+    }
+    let action: RegistryAdminAction = serde_json::from_slice(&body)
+        .map_err(|error| server_error(format!("invalid registry admin action: {error}")))?;
+    let (root, persisted) = admin_trust_state(registry)?;
+    verify_admin_action(&action, root, now, configured_minimum)?;
+    if action.generation < persisted {
+        return Err(server_error(
+            "pending registry admin action is older than persisted state",
+        ));
+    }
+    complete_admin(registry, &action, &pending)
+}
+
+fn admin_trust_state(registry: &Path) -> Result<([u8; 32], u64), NivError> {
+    let trust = registry.join("v1/trust");
+    let root = fs::read_to_string(trust.join("root.pub"))
+        .map_err(|error| server_error(format!("cannot read registry root: {error}")))?;
+    let root = parse_public_key(&root)?;
+    let generation_path = trust.join("admin-generation");
+    let persisted = match fs::read_to_string(&generation_path) {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| server_error("registry admin generation is invalid"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            return Err(server_error(format!(
+                "cannot read admin generation: {error}"
+            )));
+        }
+    };
+    Ok((root, persisted))
+}
+
+fn complete_admin(
+    registry: &Path,
+    action: &RegistryAdminAction,
+    pending: &Path,
+) -> Result<u64, NivError> {
+    let yanked = action.action == "yank";
+    crate::package::set_yanked(&action.package, &action.version, registry, yanked)?;
+    let audit_path = registry
+        .join("v1/admin")
+        .join(format!("{}.json", action.generation));
+    write_immutable_json(&audit_path, &action)?;
+    let generation_path = registry.join("v1/trust/admin-generation");
+    write_atomic_bytes(
+        &generation_path,
+        format!("{}\n", action.generation).as_bytes(),
+    )?;
+    fs::remove_file(pending)
+        .map_err(|error| server_error(format!("cannot complete admin action: {error}")))?;
+    Ok(action.generation)
 }
 
 fn public_path(path: &str) -> Option<(PathBuf, &'static str)> {
@@ -234,6 +382,9 @@ fn public_path(path: &str) -> Option<(PathBuf, &'static str)> {
         || (relative.starts_with("v1/packages/") && relative.ends_with(".nivpkg"))
         || (relative.starts_with("v1/provenance/") && relative.ends_with(".json"))
         || (relative.starts_with("v1/authorizations/") && relative.ends_with(".json"))
+        || (relative.starts_with("v1/admin/")
+            && relative.ends_with(".json")
+            && !relative.ends_with("/pending.json"))
         || matches!(
             relative,
             "v1/trust/root.pub" | "v1/trust/status.json" | "v1/trust/advisories.json"
@@ -323,24 +474,24 @@ fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
         if bytes.len() > MAX_HEADER + MAX_BODY + 4 {
             return Err("request exceeds size limit".into());
         }
-        if target.is_none() {
-            if let Some(boundary) = find(&bytes, b"\r\n\r\n") {
-                if boundary > MAX_HEADER {
-                    return Err("HTTP headers exceed 64 KiB".into());
-                }
-                let head =
-                    std::str::from_utf8(&bytes[..boundary]).map_err(|_| "headers are not UTF-8")?;
-                let mut length = 0usize;
-                for line in head.split("\r\n").skip(1) {
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse().map_err(|_| "invalid Content-Length")?;
-                    }
-                }
-                if length > MAX_BODY {
-                    return Err("request body exceeds 66 MiB".into());
-                }
-                target = Some(boundary + 4 + length);
+        if target.is_none()
+            && let Some(boundary) = find(&bytes, b"\r\n\r\n")
+        {
+            if boundary > MAX_HEADER {
+                return Err("HTTP headers exceed 64 KiB".into());
             }
+            let head =
+                std::str::from_utf8(&bytes[..boundary]).map_err(|_| "headers are not UTF-8")?;
+            let mut length = 0usize;
+            for line in head.split("\r\n").skip(1) {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().map_err(|_| "invalid Content-Length")?;
+                }
+            }
+            if length > MAX_BODY {
+                return Err("request body exceeds 66 MiB".into());
+            }
+            target = Some(boundary + 4 + length);
         }
         if target.is_some_and(|target| bytes.len() >= target) {
             break;
@@ -403,6 +554,17 @@ fn write_immutable_json(path: &Path, value: &impl serde::Serialize) -> Result<()
                 "cannot atomically write registry document: {error}"
             ))
         })
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), NivError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| server_error(format!("cannot create registry directory: {error}")))?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temporary, bytes)
+        .and_then(|_| fs::rename(&temporary, path))
+        .map_err(|error| server_error(format!("cannot atomically write registry state: {error}")))
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

@@ -1,0 +1,36 @@
+use "../src/main.niv"
+
+define verify
+gives Bool or String
+{
+
+keep pool set main.PoolConfig with {
+    minimum set 1
+    maximum set 16
+    connect_timeout set 5.0
+    idle_timeout set 300.0
+}
+assert(main.validate_pool with { config set pool } == ok(pool), "bounded pool")
+
+keep request set main.DriverRequest with {
+    operation set "query"
+    statement set "SELECT id, name FROM users WHERE role = ?"
+    parameters set ["admin"]
+    maximum_rows set 100
+    timeout set 10.0
+}
+keep encoded set main.encode_request with { request set request } or give
+assert(std.text.starts_with with { value set encoded prefix set "{" }, "driver request JSON")
+
+keep migrations set [
+    main.Migration with { version set 1 name set "users" statement set "CREATE TABLE users" },
+    main.Migration with { version set 2 name set "roles" statement set "ALTER TABLE users" }
+]
+assert(main.validate_migrations with { migrations set migrations } == ok(migrations), "ordered migrations")
+
+keep page set main.decode_page with { source set "{\"rows\":[\"Ada\",\"Lin\"],\"next_cursor\":null}" } or give
+assert(page.rows == ["Ada", "Lin"], "typed page")
+give ok(yes)
+}
+
+verify with {}

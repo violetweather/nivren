@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -8,7 +8,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::error::NivError;
-use crate::project::{LOCKFILE_NAME, MANIFEST_NAME, Manifest};
+use crate::project::{AUTHORITY_LOCKFILE_NAME, LOCKFILE_NAME, MANIFEST_NAME, Manifest};
 use crate::trust::{
     Advisory, PublisherAuthorization, RegistryStatus, ReleaseProvenance, verify_release,
 };
@@ -26,6 +26,15 @@ pub struct Package {
     pub files: BTreeMap<String, Vec<u8>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheEntry {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub reachable: bool,
+}
+
 impl Package {
     pub fn build(manifest: &Manifest) -> Result<Self, NivError> {
         let mut files = BTreeMap::new();
@@ -36,6 +45,10 @@ impl Package {
         files.insert(
             LOCKFILE_NAME.into(),
             installed_lockfile(manifest)?.into_bytes(),
+        );
+        files.insert(
+            AUTHORITY_LOCKFILE_NAME.into(),
+            installed_authority_lockfile(manifest)?.into_bytes(),
         );
         validate_files(&files)?;
         Ok(Self {
@@ -166,6 +179,12 @@ impl Package {
 
 pub fn publish(package_bytes: &[u8], registry: &Path) -> Result<PathBuf, NivError> {
     let package = Package::decode(package_bytes)?;
+    let manifest_source = package
+        .files
+        .get(MANIFEST_NAME)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .ok_or_else(|| package_error("package manifest is not UTF-8"))?;
+    let manifest = Manifest::parse(manifest_source, PathBuf::from("."))?;
     let digest = sha256(package_bytes);
     let packages = registry.join("v1/packages").join(&package.name);
     let index = registry.join("v1/index").join(&package.name);
@@ -190,6 +209,10 @@ pub fn publish(package_bytes: &[u8], registry: &Path) -> Result<PathBuf, NivErro
         "version": package.version,
         "sha256": digest,
         "size": package_bytes.len(),
+        "yanked": false,
+        "capabilities": manifest.capabilities,
+        "capability_scopes": manifest.capability_scopes,
+        "unsafe_modules": manifest.unsafe_modules,
     });
     let metadata = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| package_error(format!("cannot encode registry metadata: {error}")))?;
@@ -221,6 +244,11 @@ pub fn fetch(name: &str, version: &str, registry: &Path) -> Result<Vec<u8>, NivE
     .map_err(|error| package_error(format!("invalid registry metadata: {error}")))?;
     if metadata["format"] != 1 || metadata["name"] != name || metadata["version"] != version {
         return Err(package_error("registry metadata identity is invalid"));
+    }
+    if metadata["yanked"].as_bool().unwrap_or(false) {
+        return Err(package_error(format!(
+            "package {name} {version} is yanked and cannot be newly installed"
+        )));
     }
     let expected = metadata["sha256"]
         .as_str()
@@ -305,12 +333,20 @@ pub fn search(query: &str, registry: &Path) -> Result<Vec<SearchResult>, NivErro
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "json")
+                && let Ok(document) = fs::read(&path)
+                    .map_err(|error| {
+                        package_error(format!("cannot read registry metadata: {error}"))
+                    })
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+                            package_error(format!("invalid registry metadata: {error}"))
+                        })
+                    })
+                && !document["yanked"].as_bool().unwrap_or(false)
+                && let Some(version) = path.file_stem().and_then(|value| value.to_str())
+                && validate_identity("search-result", version).is_ok()
             {
-                if let Some(version) = path.file_stem().and_then(|value| value.to_str()) {
-                    if validate_identity("search-result", version).is_ok() {
-                        versions.push(version.to_string());
-                    }
-                }
+                versions.push(version.to_string());
             }
         }
         versions.sort_by_key(|version| std::cmp::Reverse(version_parts(version)));
@@ -321,6 +357,31 @@ pub fn search(query: &str, registry: &Path) -> Result<Vec<SearchResult>, NivErro
     results.sort_by(|left, right| left.name.cmp(&right.name));
     results.truncate(100);
     Ok(results)
+}
+
+pub fn set_yanked(
+    name: &str,
+    version: &str,
+    registry: &Path,
+    yanked: bool,
+) -> Result<(), NivError> {
+    validate_identity(name, version)?;
+    let metadata_path = registry
+        .join("v1/index")
+        .join(name)
+        .join(format!("{version}.json"));
+    reject_symlink_if_present(&metadata_path)?;
+    let bytes = fs::read(&metadata_path)
+        .map_err(|error| package_error(format!("cannot read registry metadata: {error}")))?;
+    let mut metadata: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| package_error(format!("invalid registry metadata: {error}")))?;
+    if metadata["format"] != 1 || metadata["name"] != name || metadata["version"] != version {
+        return Err(package_error("registry metadata identity is invalid"));
+    }
+    metadata["yanked"] = serde_json::Value::Bool(yanked);
+    let encoded = serde_json::to_vec_pretty(&metadata)
+        .map_err(|error| package_error(format!("cannot encode registry metadata: {error}")))?;
+    write_atomic(&metadata_path, &encoded)
 }
 
 fn version_parts(version: &str) -> (u64, u64, u64) {
@@ -370,7 +431,16 @@ pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usiz
 
     let lockfile = manifest.resolved_lockfile(&resolved);
     write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
+    write_authority_lock(manifest)?;
     Ok(resolved.len())
+}
+
+pub fn install_offline_dependencies(manifest: &Manifest) -> Result<usize, NivError> {
+    let lockfile = installed_lockfile(manifest)?;
+    let count = lockfile.matches("[[dependency]]").count();
+    write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
+    write_authority_lock(manifest)?;
+    Ok(count)
 }
 
 pub fn install_trusted_dependencies(
@@ -485,6 +555,7 @@ fn install_trusted_with(
         &generation_path,
         format!("{}\n", status.generation).as_bytes(),
     )?;
+    write_authority_lock(manifest)?;
     Ok(resolved.len())
 }
 
@@ -629,6 +700,184 @@ pub fn installed_lockfile(manifest: &Manifest) -> Result<String, NivError> {
         resolved.insert((name, version), digest);
     }
     Ok(manifest.resolved_lockfile(&resolved))
+}
+
+pub fn installed_authority_lockfile(manifest: &Manifest) -> Result<String, NivError> {
+    installed_lockfile(manifest)?;
+    let store = manifest.root.join(".niv/deps");
+    let mut packages = BTreeMap::new();
+    packages.insert(
+        (manifest.name.clone(), manifest.version.clone()),
+        ("root".to_string(), manifest.clone()),
+    );
+    let mut pending: Vec<(String, String)> = manifest
+        .dependencies
+        .iter()
+        .map(|(name, version)| (name.clone(), version.clone()))
+        .collect();
+    while let Some((name, version)) = pending.pop() {
+        if packages.contains_key(&(name.clone(), version.clone())) {
+            continue;
+        }
+        let dependency = Manifest::load(&store.join(format!("{name}-{version}")))?;
+        if dependency.name != name || dependency.version != version {
+            return Err(package_error(format!(
+                "installed package '{name}' has the wrong authority identity"
+            )));
+        }
+        for (child_name, child_version) in &dependency.dependencies {
+            pending.push((child_name.clone(), child_version.clone()));
+        }
+        packages.insert((name, version), ("dependency".to_string(), dependency));
+    }
+
+    let mut output =
+        String::from("# This file is generated by Nivren. Review authority changes.\nformat = 1\n");
+    for ((name, version), (source, package)) in packages {
+        output.push_str("\n[[package]]\n");
+        output.push_str(&format!(
+            "name = {}\nversion = {}\nsource = {}\n",
+            lock_string(&name),
+            lock_string(&version),
+            lock_string(&source)
+        ));
+        for capability in &package.capabilities {
+            let scope = package
+                .capability_scopes
+                .get(capability)
+                .map_or("allow", String::as_str);
+            output.push_str("\n[[grant]]\n");
+            output.push_str(&format!(
+                "package = {}\nversion = {}\ncapability = {}\nscope = {}\n",
+                lock_string(&name),
+                lock_string(&version),
+                lock_string(capability),
+                lock_string(scope)
+            ));
+        }
+        for module in &package.unsafe_modules {
+            output.push_str("\n[[unsafe]]\n");
+            output.push_str(&format!(
+                "package = {}\nversion = {}\nmodule = {}\n",
+                lock_string(&name),
+                lock_string(&version),
+                lock_string(module)
+            ));
+        }
+    }
+    Ok(output)
+}
+
+pub fn write_authority_lock(manifest: &Manifest) -> Result<(), NivError> {
+    let contents = installed_authority_lockfile(manifest)?;
+    write_atomic(
+        &manifest.root.join(AUTHORITY_LOCKFILE_NAME),
+        contents.as_bytes(),
+    )
+}
+
+fn lock_string(value: &str) -> String {
+    serde_json::to_string(value).expect("strings always serialize")
+}
+
+pub fn cache_entries(manifest: &Manifest) -> Result<Vec<CacheEntry>, NivError> {
+    installed_lockfile(manifest)?;
+    let store = manifest.root.join(".niv/deps");
+    if !store.exists() {
+        return Ok(Vec::new());
+    }
+    reject_symlink_if_present(&store)?;
+    let reachable = reachable_dependencies(manifest)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&store)
+        .map_err(|error| package_error(format!("cannot enumerate dependency cache: {error}")))?
+    {
+        let entry =
+            entry.map_err(|error| package_error(format!("cannot read cache entry: {error}")))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| package_error(format!("cannot inspect cache entry: {error}")))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(package_error(format!(
+                "dependency cache contains an unsafe entry: {}",
+                path.display()
+            )));
+        }
+        let archive = fs::read(path.join(".niv-package"))
+            .map_err(|error| package_error(format!("cannot read cached package: {error}")))?;
+        let package = Package::decode(&archive)?;
+        let expected_directory = format!("{}-{}", package.name, package.version);
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_directory.as_str()) {
+            return Err(package_error(
+                "cached package directory has the wrong identity",
+            ));
+        }
+        let digest = sha256(&archive);
+        let recorded = fs::read_to_string(path.join(".niv-package-sha256"))
+            .map_err(|error| package_error(format!("cannot read cached checksum: {error}")))?;
+        if recorded.trim() != digest || !installed_package_matches(&package, &path, &digest)? {
+            return Err(package_error(format!(
+                "cached package '{}' {} failed integrity verification",
+                package.name, package.version
+            )));
+        }
+        entries.push(CacheEntry {
+            reachable: reachable.contains(&(package.name.clone(), package.version.clone())),
+            name: package.name,
+            version: package.version,
+            sha256: digest,
+            bytes: u64::try_from(archive.len())
+                .map_err(|_| package_error("cached package size exceeds platform range"))?,
+        });
+        if entries.len() > 4096 {
+            return Err(package_error("dependency cache exceeds 4096 packages"));
+        }
+    }
+    entries.sort_by(|left, right| (&left.name, &left.version).cmp(&(&right.name, &right.version)));
+    Ok(entries)
+}
+
+pub fn prune_cache(manifest: &Manifest) -> Result<(usize, u64), NivError> {
+    let entries = cache_entries(manifest)?;
+    let store = manifest.root.join(".niv/deps");
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.into_iter().filter(|entry| !entry.reachable) {
+        let directory = store.join(format!("{}-{}", entry.name, entry.version));
+        reject_symlink_if_present(&directory)?;
+        fs::remove_dir_all(&directory).map_err(|error| {
+            package_error(format!(
+                "cannot remove unreachable cache entry '{}': {error}",
+                directory.display()
+            ))
+        })?;
+        removed += 1;
+        bytes = bytes.saturating_add(entry.bytes);
+    }
+    Ok((removed, bytes))
+}
+
+fn reachable_dependencies(manifest: &Manifest) -> Result<BTreeSet<(String, String)>, NivError> {
+    let store = manifest.root.join(".niv/deps");
+    let mut pending = manifest
+        .dependencies
+        .iter()
+        .map(|(name, version)| (name.clone(), version.clone()))
+        .collect::<Vec<_>>();
+    let mut reachable = BTreeSet::new();
+    while let Some((name, version)) = pending.pop() {
+        if !reachable.insert((name.clone(), version.clone())) {
+            continue;
+        }
+        let dependency = Manifest::load(&store.join(format!("{name}-{version}")))?;
+        pending.extend(
+            dependency
+                .dependencies
+                .iter()
+                .map(|(name, version)| (name.clone(), version.clone())),
+        );
+    }
+    Ok(reachable)
 }
 
 fn reject_symlink_if_present(path: &Path) -> Result<(), NivError> {
@@ -846,7 +1095,7 @@ mod tests {
         fs::create_dir_all(&app_root).unwrap();
         fs::write(
             dependency_root.join("niv.toml"),
-            "[package]\nname = \"library\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n",
+            "[package]\nname = \"library\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[capabilities]\nNetwork = \"host:api.example.test;method:GET\"\n",
         )
         .unwrap();
         fs::write(
@@ -941,6 +1190,15 @@ mod tests {
                 .unwrap()
                 .trim(),
             "5"
+        );
+        let authority = fs::read_to_string(app_root.join("niv.authority.lock")).unwrap();
+        assert!(authority.contains("name = \"app\""));
+        assert!(authority.contains("name = \"library\""));
+        assert!(authority.contains("capability = \"Network\""));
+        assert!(authority.contains("scope = \"host:api.example.test;method:GET\""));
+        assert_eq!(
+            authority,
+            super::installed_authority_lockfile(&app).unwrap()
         );
         fs::remove_dir_all(root).unwrap();
     }

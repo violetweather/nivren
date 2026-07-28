@@ -2,11 +2,18 @@ pub mod ast;
 pub mod bindgen;
 pub mod bundle;
 pub mod bytecode;
+mod call_labels;
+#[cfg(feature = "host-runtime")]
+pub mod channel;
 pub mod compiler;
+#[cfg(feature = "host-runtime")]
+pub mod dap;
+mod derive_methods;
 pub mod documentation;
 pub mod error;
 pub mod fixed;
 pub mod formatter;
+pub mod intent;
 pub mod json;
 pub mod lexer;
 #[cfg(feature = "host-runtime")]
@@ -33,6 +40,8 @@ pub mod trust;
 pub mod typecheck;
 #[cfg(feature = "host-runtime")]
 pub mod websocket;
+#[cfg(feature = "host-runtime")]
+pub mod workspace;
 
 use error::NivError;
 #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]

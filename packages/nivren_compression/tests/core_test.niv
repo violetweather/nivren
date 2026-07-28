@@ -1,16 +1,16 @@
 use "../src/main.niv"
 
-keep packed = main.gzip_text("Nivren Nivren", 6)
-keep restored = choose packed {
-    Ok(bytes) => main.gunzip_text(bytes, 1024),
-    Err(problem) => err(problem),
+keep packed set main.gzip_text with { text set "Nivren Nivren" level set 6 }
+keep restored set choose packed {
+    case Ok carries bytes => main.gunzip_text with { data set bytes maximum set 1024 }
+    case Err carries problem => err(problem)
 }
-assert(restored == ok("Nivren Nivren"), "gzip text roundtrip")
+assert with { condition set restored == ok("Nivren Nivren") message set "gzip text roundtrip" }
 
-keep input = std.bytes.from_string("portable")
-keep zlib = main.zlib(input, 9)
-keep unzlib = choose zlib {
-    Ok(bytes) => main.unzlib(bytes, 1024),
-    Err(problem) => err(problem),
+keep input set std.bytes.from_string with { value set "portable" }
+keep packed_zlib set main.zlib with { data set input level set 9 }
+keep restored_zlib set choose packed_zlib {
+    case Ok carries bytes => main.unzlib with { data set bytes maximum set 1024 }
+    case Err carries problem => err(problem)
 }
-assert(unzlib == ok(input), "zlib roundtrip")
+assert with { condition set restored_zlib == ok(input) message set "zlib roundtrip" }

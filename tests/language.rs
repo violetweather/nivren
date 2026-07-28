@@ -1,4 +1,5 @@
 use nivren::runtime::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -45,6 +46,337 @@ fn eval_tree(source: &str) -> Value {
 #[test]
 fn arithmetic_and_precedence() {
     assert_eq!(eval("2 + 3 * 4"), Value::Int(14));
+}
+
+#[test]
+fn edition_four_intent_grammar_checks_and_runs_in_both_engines() {
+    let source = r#"
+type UserId from Int
+
+shape User holds {
+    id is UserId
+    name is String
+    email is maybe String
+} with Json, Compare, Display, Validate
+
+choice LookupProblem holds {
+    case Missing
+    case Invalid carries String
+}
+
+define add
+takes {
+    left is Int
+    right is Int
+}
+gives Int
+{
+    give left + right
+}
+
+define checked_add
+takes {
+    left is Int
+    right is Int
+}
+gives Int or String
+needs Network within "example.test"
+{
+    give ok(add with {
+        left set left
+        right set right
+    })
+}
+
+shape AddPlan holds {
+    left is Int
+    right is Int
+}
+
+prepare addition as AddPlan with {
+    left set 20
+    right set 22
+}
+
+change total is Int set perform addition.left
+change total to total + addition.right
+
+keep answer set choose checked_add with {
+    left set total
+    right set 0
+} {
+    case Ok carries value => value
+    case Err carries problem => -1
+}
+
+when answer == 42 {
+    show("intent")
+} otherwise {
+    show("wrong")
+}
+
+change visited is Int set 0
+each value in [1, 2, 3] {
+    change visited to visited + value
+}
+repeat while visited < 10 {
+    change visited to visited + 1
+}
+
+answer + visited
+"#;
+    assert_eq!(eval_tree(source), Value::Int(52));
+    assert_eq!(eval_vm(source), Value::Int(52));
+}
+
+#[test]
+fn edition_four_diagnostics_name_the_intended_forms() {
+    let errors = nivren::check("keep answer is Int = 42").unwrap_err();
+    assert!(errors[0].message.contains("set"));
+
+    let errors = nivren::check("prepare request as Request { value set 1 }").unwrap_err();
+    assert!(errors[0].message.contains("with"));
+
+    let errors = nivren::check("shape User holds { name is String } with Magic").unwrap_err();
+    assert!(errors[0].message.contains("unknown derive 'Magic'"));
+
+    let errors = nivren::check(
+        "define add takes { left is Int right is Int } gives Int { give left + right }\n\
+         add with { right set 2 left set 1 }",
+    )
+    .unwrap_err();
+    assert!(errors[0].message.contains("canonical order"));
+
+    for (source, expected) in [
+        ("type UserId U64", "from"),
+        ("shape User name is String }", "holds"),
+        ("choice State holds { case Failed carries }", "type"),
+        ("prepare request Request with {}", "as"),
+        ("5 through 2", "function"),
+        (
+            "define fetch needs Network within \"https://api.example.test/v1\" { give null }",
+            "names a host",
+        ),
+        (
+            "protocol Named { name(value: Self) gives String }",
+            "define",
+        ),
+        (
+            "shape User holds { name is String } adopt Named for User { name user_name }",
+            "set",
+        ),
+        (
+            "shape User holds { name is String } with Json, Json",
+            "more than once",
+        ),
+    ] {
+        let errors = nivren::check(source).unwrap_err();
+        assert!(
+            errors.iter().any(|error| error.message.contains(expected)),
+            "{source:?} did not explain {expected:?}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn edition_four_preserves_scoped_needs_as_checked_metadata() {
+    let source = "define fetch gives String or String needs Network within \"api.example.test\" { give err(\"offline\") } expose { fetch }";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let nivren::ast::Stmt::Function {
+        capability_needs, ..
+    } = &program[0]
+    else {
+        panic!("expected function");
+    };
+    assert_eq!(capability_needs[0].capability, "Network");
+    assert_eq!(
+        capability_needs[0].boundary.as_deref(),
+        Some("api.example.test")
+    );
+    let docs = nivren::documentation::generate("proof", "4.0.0-beta", &program);
+    assert!(docs.contains("Network within \"api.example.test\""));
+
+    let invalid = nivren::parser::parse(
+        nivren::lexer::scan(
+            "define fetch needs Network within \"https://api.example.test/v1\" { give null }",
+        )
+        .unwrap(),
+    )
+    .unwrap_err();
+    assert!(invalid[0].message.contains("names a host"));
+}
+
+#[test]
+fn edition_four_protocol_clauses_dispatch_in_both_engines() {
+    let source = r#"
+protocol Named {
+    define name
+    takes {
+        value is Self
+    }
+    gives String
+}
+
+shape User holds {
+    name is String
+}
+
+define user_name
+takes {
+    value is User
+}
+gives String {
+    give value.name
+}
+
+adopt Named for User {
+    name set user_name
+}
+
+keep user set User with {
+    name set "Mira"
+}
+Named.name(user)
+"#;
+    assert_eq!(eval_tree(source), Value::String("Mira".into()));
+    assert_eq!(eval_vm(source), Value::String("Mira".into()));
+}
+
+#[test]
+fn edition_four_labeled_calls_preserve_names_and_validate_module_exports() {
+    let parsed = nivren::parser::parse(
+        nivren::lexer::scan(
+            r#"define greet takes { name is String } gives String { give name }
+               greet with { name set "Mira" }"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let nivren::ast::Stmt::Expression(nivren::ast::Expr::Call(_, _, labels, _)) = &parsed[1] else {
+        panic!("expected labeled call");
+    };
+    assert_eq!(labels.as_deref(), Some(["name".to_string()].as_slice()));
+
+    let body = nivren::parser::parse(
+        nivren::lexer::scan("define greet takes { name is String } gives String { give name }")
+            .unwrap(),
+    )
+    .unwrap();
+    let span = nivren::ast::Span { line: 1, column: 1 };
+    let module = nivren::ast::Stmt::Module {
+        name: "people".into(),
+        body,
+        exports: vec!["greet".into()],
+        span,
+    };
+    let call = |label: &str| {
+        nivren::parser::parse(
+            nivren::lexer::scan(&format!("people.greet with {{ {label} set \"Mira\" }}")).unwrap(),
+        )
+        .unwrap()
+        .remove(0)
+    };
+    assert!(nivren::typecheck::check(&[module.clone(), call("name")]).is_ok());
+    let errors = nivren::typecheck::check(&[module, call("person")]).unwrap_err();
+    assert!(errors[0].message.contains("expects labeled values [name]"));
+}
+
+#[test]
+fn edition_four_json_schema_labels_are_parseable_and_checked() {
+    let source = r#"
+shape Event holds {
+    id is Int
+} with Json
+
+std.json.decode with {
+    schema set Event
+    source set "{\"id\":42}"
+}
+"#;
+    assert!(nivren::check(source).is_ok());
+}
+
+#[test]
+fn edition_four_derives_are_checked_and_gate_generated_operations() {
+    let complete = r#"
+shape Release holds {
+    name is String
+    build is Int
+} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+
+keep first set Release with { name set "beta" build set 4 }
+keep second set Release with { name set "beta" build set 4 }
+assert(first == second, "Compare derive")
+std.json.stringify(first)
+"#;
+    assert!(nivren::check(complete).is_ok());
+    assert_eq!(eval_tree(complete), eval_vm(complete));
+
+    for derive in ["Json", "Compare", "Display", "Validate", "Binary"] {
+        let source = format!("shape Unsafe holds {{ handle is NativeHandle }} with {derive}");
+        let errors = nivren::check(&source).unwrap_err();
+        assert!(
+            errors[0]
+                .message
+                .contains(&format!("derive {derive} does not support"))
+        );
+    }
+    assert!(nivren::check("shape Row holds { values is [Int] } with DatabaseRow").is_err());
+    assert!(nivren::check("shape Cli holds { bytes is Bytes } with Arguments").is_err());
+    let key_errors = nivren::check("shape Id holds { value is Int } with Key").unwrap_err();
+    assert!(key_errors[0].message.contains("must also derive Compare"));
+
+    let missing_json = r#"
+shape Visible holds { value is Int } with Display
+std.json.stringify(Visible with { value set 1 })
+"#;
+    let errors = nivren::check(missing_json).unwrap_err();
+    assert!(errors[0].message.contains("must derive Json"));
+}
+
+#[test]
+fn edition_four_generated_derive_methods_run_in_both_engines() {
+    let source = r#"
+shape Release holds {
+    name is String
+    build is Int
+} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+
+define verify
+gives String or String
+{
+    keep release set Release with { name set "beta" build set 4 }
+    keep json set Release.to_json with { value set release } or give
+    keep decoded set Release.from_json with { source set json } or give
+    assert(Release.compare with { left set release right set decoded }, "compare")
+    keep shown set Release.display with { value set decoded }
+    keep key set Release.key with { value set decoded } or give
+    keep checked set Release.validate with { value set decoded } or give
+    keep bytes set Release.to_binary with { value set decoded } or give
+    keep binary set Release.from_binary with { bytes set bytes } or give
+    keep row set Release.from_row with { source set json } or give
+    keep cli set Release.from_arguments with {
+        arguments set ["--name=beta", "--build=4"]
+    } or give
+    assert(Release.compare with { left set binary right set row }, "binary and row")
+    assert(Release.compare with { left set row right set cli }, "arguments")
+    give ok(shown + ":" + key)
+}
+
+verify with {}
+"#;
+    assert_eq!(eval_tree(source), eval_vm(source));
+    assert!(matches!(eval_vm(source), Value::Ok(_)));
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let restored = nivren::bundle::decode(&nivren::bundle::encode(&chunk).unwrap()).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&restored)
+            .unwrap(),
+        eval_tree(source)
+    );
 }
 
 #[test]
@@ -97,7 +429,138 @@ fn public_edition_three_examples_all_type_check() {
         let source = fs::read_to_string(&path).unwrap();
         nivren::check(&source)
             .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
+        let formatted = nivren::formatter::format(&source);
+        assert_eq!(nivren::formatter::format(&formatted), formatted);
+        nivren::check(&formatted)
+            .unwrap_or_else(|errors| panic!("formatted {} failed: {errors:?}", path.display()));
     }
+}
+
+#[test]
+fn edition_four_language_proof_programs_all_type_check() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4");
+    for name in [
+        "cli_automation.niv",
+        "http_service.niv",
+        "database_service.niv",
+        "realtime_bot.niv",
+        "concurrent_pipeline.niv",
+        "native_binding.niv",
+    ] {
+        let path = root.join(name);
+        let source = fs::read_to_string(&path).unwrap();
+        nivren::check(&source)
+            .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
+        let formatted = nivren::formatter::format(&source);
+        assert_eq!(nivren::formatter::format(&formatted), formatted);
+        nivren::check(&formatted)
+            .unwrap_or_else(|errors| panic!("formatted {} failed: {errors:?}", path.display()));
+    }
+}
+
+#[test]
+fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
+    let tasks = [
+        (
+            "keep answer: Int = 42\nanswer",
+            "keep answer is Int set 42\nanswer",
+        ),
+        (
+            "change count: Int = 0\ncount = count + 1\ncount",
+            "change count is Int set 0\nchange count to count + 1\ncount",
+        ),
+        (
+            "define add(left: Int, right: Int) gives Int { give left + right }\nadd(20, 22)",
+            "define add takes { left is Int right is Int } gives Int { give left + right }\nadd with { left set 20 right set 22 }",
+        ),
+        (
+            "shape User { name: String, active: Bool }\nUser(\"Mira\", yes).name",
+            "shape User holds { name is String active is Bool }\nUser with { name set \"Mira\" active set yes }.name",
+        ),
+        (
+            "choice State { Ready, Failed(String) }\nchoose State.Ready { Ready => 1, Failed(problem) => 0 }",
+            "choice State holds { case Ready case Failed carries String }\nchoose State.Ready { case Ready => 1 case Failed carries problem => 0 }",
+        ),
+        (
+            "keep name: String? = none\nname ?? \"guest\"",
+            "keep name is maybe String set none\nname ?? \"guest\"",
+        ),
+        (
+            "change total = 0\neach value within [1, 2, 3] { total = total + value }\ntotal",
+            "change total set 0\neach value in [1, 2, 3] { change total to total + value }\ntotal",
+        ),
+        (
+            "change count = 0\nrepeat count < 3 { count = count + 1 }\ncount",
+            "change count set 0\nrepeat while count < 3 { change count to count + 1 }\ncount",
+        ),
+        (
+            "define answer() gives Result<Int, String> { give ok(42) }\nanswer()",
+            "define answer gives Int or String { give ok(42) }\nanswer with {}",
+        ),
+        (
+            "define double(value: Int) gives Int { give value * 2 }\n21 through double",
+            "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
+        ),
+        (
+            "shape Request { path: String, timeout: Float }\nkeep request = Request(\"/\", 5.0)\nrequest.path",
+            "shape Request holds { path is String timeout is Float }\nprepare request as Request with { path set \"/\" timeout set 5.0 }\n(perform request).path",
+        ),
+        (
+            "define greet(name: String) gives String { give \"hello \" + name }\ngreet(\"Nivren\")",
+            "define greet takes { name is String } gives String { give \"hello \" + name }\ngreet with { name set \"Nivren\" }",
+        ),
+    ];
+    let mut ratios = Vec::new();
+    for (edition_three, edition_four) in tasks {
+        nivren::check(edition_four).unwrap_or_else(|errors| panic!("{edition_four}: {errors:?}"));
+        let old = nivren::lexer::scan(edition_three).unwrap().len() - 1;
+        let new = nivren::lexer::scan(edition_four).unwrap().len() - 1;
+        ratios.push(new as f64 / old as f64);
+    }
+    ratios.sort_by(f64::total_cmp);
+    let median = (ratios[5] + ratios[6]) / 2.0;
+    eprintln!("edition_four_median_token_ratio {median:.3}");
+    assert!(
+        median <= 1.15,
+        "Edition 4 median token ratio {median:.3} exceeds the 1.15 language-proof budget"
+    );
+}
+
+#[test]
+fn edition_four_maintenance_corpus_reduces_ambiguous_choices() {
+    #[derive(serde::Deserialize)]
+    struct MaintenanceTask {
+        task: String,
+        edition3_steps: usize,
+        edition4_steps: usize,
+        edition3_ambiguous_choices: usize,
+        edition4_ambiguous_choices: usize,
+        evidence: String,
+    }
+
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/maintenance-corpus.json");
+    let tasks: Vec<MaintenanceTask> =
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(tasks.len() >= 6);
+    let mut old_choices = 0;
+    let mut new_choices = 0;
+    for task in tasks {
+        assert!(!task.task.is_empty() && !task.evidence.is_empty());
+        assert!(
+            task.edition4_steps <= task.edition3_steps,
+            "{} adds conceptual maintenance steps",
+            task.task
+        );
+        assert!(
+            task.edition4_ambiguous_choices <= task.edition3_ambiguous_choices,
+            "{} adds ambiguous maintenance choices",
+            task.task
+        );
+        old_choices += task.edition3_ambiguous_choices;
+        new_choices += task.edition4_ambiguous_choices;
+    }
+    assert!(new_choices < old_choices);
 }
 
 #[test]
@@ -1747,6 +2210,7 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
     for arguments in [
         vec!["new".to_string(), project.display().to_string()],
         vec!["dev".to_string(), project.display().to_string()],
+        vec!["bench".to_string(), project.display().to_string()],
         vec![
             "test".to_string(),
             project.join("tests/niv").display().to_string(),
@@ -1779,6 +2243,30 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
     );
     assert!(String::from_utf8_lossy(&executed.stdout).contains("Welcome to Nivren"));
 
+    let native_build = std::process::Command::new(niv)
+        .args([
+            "build",
+            "--standalone",
+            "--native",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        native_build.status.success(),
+        "native standalone failed: {}",
+        String::from_utf8_lossy(&native_build.stderr)
+    );
+    let embedded = nivren::standalone::extract(&fs::read(&standalone).unwrap()).unwrap();
+    assert!(
+        embedded
+            .manifest
+            .starts_with("# nivren-standalone-engine = native\n")
+    );
+    let executed = std::process::Command::new(&standalone).output().unwrap();
+    assert!(executed.status.success());
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("Welcome to Nivren"));
+
     let project_text = project.display().to_string();
     let added = std::process::Command::new(niv)
         .args(["add", "answerlib", "1.2.3", &project_text])
@@ -1789,6 +2277,161 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
     assert_eq!(manifest.dependencies["answerlib"], "1.2.3");
 
     fs::remove_dir_all(parent).unwrap();
+}
+
+#[test]
+fn cli_test_profiles_and_deterministic_time_are_explicit() {
+    let project = module_fixture("test-profiles");
+    let tests = project.join("tests/niv");
+    fs::create_dir_all(&tests).unwrap();
+    fs::write(
+        project.join("niv.toml"),
+        "[package]\nname = \"test-profiles\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[capabilities]\nTime = \"allow\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("main.niv"), "42").unwrap();
+    fs::write(
+        tests.join("clock_test.niv"),
+        "assert with { condition set perform clock with { } == 1700000000.25 message set \"fixed test time\" }",
+    )
+    .unwrap();
+    let niv = env!("CARGO_BIN_EXE_niv");
+    let timed = Command::new(niv)
+        .args(["test", "--time", "1700000000.25", tests.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        timed.status.success(),
+        "deterministic test failed: {}",
+        String::from_utf8_lossy(&timed.stderr)
+    );
+    fs::write(
+        tests.join("clock_test.niv"),
+        "assert with { condition set yes message set \"profile dispatch\" }",
+    )
+    .unwrap();
+    for profile in ["--property", "--compat", "--fuzz-smoke"] {
+        let output = Command::new(niv)
+            .args(["test", profile, tests.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{profile} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn vscode_extension_registers_the_nivren_debug_adapter() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(repository.join("editors/vscode/package.json")).unwrap())
+            .unwrap();
+    let debugger = &manifest["contributes"]["debuggers"][0];
+    assert_eq!(debugger["type"], "nivren");
+    assert_eq!(debugger["languages"][0], "nivren");
+    assert_eq!(debugger["initialConfigurations"][0]["request"], "launch");
+    let extension = fs::read_to_string(repository.join("editors/vscode/src/extension.ts")).unwrap();
+    assert!(extension.contains("registerDebugAdapterDescriptorFactory"));
+    assert!(extension.contains("new vscode.DebugAdapterExecutable(this.executable, [\"dap\"])"));
+}
+
+#[test]
+fn workspace_commands_build_test_and_reuse_incremental_members() {
+    let root = module_fixture("workspace-commands");
+    for name in ["core", "app"] {
+        let member = root.join(name);
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::create_dir_all(member.join("tests/niv")).unwrap();
+        fs::write(
+            member.join("niv.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(member.join("src/main.niv"), "42").unwrap();
+        fs::write(
+            member.join("tests/niv/value_test.niv"),
+            "assert(6 * 7 == 42, \"workspace member\")",
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.join("niv-workspace.toml"),
+        "[workspace]\nmembers = \"core, app\"\n",
+    )
+    .unwrap();
+    let niv = env!("CARGO_BIN_EXE_niv");
+    for action in ["build", "build", "test"] {
+        let output = Command::new(niv)
+            .args(["workspace", action, root.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "workspace {action} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if action == "build" {
+            assert!(String::from_utf8_lossy(&output.stdout).contains(
+                if root.join("core/target/.nivren-fingerprint").exists() {
+                    "core"
+                } else {
+                    "built"
+                }
+            ));
+        }
+    }
+    assert!(root.join("core/target/core.nivb").is_file());
+    assert!(root.join("app/target/app.nivb").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cli_projects_receive_the_bounded_builtin_sqlite_host() {
+    let root = module_fixture("sqlite-cli-host");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("niv.toml"),
+        "[package]\nname = \"sqlite-app\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nNative = \"kind:database\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.niv"),
+        r#"define run
+gives String or String
+needs Native within "database"
+{
+    keep opened set perform std.host.open with { kind set "database" request set "memory://cli-proof" } or give
+    using handle = opened {
+        keep created set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"CREATE TABLE users (name TEXT NOT NULL)\",\"parameters\":[],\"maximum_rows\":0,\"timeout\":5.0}" } or give
+        keep inserted set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"INSERT INTO users (name) VALUES (?)\",\"parameters\":[\"Ada\"],\"maximum_rows\":0,\"timeout\":5.0}" } or give
+        give perform std.host.call with { handle set handle name set "query" request set "{\"operation\":\"query\",\"statement\":\"SELECT name FROM users\",\"parameters\":[],\"maximum_rows\":10,\"timeout\":5.0}" }
+    }
+}
+
+show(choose perform run with {} {
+    case Ok carries response => response
+    case Err carries problem => problem
+})
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["run", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Ada"));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1836,12 +2479,101 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
         fs::read_to_string(app.join("niv.lock")).unwrap(),
         expected_lock
     );
+    fs::remove_file(app.join("niv.lock")).unwrap();
+    fs::remove_dir_all(&registry).unwrap();
+    assert_eq!(
+        nivren::package::install_offline_dependencies(&app_manifest).unwrap(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("niv.lock")).unwrap(),
+        expected_lock
+    );
+    assert!(app.join("niv.authority.lock").is_file());
+    let authority_check = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "check", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(authority_check.status.success());
+    let changed_manifest =
+        fs::read_to_string(app.join("niv.toml")).unwrap() + "\n[capabilities]\nTime = \"allow\"\n";
+    fs::write(app.join("niv.toml"), changed_manifest).unwrap();
+    let stale_authority = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "check", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!stale_authority.status.success());
+    let report = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "report", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(report.status.success());
+    assert!(String::from_utf8_lossy(&report.stdout).contains("capability = \"Time\""));
+    let relocked = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "lock", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(relocked.status.success());
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_niv"))
+            .args(["authority", "check", app.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let program = nivren::modules::load_project(&app, &app.join("main.niv")).unwrap();
     nivren::typecheck::check(&program).unwrap();
     assert_eq!(
         nivren::runtime::Interpreter::new().run(&program).unwrap(),
         Value::Int(42)
     );
+
+    let unused = nivren::package::Package {
+        name: "unused".into(),
+        version: "1.0.0".into(),
+        files: BTreeMap::from([
+            (
+                "niv.toml".into(),
+                b"[package]\nname = \"unused\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n"
+                    .to_vec(),
+            ),
+            ("main.niv".into(), b"42".to_vec()),
+        ]),
+    };
+    let unused_archive = unused.encode().unwrap();
+    let unused_root = app.join(".niv/deps/unused-1.0.0");
+    unused.extract(&unused_root).unwrap();
+    fs::write(unused_root.join(".niv-package"), &unused_archive).unwrap();
+    fs::write(
+        unused_root.join(".niv-package-sha256"),
+        hex(&Sha256::digest(&unused_archive)),
+    )
+    .unwrap();
+    let entries = nivren::package::cache_entries(&app_manifest).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "answerlib" && entry.reachable)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "unused" && !entry.reachable)
+    );
+    let listed = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["cache", "list", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("unused"));
+    let pruned = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["cache", "prune", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(pruned.status.success());
+    assert!(!unused_root.exists());
+    assert!(app.join(".niv/deps/answerlib-1.0.0").exists());
 
     fs::write(
         app.join(".niv/deps/answerlib-1.0.0/main.niv"),
@@ -1908,6 +2640,75 @@ fn formatter_is_comment_safe_and_idempotent() {
 }
 
 #[test]
+fn edition_four_formatter_canonicalizes_spacing_without_moving_comments() {
+    let source = r#"shape   User   holds {
+name   is   String // public label
+}
+define   greet
+takes {
+user   is   User
+}
+gives   String
+{
+keep   text is String set user.name
+give   text
+}
+greet   with { user   set   User with { name set "Mira" } }
+"#;
+    let expected = r#"shape User holds {
+    name is String // public label
+}
+define greet
+takes {
+    user is User
+}
+gives String {
+    keep text is String set user.name
+    give text
+}
+greet with {
+    user set User with {
+        name set "Mira"
+    }
+}
+"#;
+    let formatted = nivren::formatter::format(source);
+    assert_eq!(formatted, expected);
+    assert_eq!(nivren::formatter::format(&formatted), formatted);
+    assert!(nivren::check(&formatted).is_ok());
+}
+
+#[test]
+fn edition_four_formatter_erases_equivalent_line_layout_choices() {
+    let compact = r#"shape User holds { name is String } with Json define greet takes { user is User } gives String { give user.name } greet with { user set User with { name set "Mira" } }"#;
+    let vertical = r#"
+shape User holds {
+    name is String
+} with Json
+
+define greet
+takes {
+    user is User
+}
+gives String
+{
+    give user.name
+}
+
+greet with {
+    user set User with {
+        name set "Mira"
+    }
+}
+"#;
+    let compact = nivren::formatter::format(compact);
+    let vertical = nivren::formatter::format(vertical);
+    assert_eq!(compact, vertical);
+    assert_eq!(nivren::formatter::format(&compact), compact);
+    assert!(nivren::check(&compact).is_ok());
+}
+
+#[test]
 fn documentation_lists_only_explicit_module_exports() {
     let source =
         "define public(value: Int) gives Int { give value; } keep hidden = 1; expose { public };";
@@ -1971,7 +2772,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
     nivren::bytecode::verify(&chunk).unwrap();
     let first = nivren::bytecode::disassemble(&chunk);
     assert_eq!(first, nivren::bytecode::disassemble(&chunk));
-    assert!(first.starts_with("NIVB 5\n"));
+    assert!(first.starts_with("NIVB 7\n"));
 
     let mut incompatible = chunk;
     incompatible.version += 1;
@@ -1994,7 +2795,7 @@ fn source_maps_are_stable_nested_and_exportable() {
     assert_eq!(first, second);
     let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(parsed["schema"], "org.nivren.sourcemap.v1");
-    assert_eq!(parsed["bytecodeVersion"], 5);
+    assert_eq!(parsed["bytecodeVersion"], 7);
     assert!(
         parsed["mappings"]
             .as_array()
@@ -4517,7 +5318,17 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     let failing = directory.join("failing.niv");
     let profile = directory.join("profile.json");
     let crash = directory.join("crash.json");
-    fs::write(&healthy, "keep answer = 6 * 7; answer").unwrap();
+    fs::write(
+        &healthy,
+        "define one takes {} gives Int { give 1 }\n\
+         define many takes {} gives [Int] or String needs Task {\n\
+             keep first set perform std.tasks.spawn with { operation set one }\n\
+             keep second set perform std.tasks.spawn with { operation set one }\n\
+             give perform std.tasks.all with { tasks set [first, second] }\n\
+         }\n\
+         perform many with {}",
+    )
+    .unwrap();
     fs::write(
         &failing,
         "define secret() gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
@@ -4542,6 +5353,18 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     assert_eq!(report["schema"], "org.nivren.observation.v1");
     assert_eq!(report["kind"], "profile");
     assert!(report["instructions"].as_u64().unwrap() > 0);
+    assert!(report["execution"]["instructions"].as_u64().unwrap() > 0);
+    assert!(report["memory"]["allocation_work_bytes"].as_u64().unwrap() > 0);
+    assert!(
+        report["memory"]["heap"]["tracked_environments"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(report["effects"]["perform_boundaries"].as_u64().unwrap() >= 4);
+    assert!(report["effects"]["count"].as_u64().unwrap() >= 3);
+    assert_eq!(report["async_tasks"]["spawns"], 2);
+    assert_eq!(report["async_tasks"]["joins"], 2);
+    assert!(report["engines"]["native"]["fallbacks"].as_u64().is_some());
 
     let output = std::process::Command::new(niv)
         .args([
@@ -4627,7 +5450,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("niv.toml"),
-        "[package]\nname = \"sample\"\nversion = \"1.2.3\"\nentry = \"src/main.niv\"\n",
+        "[package]\nname = \"sample\"\nversion = \"1.2.3\"\nentry = \"src/main.niv\"\n\n[capabilities]\nFileRead = \"path:./data\"\n",
     )
     .unwrap();
     fs::write(project.join("src/main.niv"), "keep answer = 42; answer").unwrap();
@@ -4654,6 +5477,23 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
         }]
     );
     assert!(nivren::package::search("../", &registry).is_err());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("v1/index/sample/1.2.3.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["capabilities"], serde_json::json!(["FileRead"]));
+    assert_eq!(metadata["capability_scopes"]["FileRead"], "path:./data");
+    nivren::package::set_yanked("sample", "1.2.3", &registry, true).unwrap();
+    assert!(nivren::package::fetch("sample", "1.2.3", &registry).is_err());
+    assert!(
+        nivren::package::search("sample", &registry)
+            .unwrap()
+            .is_empty()
+    );
+    nivren::package::set_yanked("sample", "1.2.3", &registry, false).unwrap();
+    assert_eq!(
+        nivren::package::fetch("sample", "1.2.3", &registry).unwrap(),
+        first
+    );
     let destination = project.with_file_name(format!(
         "nivren-package-extracted-{}-{:?}",
         std::process::id(),
@@ -4690,7 +5530,10 @@ fn official_packages_test_document_publish_install_and_run_together() {
         "nivren_compression",
         "nivren_crypto",
         "nivren_csv",
+        "nivren_database",
+        "nivren_desktop",
         "nivren_discord",
+        "nivren_gpu",
         "nivren_image",
         "nivren_jwt",
         "nivren_matrix",
@@ -4709,6 +5552,44 @@ fn official_packages_test_document_publish_install_and_run_together() {
     ];
     for name in package_names {
         let root = repository.join("packages").join(name);
+        let mut edition_sources = vec![root.join("src/main.niv")];
+        let tests_root = root.join("tests");
+        if tests_root.exists() {
+            edition_sources.extend(
+                fs::read_dir(&tests_root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "niv")),
+            );
+        }
+        for source_path in edition_sources {
+            let source = fs::read_to_string(&source_path).unwrap();
+            for (line_number, line) in source.lines().enumerate() {
+                let line = line.trim_start();
+                assert!(
+                    !(line.starts_with("define ") && line.contains('(')),
+                    "official package {name} uses an Edition 3 definition at {}:{}",
+                    source_path.display(),
+                    line_number + 1
+                );
+                assert!(
+                    !((line.starts_with("shape ") || line.starts_with("choice "))
+                        && line.contains('{')
+                        && !line.contains(" holds")),
+                    "official package {name} uses an Edition 3 declaration at {}:{}",
+                    source_path.display(),
+                    line_number + 1
+                );
+                assert!(
+                    !((line.starts_with("keep ") || line.starts_with("change "))
+                        && line.contains(" = ")
+                        && !line.contains(" set ")),
+                    "official package {name} uses Edition 3 binding syntax at {}:{}",
+                    source_path.display(),
+                    line_number + 1
+                );
+            }
+        }
         let tested = Command::new(env!("CARGO_BIN_EXE_niv"))
             .args(["test", root.to_str().unwrap()])
             .output()
@@ -4747,7 +5628,7 @@ fn official_packages_test_document_publish_install_and_run_together() {
     fs::create_dir_all(consumer.join("src")).unwrap();
     fs::write(
         consumer.join("niv.toml"),
-        "[package]\nname = \"official_consumer\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[dependencies]\nnivren_aead = \"1.0.0\"\nnivren_aws = \"1.0.0\"\nnivren_columnar = \"1.0.0\"\nnivren_compression = \"1.0.0\"\nnivren_csv = \"1.0.0\"\nnivren_crypto = \"1.0.0\"\nnivren_discord = \"1.0.0\"\nnivren_image = \"1.0.0\"\nnivren_jwt = \"1.0.0\"\nnivren_matrix = \"1.0.0\"\nnivren_metrics = \"1.0.0\"\nnivren_oidc = \"1.0.0\"\nnivren_redis = \"1.0.0\"\nnivren_routing = \"1.0.0\"\nnivren_secrets = \"1.0.0\"\nnivren_sql = \"1.0.0\"\nnivren_stats = \"1.0.0\"\nnivren_svg = \"1.0.0\"\nnivren_testing = \"1.0.0\"\nnivren_trace = \"1.0.0\"\nnivren_validation = \"1.0.0\"\nnivren_wav = \"1.0.0\"\n",
+        "[package]\nname = \"official_consumer\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[dependencies]\nnivren_aead = \"1.0.0\"\nnivren_aws = \"1.0.0\"\nnivren_columnar = \"1.0.0\"\nnivren_compression = \"1.0.0\"\nnivren_csv = \"1.0.0\"\nnivren_crypto = \"1.0.0\"\nnivren_database = \"1.0.0\"\nnivren_desktop = \"1.0.0\"\nnivren_discord = \"1.0.0\"\nnivren_gpu = \"1.0.0\"\nnivren_image = \"1.0.0\"\nnivren_jwt = \"1.0.0\"\nnivren_matrix = \"1.0.0\"\nnivren_metrics = \"1.0.0\"\nnivren_oidc = \"1.0.0\"\nnivren_redis = \"1.0.0\"\nnivren_routing = \"1.0.0\"\nnivren_secrets = \"1.0.0\"\nnivren_sql = \"1.0.0\"\nnivren_stats = \"1.0.0\"\nnivren_svg = \"1.0.0\"\nnivren_testing = \"1.0.0\"\nnivren_trace = \"1.0.0\"\nnivren_validation = \"1.0.0\"\nnivren_wav = \"1.0.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -4764,7 +5645,10 @@ use "@nivren_image"
 use "@nivren_crypto"
 use "@nivren_compression"
 use "@nivren_csv"
+use "@nivren_database"
+use "@nivren_desktop"
 use "@nivren_secrets"
+use "@nivren_gpu"
 use "@nivren_sql"
 use "@nivren_stats"
 use "@nivren_jwt"
@@ -4793,6 +5677,12 @@ keep compressed = nivren_compression.gzip_text("Nivren", 6)
 keep compression_ok = choose compressed { Ok(bytes) => nivren_compression.gunzip_text(bytes, 1024) == ok("Nivren"), Err(problem) => no }
 keep csv_rows = nivren_csv.decode("Nivren,1\r\n", ["name", "version"], 10)
 keep csv_ok = choose csv_rows { Ok(rows) => len(rows) == 1 and std.map.get(rows[0], "name") == "Nivren", Err(problem) => no }
+keep database_pool = nivren_database.PoolConfig(1, 4, 5.0, 60.0)
+keep database_ok = nivren_database.validate_pool(database_pool) == ok(database_pool)
+keep desktop_window = nivren_desktop.Window("Nivren", 800, 600, "app://index.html")
+keep desktop_ok = nivren_desktop.validate_window(desktop_window) == ok(desktop_window)
+keep gpu_plan = nivren_gpu.AddPlan([1, 2], [3, 4], nivren_gpu.ComputeLimits(8, 4))
+keep gpu_ok = choose nivren_gpu.compile_add(gpu_plan) { Ok(value) => value.cpu_fallback == [4, 6], Err(problem) => no }
 keep stats_ok = nivren_stats.mean([1.0, 2.0, 3.0]) == ok(2.0)
 keep jwt_secret = std.bytes.from_string("official package test secret")
 keep jwt_token = nivren_jwt.sign_hs256("{\"sub\":\"42\"}", jwt_secret)
@@ -4826,7 +5716,7 @@ keep aead_ok = choose aead_key {
     },
     Err(problem) => no,
 }
-keep checked = nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
+keep checked = nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and database_ok and desktop_ok and gpu_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
 keep port = nivren_validation.range("port", 443, 1, 65535)
 choose checked {
     Ok(value) => choose port { Ok(number) => number, Err(problem) => 0 },
@@ -4838,7 +5728,7 @@ choose checked {
     let manifest = nivren::project::Manifest::load(&consumer).unwrap();
     assert_eq!(
         nivren::package::install_dependencies(&manifest, &registry).unwrap(),
-        22
+        25
     );
     let program = nivren::modules::load_project(&manifest.root, &manifest.entry_path()).unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -4909,6 +5799,99 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
 }
 
 #[test]
+fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
+    let source = "define sum9(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int) gives Int { give a + b + c + d + e + f + g + h + i; } sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(1);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(45));
+    assert_eq!(interpreter.jit_stats().executions, 1);
+}
+
+#[test]
+fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
+    let source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust(value: Int) gives Int { change result = value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(u32::MAX);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(97));
+    assert_eq!(interpreter.jit_stats().executions, 0);
+}
+
+#[test]
+fn general_call_frames_preserve_values_and_lexical_shadowing() {
+    let source = r#"
+shape Sample { label: String, enabled: Bool }
+keep label = "outer"
+define inspect(sample: Sample) gives String {
+    when sample.enabled {
+        keep label = "inner"
+        assert(label == "inner", "nested slot")
+    }
+    give label + sample.label
+}
+inspect(Sample("!", yes)) + inspect(Sample("?", no))
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(u32::MAX);
+    assert_eq!(
+        interpreter.run_bytecode(&chunk).unwrap(),
+        Value::String("outer!outer?".into())
+    );
+}
+
+#[test]
+fn fast_frames_do_not_leak_into_general_callees() {
+    let source = r#"
+define unwrap(value: Result<Int, String>) gives Int {
+    give choose value {
+        Ok(number) => number,
+        Err(problem) => 0
+    }
+}
+define wrapper(value: Int) gives Int {
+    keep adjusted = value + 2
+    give unwrap(ok(adjusted))
+}
+wrapper(40)
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(u32::MAX);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(42));
+}
+
+#[test]
+fn integer_root_slots_preserve_bindings_between_bytecode_runs() {
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    let define = nivren::parser::parse(
+        nivren::lexer::scan("change answer = 40; answer = answer + 2; answer").unwrap(),
+    )
+    .unwrap();
+    nivren::typecheck::check(&define).unwrap();
+    let define = nivren::bytecode::compile(&define).unwrap();
+    assert_eq!(interpreter.run_bytecode(&define).unwrap(), Value::Int(42));
+
+    let load = nivren::parser::parse(nivren::lexer::scan("answer").unwrap()).unwrap();
+    let load = nivren::bytecode::compile(&load).unwrap();
+    assert_eq!(interpreter.run_bytecode(&load).unwrap(), Value::Int(42));
+
+    let redeclare =
+        nivren::parser::parse(nivren::lexer::scan("change answer = 0").unwrap()).unwrap();
+    let redeclare = nivren::bytecode::compile(&redeclare).unwrap();
+    assert!(interpreter.run_bytecode(&redeclare).is_err());
+}
+
+#[test]
 fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
     let directory = module_fixture("native-aot");
     fs::create_dir_all(directory.join("src")).unwrap();
@@ -4934,6 +5917,18 @@ fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
     let extension = if cfg!(windows) { "obj" } else { "o" };
     let object = directory.join(format!("target/aot/double.{extension}"));
     assert!(fs::metadata(&object).unwrap().len() > 64);
+    let program_object = directory.join(format!("target/aot/program.{extension}"));
+    let first_program = fs::read(&program_object).unwrap();
+    assert!(first_program.len() > 64);
+    assert!(directory.join("target/aot/program.nivb").is_file());
+    assert!(directory.join("target/aot/program.json").is_file());
+    assert!(directory.join("target/aot/nivren_program.h").is_file());
+    let repeated = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["build", "--aot", directory.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(repeated.status.success());
+    assert_eq!(fs::read(&program_object).unwrap(), first_program);
 
     #[cfg(unix)]
     {
@@ -4964,7 +5959,74 @@ fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
                 .unwrap()
                 .success()
         );
+
+        let trace_host = directory.join("trace_host.c");
+        let trace_executable = directory.join("trace_host");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("target/aot/program.json")).unwrap())
+                .unwrap();
+        let instructions = metadata["instructions"].as_u64().unwrap();
+        fs::write(
+            &trace_host,
+            format!(
+                "#include <stdint.h>\ntypedef int64_t(*Callback)(void*,uint64_t);\nextern int64_t nivren_program(void*,Callback);\nstruct State{{uint64_t visited;}};\nstatic int64_t step(void* raw,uint64_t pc){{struct State* state=(struct State*)raw;state->visited++;return pc+1=={instructions}u?-1:(int64_t)(pc+1);}}\nint main(void){{struct State state={{0}};return nivren_program(&state,step)==-1&&state.visited=={instructions}u?0:1;}}\n"
+            ),
+        )
+        .unwrap();
+        let linked = std::process::Command::new("cc")
+            .args([
+                trace_host.to_str().unwrap(),
+                program_object.to_str().unwrap(),
+                "-o",
+                trace_executable.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            std::process::Command::new(trace_executable)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn complete_program_aot_does_not_require_an_integer_kernel() {
+    let directory = module_fixture("complete-native-aot");
+    fs::create_dir_all(directory.join("src")).unwrap();
+    fs::write(
+        directory.join("niv.toml"),
+        "[package]\nname = \"complete-native-aot\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("src/main.niv"),
+        "shape Greeting { text: String }\nGreeting(\"hello\").text",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["build", "--aot", directory.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("optimized-kernels 0"));
+    let extension = if cfg!(windows) { "obj" } else { "o" };
+    assert!(
+        directory
+            .join(format!("target/aot/program.{extension}"))
+            .is_file()
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -5090,6 +6152,11 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
     request.extend_from_slice(&envelope);
     let response = nivren::registry_server::handle_request_for_test(&request, &registry, 1_100, 1);
     assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
+    let ownership: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("v1/owners/trusted.json")).unwrap())
+            .unwrap();
+    assert_eq!(ownership["package"], "trusted");
+    assert_eq!(ownership["publisher"], "team");
     let response = nivren::registry_server::handle_request_for_test(
         b"GET /v1/packages/trusted/1.0.0.nivpkg HTTP/1.1\r\nHost: registry.test\r\n\r\n",
         &registry,
@@ -5105,6 +6172,121 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
         1,
     );
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
+    let yank = nivren::trust::sign_admin_action(
+        root_secret,
+        nivren::trust::RegistryAdminAction {
+            format: 1,
+            action: "yank".into(),
+            package: "trusted".into(),
+            version: "1.0.0".into(),
+            generation: 1,
+            issued_at: 1_000,
+            expires_at: 2_000,
+            reason: "release validation incident".into(),
+            signature: String::new(),
+        },
+    )
+    .unwrap();
+    assert!(nivren::trust::verify_admin_action(&yank, root_public, 1_100, 0).is_ok());
+    assert!(
+        nivren::trust::verify_admin_action(&yank, root_public, 1_100, 1)
+            .unwrap_err()
+            .message
+            .contains("replayed")
+    );
+    let yank_json = serde_json::to_vec(&yank).unwrap();
+    let mut admin_request = format!(
+        "POST /v1/admin HTTP/1.1\r\nHost: registry.test\r\nContent-Type: application/vnd.nivren.admin-v1+json\r\nContent-Length: {}\r\n\r\n",
+        yank_json.len()
+    )
+    .into_bytes();
+    admin_request.extend_from_slice(&yank_json);
+    let response =
+        nivren::registry_server::handle_request_for_test(&admin_request, &registry, 1_100, 0);
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    let response = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/search/trust HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        0,
+    );
+    assert!(!String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
+    let replay =
+        nivren::registry_server::handle_request_for_test(&admin_request, &registry, 1_100, 0);
+    assert!(replay.starts_with(b"HTTP/1.1 422 Unprocessable Content\r\n"));
+    let audit = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/admin/1.json HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        0,
+    );
+    assert!(audit.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(String::from_utf8_lossy(&audit).contains("release validation incident"));
+    fs::write(registry.join("admin.reason"), "operator validation\n").unwrap();
+    fs::write(registry.join("root.secret"), hex(&root_secret)).unwrap();
+    fs::write(registry.join("root.public"), hex(&root_public)).unwrap();
+    let signed_path = registry.join("signed-admin.json");
+    let signed = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "registry",
+            "sign-admin",
+            "unyank",
+            "trusted",
+            "1.0.0",
+            "2",
+            "1000",
+            "2000",
+            registry.join("admin.reason").to_str().unwrap(),
+            registry.join("root.secret").to_str().unwrap(),
+            signed_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let verified = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "registry",
+            "verify-admin",
+            signed_path.to_str().unwrap(),
+            registry.join("root.public").to_str().unwrap(),
+            "1100",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(verified.status.success());
+    fs::write(
+        registry.join("v1/admin/pending.json"),
+        fs::read(&signed_path).unwrap(),
+    )
+    .unwrap();
+    let recovered = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "registry",
+            "recover-admin",
+            registry.to_str().unwrap(),
+            "1100",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!registry.join("v1/admin/pending.json").exists());
+    let response = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/search/trust HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        0,
+    );
     assert!(String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
     let response = nivren::registry_server::handle_request_for_test(
         b"GET /v1/packages/../root.pub HTTP/1.1\r\nHost: registry.test\r\n\r\n",

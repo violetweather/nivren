@@ -1,21 +1,19 @@
 use "../src/main.niv"
 
-assert(main.bulk("PING") == ok("$4\r\nPING\r\n"), "bulk string")
-assert(
-    main.command(["SET", "greeting", "hello"]) == ok("*3\r\n$3\r\nSET\r\n$8\r\ngreeting\r\n$5\r\nhello\r\n"),
-    "RESP command"
-)
-assert(main.command([]) == err("Redis command requires at least one part"), "empty command")
-assert(
-    main.redirect("MOVED 42 [::1]:6379") == ok(main.Redirect("MOVED", 42, "::1", 6379)),
-    "cluster redirect"
-)
-assert(main.pool(0) == err("Redis pool size must be from 1 through 1024"), "pool lower bound")
-keep empty = main.pool(4)
-assert(
-    choose empty {
-        Ok(value) => main.pool_take(value) == err("Redis pool is empty"),
-        Err(problem) => no
-    },
-    "empty pool"
-)
+assert with { condition set main.bulk with { value set "PING" } == ok("$4\r\nPING\r\n") message set "bulk string" }
+assert with {
+    condition set main.command with { parts set ["SET", "greeting", "hello"] } == ok("*3\r\n$3\r\nSET\r\n$8\r\ngreeting\r\n$5\r\nhello\r\n")
+    message set "RESP command"
+}
+assert with { condition set main.command with { parts set [] } == err("Redis command requires at least one part") message set "empty command" }
+assert with {
+    condition set main.redirect with { message set "MOVED 42 [::1]:6379" } == ok(main.Redirect("MOVED", 42, "::1", 6379))
+    message set "cluster redirect"
+}
+assert with { condition set main.pool with { maximum set 0 } == err("Redis pool size must be from 1 through 1024") message set "pool lower bound" }
+keep empty set main.pool with { maximum set 4 }
+keep rejected set choose empty {
+    case Ok carries value => main.pool_take with { pool_value set value } == err("Redis pool is empty")
+    case Err carries problem => no
+}
+assert with { condition set rejected message set "empty pool" }

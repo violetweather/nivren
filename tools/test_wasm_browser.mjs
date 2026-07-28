@@ -6,17 +6,24 @@ const path = process.argv[2] ?? "target/wasm32-unknown-unknown/release/nivren_wa
 const nivren = await Nivren.instantiate(await readFile(path));
 
 nivren.check("keep answer: Int = 42");
-assert.equal(nivren.format("keep answer=42"), "keep answer=42\n");
+assert.equal(nivren.format("keep answer=42"), "keep answer = 42\n");
 assert.equal(new TextDecoder().decode(nivren.compile("40 + 2").slice(0, 4)), "NIVB");
 assert.equal(nivren.run(`
-choice Maybe<Value> { Some(Value), None }
-define double(value: Int) gives Int { give value * 2 }
-keep value: Maybe<Int> = Maybe.Some(double(21))
-choose value { Some(answer) => answer, None => 0 }
+shape NumberPlan holds { value is Int }
+choice Calculation holds {
+  case Ready carries NumberPlan
+  case Missing
+}
+define double takes { value is Int } gives Int { give value * 2 }
+prepare plan as NumberPlan with { value set 21 }
+choose Calculation.Ready(perform plan) {
+  case Ready carries ready => double with { value set ready.value }
+  case Missing => 0
+}
 `), "42");
 assert.throws(
   () => nivren.check("keep answer: Int = yes"),
   error => error instanceof NivrenError && error.status === 1 && /expected Int, found Bool/.test(error.message),
 );
 
-console.log("Nivren browser host: check, diagnostics, format, compile, and Edition 3 execution passed");
+console.log("Nivren browser host: check, diagnostics, format, compile, and Edition 4 execution passed");

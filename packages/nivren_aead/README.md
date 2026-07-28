@@ -1,6 +1,6 @@
 # nivren_aead
 
-Official authenticated encryption for Nivren Edition 3 using ChaCha20-Poly1305.
+Official authenticated encryption for Nivren Edition 4 using ChaCha20-Poly1305.
 
 `generate_key` creates an opaque, redacted `SecretKey` through the visible `Random` capability. `import_key` copies exactly 32 bytes into the same zeroized key storage for protocol and key-store integration. Secret keys cannot be compared, serialized, used as collection keys, or transferred into tasks.
 

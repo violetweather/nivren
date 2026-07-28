@@ -1,56 +1,69 @@
-shape Signature {
-    authorization: String,
-    payload_hash: String,
-    canonical_request_hash: String,
+shape Signature holds {
+    authorization is String
+    payload_hash is String
+    canonical_request_hash is String
 }
 
-define combine(parts: [String]) gives Result<String, String> {
-    change output: String = ""
-    each part within parts { output = std.text.concat(output, part) or give }
+define combine
+takes { parts is [String] }
+gives String or String
+{
+    change output is String set ""
+    each part within parts {
+        change output to std.text.concat with { left set output right set part } or give
+    }
     give ok(output)
 }
 
-define sha_hex(value: String) gives Result<String, String> {
-    keep digest = std.crypto.sha256(std.bytes.from_string(value)) or give
-    give std.encoding.hex(digest)
+define sha_hex
+takes { value is String }
+gives String or String
+{
+    keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set value } } or give
+    give std.encoding.hex with { bytes set digest }
 }
 
-define hmac(key: Bytes, value: String) gives Result<Bytes, String> {
-    give std.crypto.hmac_sha256(key, std.bytes.from_string(value))
+define hmac
+takes { key is Bytes value is String }
+gives Bytes or String
+{
+    give std.crypto.hmac_sha256 with { key set key message set std.bytes.from_string with { value set value } }
 }
 
-define credential_scope(date: String, region: String, service: String) gives Result<String, String> {
-    give combine([date, "/", region, "/", service, "/aws4_request"])
+define credential_scope
+takes { date is String region is String service is String }
+gives String or String
+{
+    give combine with { parts set [date, "/", region, "/", service, "/aws4_request"] }
 }
 
-define sign_v4(method: String, canonical_uri: String, canonical_query: String, canonical_headers: String, signed_headers: String, payload: String, timestamp: String, date: String, region: String, service: String, access_key: String, secret_key: Bytes) gives Result<Signature, String> {
+define sign_v4
+takes {
+    method is String canonical_uri is String canonical_query is String canonical_headers is String
+    signed_headers is String payload is String timestamp is String date is String region is String
+    service is String access_key is String secret_key is Bytes
+}
+gives Signature or String
+{
     when method == "" or canonical_uri == "" or signed_headers == "" or region == "" or service == "" or access_key == "" {
         give err("AWS signing fields must not be empty")
     }
     when len(timestamp) != 16 or len(date) != 8 {
         give err("AWS timestamp must be YYYYMMDDTHHMMSSZ and date must be YYYYMMDD")
     }
-    keep payload_hash = sha_hex(payload) or give
-    keep canonical_request = combine([
-        method, "\n", canonical_uri, "\n", canonical_query, "\n",
-        canonical_headers, "\n\n", signed_headers, "\n", payload_hash
-    ]) or give
-    keep request_hash = sha_hex(canonical_request) or give
-    keep scope = credential_scope(date, region, service) or give
-    keep string_to_sign = combine([
-        "AWS4-HMAC-SHA256\n", timestamp, "\n", scope, "\n", request_hash
-    ]) or give
-    keep key_prefix = combine(["AWS4", std.bytes.to_string(secret_key) or give]) or give
-    keep date_key = hmac(std.bytes.from_string(key_prefix), date) or give
-    keep region_key = hmac(date_key, region) or give
-    keep service_key = hmac(region_key, service) or give
-    keep signing_key = hmac(service_key, "aws4_request") or give
-    keep signature_bytes = hmac(signing_key, string_to_sign) or give
-    keep signature = std.encoding.hex(signature_bytes) or give
-    keep authorization = combine([
-        "AWS4-HMAC-SHA256 Credential=", access_key, "/", scope,
-        ", SignedHeaders=", signed_headers, ", Signature=", signature
-    ]) or give
+    keep payload_hash set sha_hex with { value set payload } or give
+    keep canonical_request set combine with { parts set [method, "\n", canonical_uri, "\n", canonical_query, "\n", canonical_headers, "\n\n", signed_headers, "\n", payload_hash] } or give
+    keep request_hash set sha_hex with { value set canonical_request } or give
+    keep scope set credential_scope with { date set date region set region service set service } or give
+    keep string_to_sign set combine with { parts set ["AWS4-HMAC-SHA256\n", timestamp, "\n", scope, "\n", request_hash] } or give
+    keep key_prefix set combine with { parts set ["AWS4", std.bytes.to_string with { bytes set secret_key } or give] } or give
+    keep date_key set hmac with { key set std.bytes.from_string with { value set key_prefix } value set date } or give
+    keep region_key set hmac with { key set date_key value set region } or give
+    keep service_key set hmac with { key set region_key value set service } or give
+    keep signing_key set hmac with { key set service_key value set "aws4_request" } or give
+    keep signature_bytes set hmac with { key set signing_key value set string_to_sign } or give
+    keep signature set std.encoding.hex with { bytes set signature_bytes } or give
+    keep authorization set combine with { parts set ["AWS4-HMAC-SHA256 Credential=", access_key, "/", scope, ", SignedHeaders=", signed_headers, ", Signature=", signature] } or give
     give ok(Signature(authorization, payload_hash, request_hash))
 }
 

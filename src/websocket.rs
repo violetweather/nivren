@@ -425,7 +425,7 @@ fn base64(bytes: &[u8]) -> String {
 
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
     let mut output = vec![];
-    if value.len() % 4 != 0 {
+    if !value.len().is_multiple_of(4) {
         return None;
     }
     for chunk in value.as_bytes().chunks(4) {

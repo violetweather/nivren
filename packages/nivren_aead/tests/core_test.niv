@@ -1,19 +1,20 @@
 use "../src/main.niv"
 
-define verify() gives Result<Bool, String> {
-    keep key = main.import_key(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
-    keep nonce = std.bytes.from_string("unique-nonce")
-    keep context = std.bytes.from_string("record:42")
-    keep message = std.bytes.from_string("protected")
-    keep sealed = main.seal_with_nonce(key, nonce, context, message) or give
-    keep opened = main.unseal(key, context, sealed) or give
-    assert(opened == message, "authenticated encryption round trip")
-
-    keep rejected = choose main.unseal(key, std.bytes.from_string("record:43"), sealed) {
-        Ok(value) => no,
-        Err(problem) => yes,
+define verify
+gives Bool or String
+{
+    keep key set main.import_key with { bytes set std.bytes.from_string with { value set "0123456789abcdef0123456789abcdef" } } or give
+    keep nonce set std.bytes.from_string with { value set "unique-nonce" }
+    keep context set std.bytes.from_string with { value set "record:42" }
+    keep message set std.bytes.from_string with { value set "protected" }
+    keep sealed set main.seal_with_nonce with { key set key nonce set nonce context set context plaintext set message } or give
+    keep opened set main.unseal with { key set key context set context sealed set sealed } or give
+    assert with { condition set opened == message message set "authenticated encryption round trip" }
+    keep rejected set choose main.unseal with { key set key context set std.bytes.from_string with { value set "record:43" } sealed set sealed } {
+        case Ok carries value => no
+        case Err carries problem => yes
     }
     give ok(rejected)
 }
 
-verify()
+verify with {}

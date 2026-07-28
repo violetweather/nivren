@@ -1,14 +1,15 @@
 use "../src/main.niv"
 
-keep values: [Float] = [1.0, 2.0, 3.0, 4.0]
-assert(main.sum(values) == 10.0, "sum")
-assert(main.mean(values) == ok(2.5), "mean")
-assert(main.variance(values) == ok(1.25), "population variance")
-assert(main.minimum(values) == ok(1.0), "minimum")
-assert(main.maximum(values) == ok(4.0), "maximum")
-assert(main.normalize([2.0, 4.0, 6.0]) == ok([0.0, 0.5, 1.0]), "normalization")
+keep values is [Float] set [1.0, 2.0, 3.0, 4.0]
+assert with { condition set main.sum with { values set values } == 10.0 message set "sum" }
+assert with { condition set main.mean with { values set values } == ok(2.5) message set "mean" }
+assert with { condition set main.variance with { values set values } == ok(1.25) message set "population variance" }
+assert with { condition set main.minimum with { values set values } == ok(1.0) message set "minimum" }
+assert with { condition set main.maximum with { values set values } == ok(4.0) message set "maximum" }
+assert with { condition set main.normalize with { values set [2.0, 4.0, 6.0] } == ok([0.0, 0.5, 1.0]) message set "normalization" }
 
-choose main.mean([]) {
-    Ok(value) => assert(no, "empty mean must fail"),
-    Err(problem) => assert(yes, "empty mean rejected"),
+keep empty_rejected set choose main.mean with { values set [] } {
+    case Ok carries value => no
+    case Err carries problem => yes
 }
+assert with { condition set empty_rejected message set "empty mean rejected" }
