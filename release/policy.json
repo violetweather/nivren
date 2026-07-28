@@ -2,7 +2,7 @@
   "format": 3,
   "edition": "4",
   "release_track": "beta",
-  "expected_version": "0.10.0-beta.6",
+  "expected_version": "0.10.0-beta.7",
   "product_proof_complete": false,
   "completed_checkpoints": [
     "language",
