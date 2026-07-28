@@ -129,7 +129,7 @@ mod tests {
         let compiler = Compiler::new();
         assert_eq!(API_VERSION, 2);
         assert!(compiler.check("keep answer: Int = 42\nanswer").is_ok());
-        assert_eq!(compiler.format("keep answer=42"), "keep answer=42\n");
+        assert_eq!(compiler.format("keep answer=42"), "keep answer = 42\n");
         let artifact = compiler.compile("40 + 2").unwrap();
         assert_eq!(artifact.format, "nivren-bytecode");
         #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]

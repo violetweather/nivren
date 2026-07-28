@@ -522,7 +522,7 @@ mod tests {
         // SAFETY: The byte slice remains readable for the call.
         let formatted = unsafe { nivren_format_utf8(messy.as_ptr(), messy.len()) };
         assert_eq!(formatted.status, 0);
-        assert!(output(&formatted).contains("    keep value=42"));
+        assert!(output(&formatted).contains("    keep value = 42"));
         // SAFETY: This is the unchanged, not-yet-freed returned buffer.
         unsafe { nivren_buffer_free(formatted) };
 
