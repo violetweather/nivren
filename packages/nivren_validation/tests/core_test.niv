@@ -1,4 +1,10 @@
 use "../src/main.niv"
 
-assert(main.required("name", "Nivren") == ok("Nivren"), "name should validate")
-assert(main.range("port", 443, 1, 65535) == ok(443), "port should validate")
+assert with {
+    condition set main.required with { field set "name" value set "Nivren" } == ok("Nivren")
+    message set "name should validate"
+}
+assert with {
+    condition set main.range with { field set "port" value set 443 minimum set 1 maximum set 65535 } == ok(443)
+    message set "port should validate"
+}

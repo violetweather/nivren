@@ -1,20 +1,24 @@
 use "../src/main.niv"
 
-keep encoded = main.hash_password_with_salt(
-    "correct horse battery staple",
-    std.bytes.from_string("0123456789abcdef")
-)
-keep valid = choose encoded {
-    Ok(hash) => main.verify_password("correct horse battery staple", hash),
-    Err(problem) => err(problem),
+keep encoded set main.hash_password_with_salt with {
+    password set "correct horse battery staple"
+    salt set std.bytes.from_string with { value set "0123456789abcdef" }
 }
-assert(valid == ok(yes), "matching password")
-
-keep invalid = choose encoded {
-    Ok(hash) => main.verify_password("wrong", hash),
-    Err(problem) => err(problem),
+keep valid set choose encoded {
+    case Ok carries hash => main.verify_password with { password set "correct horse battery staple" encoded set hash }
+    case Err carries problem => err(problem)
 }
-assert(invalid == ok(no), "wrong password")
+assert with { condition set valid == ok(yes) message set "matching password" }
 
-keep key = main.random_key(32)
-assert(choose key { Ok(bytes) => std.bytes.length(bytes) == 32, Err(problem) => no }, "secure key width")
+keep invalid set choose encoded {
+    case Ok carries hash => main.verify_password with { password set "wrong" encoded set hash }
+    case Err carries problem => err(problem)
+}
+assert with { condition set invalid == ok(no) message set "wrong password" }
+
+keep key set perform main.random_key with { length set 32 }
+keep correct_width set choose key {
+    case Ok carries bytes => std.bytes.length with { bytes set bytes } == 32
+    case Err carries problem => no
+}
+assert with { condition set correct_width message set "secure key width" }
