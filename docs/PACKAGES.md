@@ -1,6 +1,6 @@
 # Nivren package and private registry protocol v1
 
-Nivren packages are deterministic, source-only `.nivpkg` archives. Creating a package first compiles and type-checks the project, verifies the installed dependency graph, then archives `niv.toml`, the checksum-pinned `niv.lock`, and project-owned `.niv` files in bytewise path order.
+Nivren packages are deterministic, source-only `.nivpkg` archives. Creating a package first compiles and type-checks the project, verifies the installed dependency graph, then archives `niv.toml`, the checksum-pinned `niv.lock`, the complete `niv.authority.lock`, and project-owned `.niv` files in bytewise path order.
 
 Package builds are sandboxed by construction: Nivren has no lifecycle or compiler-plugin scripts, package creation never runs the program, imports cannot escape the project root, symlinked source entries are rejected, and `target`, `.niv`, plus `.git` are excluded.
 
@@ -13,6 +13,8 @@ Use `niv install --trusted https://registry.example root.pub [project]` for a pu
 After one verified install, `niv install --offline [project]` reconstructs and verifies the complete dependency graph from the immutable archives cached under `.niv/deps`, then rewrites the exact lockfile without making a network request. Missing, altered, or identity-mismatched cache entries fail closed.
 
 `niv cache list [project]` verifies every cached archive, installed source tree, checksum, and package/directory identity before listing its exact digest, archive bytes, and whether the current dependency graph can reach it. `niv cache prune [project]` performs the same verification first, then removes only verified package directories that are unreachable from the manifest’s complete transitive graph. It never removes a reachable dependency, follows no symlinks, and refuses malformed or ambiguous cache entries instead of guessing.
+
+`niv authority lock [project]` writes a deterministic `niv.authority.lock` covering the root and every verified transitive dependency. It records each package's exact identity, capability and scope, and declared unsafe module. Review this file like a dependency lock: `niv authority check` fails when a manifest expands or changes authority, while `niv authority report` prints the verified prospective lock without changing the project. Install commands refresh it only after package and source integrity checks pass.
 
 ## Archive format
 
@@ -48,6 +50,11 @@ niv package [project]
 niv install /path/to/registry [project]
 niv install --trusted https://registry.example root.pub [project]
 niv install --offline [project]
+niv cache list [project]
+niv cache prune [project]
+niv authority lock [project]
+niv authority check [project]
+niv authority report [project]
 niv package verify target/name-version.nivpkg
 niv registry search web /path/to/registry
 niv registry publish target/name-version.nivpkg /path/to/registry

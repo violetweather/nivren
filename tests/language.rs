@@ -2489,6 +2489,38 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
         fs::read_to_string(app.join("niv.lock")).unwrap(),
         expected_lock
     );
+    assert!(app.join("niv.authority.lock").is_file());
+    let authority_check = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "check", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(authority_check.status.success());
+    let changed_manifest =
+        fs::read_to_string(app.join("niv.toml")).unwrap() + "\n[capabilities]\nTime = \"allow\"\n";
+    fs::write(app.join("niv.toml"), changed_manifest).unwrap();
+    let stale_authority = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "check", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!stale_authority.status.success());
+    let report = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "report", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(report.status.success());
+    assert!(String::from_utf8_lossy(&report.stdout).contains("capability = \"Time\""));
+    let relocked = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["authority", "lock", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(relocked.status.success());
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_niv"))
+            .args(["authority", "check", app.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let program = nivren::modules::load_project(&app, &app.join("main.niv")).unwrap();
     nivren::typecheck::check(&program).unwrap();
     assert_eq!(

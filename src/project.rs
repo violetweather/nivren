@@ -9,6 +9,7 @@ use crate::error::NivError;
 
 pub const MANIFEST_NAME: &str = "niv.toml";
 pub const LOCKFILE_NAME: &str = "niv.lock";
+pub const AUTHORITY_LOCKFILE_NAME: &str = "niv.authority.lock";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {

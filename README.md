@@ -32,6 +32,10 @@ niv run .
 niv check .
 niv install /path/to/registry .
 niv install --trusted https://registry.example root.pub .
+niv install --offline .
+niv cache list .
+niv authority check .
+niv authority report .
 niv build .
 niv build --standalone .
 niv build --standalone --native .
@@ -66,7 +70,7 @@ niv repl
 - Explicit binding, parameter, array, and return type annotations
 - Built-in language test discovery with `assert(condition, message)`
 - Private-by-default modules with explicit `expose` declarations and namespaced access
-- Strict manifests, transitive exact-version dependencies, checksum-pinned deterministic lockfiles, project-root confinement, formatting, and API docs
+- Strict manifests, transitive exact-version dependencies, checksum-pinned deterministic dependency locks, complete reviewable authority locks, project-root confinement, formatting, and API docs
 - Verified versioned bytecode, portable application bundles, call-frame traces, and precise closure-environment collection
 - Typed application APIs for bounded file handles, paths, environment, processes, time, shape-derived JSON plus bounded typed data streams, TCP clients/listeners, HTTP clients/servers, certificate-verified TLS clients and certificate/key-configured secure WebSocket servers, and logging
 - Structured worker tasks, cooperative cancellation and deadlines, bounded channels, multi-stream OS readiness plus backpressure-aware adapters, a versioned compiler facade, schema-driven C11/C++17 bindings, capability/path-gated dynamic C libraries, bounded asynchronous host operations, and an isolated C ABI with owned native callbacks plus async event-loop wakeups

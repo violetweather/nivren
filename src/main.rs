@@ -80,6 +80,18 @@ fn main() -> ExitCode {
         [command, action, path] if command == "cache" && action == "list" => cache_list(path),
         [command, action] if command == "cache" && action == "prune" => cache_prune("."),
         [command, action, path] if command == "cache" && action == "prune" => cache_prune(path),
+        [command, action] if command == "authority" && action == "lock" => authority_lock("."),
+        [command, action, path] if command == "authority" && action == "lock" => {
+            authority_lock(path)
+        }
+        [command, action] if command == "authority" && action == "check" => authority_check("."),
+        [command, action, path] if command == "authority" && action == "check" => {
+            authority_check(path)
+        }
+        [command, action] if command == "authority" && action == "report" => authority_report("."),
+        [command, action, path] if command == "authority" && action == "report" => {
+            authority_report(path)
+        }
         [command, registry] if command == "install" => install_project(".", registry),
         [command, registry, path] if command == "install" => install_project(path, registry),
         [command] if command == "package" => package_project("."),
@@ -606,6 +618,84 @@ fn cache_prune(path: &str) -> ExitCode {
     match nivren::package::prune_cache(&manifest) {
         Ok((removed, bytes)) => {
             println!("removed {removed} unused package(s), {bytes} archive bytes");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn authority_lock(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::write_authority_lock(&manifest) {
+        Ok(()) => {
+            println!(
+                "wrote {}",
+                manifest
+                    .root
+                    .join(nivren::project::AUTHORITY_LOCKFILE_NAME)
+                    .display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn authority_check(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    let expected = match nivren::package::installed_authority_lockfile(&manifest) {
+        Ok(contents) => contents,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    let lock = manifest.root.join(nivren::project::AUTHORITY_LOCKFILE_NAME);
+    match fs::read_to_string(&lock) {
+        Ok(actual) if actual == expected => {
+            println!("authority lock is current");
+            ExitCode::SUCCESS
+        }
+        Ok(_) => {
+            eprintln!("error: authority lock is stale; review and run 'niv authority lock'");
+            ExitCode::FAILURE
+        }
+        Err(_) => {
+            eprintln!("error: authority lock is missing; run 'niv authority lock'");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn authority_report(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::installed_authority_lockfile(&manifest) {
+        Ok(contents) => {
+            print!("{contents}");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -2533,7 +2623,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages, authority, and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv cache <list|prune> [project]\n  niv authority <lock|check|report> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!(
