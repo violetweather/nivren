@@ -36,4 +36,17 @@ JSON documents reject unknown fields. Verification checks signatures, expiration
 
 Publish an envelope with `Content-Type: application/vnd.nivren.publish-v1` to `POST /v1/publish`. The daemon loads the pinned root, current status, and advisories from `v1/trust`, performs full release verification, and only then writes package, index, provenance, and authorization documents. A signed envelope is the authorization; replay can only reproduce the identical immutable release.
 
+## Signed administrative changes
+
+Hosted yank and unyank operations use a root-signed `RegistryAdminAction`, never an unauthenticated URL or mutable operator password. Create one with:
+
+```text
+niv registry sign-admin yank PACKAGE VERSION GENERATION ISSUED_UNIX EXPIRES_UNIX reason.txt root.secret action.json
+niv registry verify-admin action.json root.pub NOW_UNIX MINIMUM_GENERATION
+```
+
+POST the JSON to `/v1/admin` with `Content-Type: application/vnd.nivren.admin-v1+json`. The daemon verifies the root signature, exact package identity, bounded reason, validity window, and a generation strictly greater than both configured and persisted minimums. It writes a recovery marker, atomically changes the index, retains an immutable public `v1/admin/GENERATION.json` audit record, advances `v1/trust/admin-generation`, and clears the marker. Replays and rollback generations fail. If a crash leaves `v1/admin/pending.json`, further administration fails closed; stop write traffic and use `niv registry recover-admin REGISTRY NOW MINIMUM_GENERATION` as specified in `docs/REGISTRY_OPERATIONS.md`.
+
+The simple filesystem `niv registry yank` and `unyank` commands are for an offline/private registry owned by the caller. They are not accepted by the hosted HTTP service.
+
 The service intentionally does not implement TLS or edge rate limiting. Deploy the non-root container from `deploy/registry` behind a hardened reverse proxy and keep the offline root key outside the service host.

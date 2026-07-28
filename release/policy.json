@@ -25,6 +25,7 @@
     "docs/GETTING_STARTED.md",
     "docs/RELEASE_AUDIT.md",
     "docs/RELEASES.md",
+    "docs/REGISTRY_OPERATIONS.md",
     "docs/SECURITY_AUDIT_SCOPE.md",
     "sdk/browser/nivren.mjs",
     "containers/Dockerfile",

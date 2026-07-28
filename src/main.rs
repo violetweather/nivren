@@ -152,6 +152,31 @@ fn main() -> ExitCode {
         {
             registry_envelope(package, provenance, authorization, output)
         }
+        [
+            command,
+            action,
+            operation,
+            name,
+            version,
+            generation,
+            issued,
+            expires,
+            reason,
+            secret,
+            output,
+        ] if command == "registry" && action == "sign-admin" => registry_sign_admin(
+            operation, name, version, generation, issued, expires, reason, secret, output,
+        ),
+        [command, action, document, public, now, minimum]
+            if command == "registry" && action == "verify-admin" =>
+        {
+            registry_verify_admin(document, public, now, minimum)
+        }
+        [command, action, registry, now, minimum]
+            if command == "registry" && action == "recover-admin" =>
+        {
+            registry_recover_admin(registry, now, minimum)
+        }
         [command, action] if command == "release" && action == "check" => release_check("."),
         [command, action, path] if command == "release" && action == "check" => release_check(path),
         [command, action, manifest, secret, output]
@@ -1423,6 +1448,123 @@ fn registry_envelope(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn registry_sign_admin(
+    operation: &str,
+    name: &str,
+    version: &str,
+    generation: &str,
+    issued: &str,
+    expires: &str,
+    reason_path: &str,
+    secret_path: &str,
+    output: &str,
+) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        let generation = generation
+            .parse::<u64>()
+            .map_err(|_| "invalid admin generation".to_string())?;
+        let issued_at = issued
+            .parse::<u64>()
+            .map_err(|_| "invalid admin issue time".to_string())?;
+        let expires_at = expires
+            .parse::<u64>()
+            .map_err(|_| "invalid admin expiry time".to_string())?;
+        let reason = fs::read_to_string(reason_path)
+            .map_err(|error| format!("cannot read admin reason: {error}"))?;
+        let secret = fs::read_to_string(secret_path)
+            .map_err(|error| format!("cannot read registry root secret: {error}"))?;
+        let secret = nivren::trust::parse_secret_key(&secret).map_err(|error| error.message)?;
+        let action = nivren::trust::sign_admin_action(
+            secret,
+            nivren::trust::RegistryAdminAction {
+                format: 1,
+                action: operation.into(),
+                package: name.into(),
+                version: version.into(),
+                generation,
+                issued_at,
+                expires_at,
+                reason: reason.trim().into(),
+                signature: String::new(),
+            },
+        )
+        .map_err(|error| error.message)?;
+        let encoded = serde_json::to_vec_pretty(&action)
+            .map_err(|error| format!("cannot encode admin action: {error}"))?;
+        write_atomic(Path::new(output), &encoded).map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(()) => {
+            println!("signed {output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn registry_verify_admin(document: &str, public: &str, now: &str, minimum: &str) -> ExitCode {
+    let result = (|| -> Result<nivren::trust::RegistryAdminAction, String> {
+        let action = serde_json::from_slice::<nivren::trust::RegistryAdminAction>(
+            &fs::read(document).map_err(|error| format!("cannot read admin action: {error}"))?,
+        )
+        .map_err(|error| format!("invalid admin action: {error}"))?;
+        let public = fs::read_to_string(public)
+            .map_err(|error| format!("cannot read registry root public key: {error}"))?;
+        let public = nivren::trust::parse_public_key(&public).map_err(|error| error.message)?;
+        let now = now
+            .parse::<u64>()
+            .map_err(|_| "invalid Unix time".to_string())?;
+        let minimum = minimum
+            .parse::<u64>()
+            .map_err(|_| "invalid minimum generation".to_string())?;
+        nivren::trust::verify_admin_action(&action, public, now, minimum)
+            .map_err(|error| error.message)?;
+        Ok(action)
+    })();
+    match result {
+        Ok(action) => {
+            println!(
+                "verified registry {} for {} {} generation {}",
+                action.action, action.package, action.version, action.generation
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn registry_recover_admin(registry: &str, now: &str, minimum: &str) -> ExitCode {
+    let result = now
+        .parse::<u64>()
+        .map_err(|_| NivError::new("invalid Unix time", 1, 1))
+        .and_then(|now| {
+            minimum
+                .parse::<u64>()
+                .map_err(|_| NivError::new("invalid minimum generation", 1, 1))
+                .map(|minimum| (now, minimum))
+        })
+        .and_then(|(now, minimum)| {
+            nivren::registry_server::recover_admin(Path::new(registry), now, minimum)
+        });
+    match result {
+        Ok(generation) => {
+            println!("recovered registry admin generation {generation}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            ExitCode::from(65)
+        }
+    }
+}
+
 fn disassemble_path(path: &str) -> ExitCode {
     let chunk = if is_bundle_path(Path::new(path)) {
         match fs::read(path)
@@ -2623,7 +2765,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages, authority, and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv cache <list|prune> [project]\n  niv authority <lock|check|report> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages, authority, and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv cache <list|prune> [project]\n  niv authority <lock|check|report> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry sign-admin <yank|unyank> <name> <version> <generation> <issued> <expires> <reason-file> <root-secret-file> <output>\n  niv registry verify-admin <action> <root-key> <unix-time> <minimum-generation>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!(
@@ -2633,5 +2775,8 @@ fn help() {
         "\nTest profiles:\n  niv test --property [path]\n  niv test --compat [path]\n  niv test --fuzz-smoke [path]\n  niv test --time <unix-seconds> [path]"
     );
     println!("\nDependency cache:\n  niv cache list [project]\n  niv cache prune [project]");
+    println!(
+        "\nRegistry recovery:\n  niv registry recover-admin <registry> <unix-time> <minimum-generation>"
+    );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");
 }

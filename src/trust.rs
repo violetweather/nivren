@@ -61,6 +61,20 @@ pub struct Advisory {
     pub signature: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryAdminAction {
+    pub format: u16,
+    pub action: String,
+    pub package: String,
+    pub version: String,
+    pub generation: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub reason: String,
+    pub signature: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishEnvelope {
     pub package: Vec<u8>,
@@ -209,6 +223,41 @@ pub fn sign_advisory(root_secret: [u8; 32], mut advisory: Advisory) -> Advisory 
     advisory
 }
 
+pub fn sign_admin_action(
+    root_secret: [u8; 32],
+    mut action: RegistryAdminAction,
+) -> Result<RegistryAdminAction, NivError> {
+    validate_admin_action(&action)?;
+    action.signature.clear();
+    action.signature = sign(&root_secret, &admin_action_bytes(&action));
+    Ok(action)
+}
+
+pub fn verify_admin_action(
+    action: &RegistryAdminAction,
+    root_public_key: [u8; 32],
+    now: u64,
+    minimum_generation: u64,
+) -> Result<(), NivError> {
+    validate_admin_action(action)?;
+    verify(
+        &root_public_key,
+        &admin_action_bytes(action),
+        &action.signature,
+    )?;
+    if action.generation <= minimum_generation {
+        return Err(trust_error(
+            "registry admin generation was replayed or rolled back",
+        ));
+    }
+    if action.issued_at > now.saturating_add(300) || action.expires_at < now {
+        return Err(trust_error(
+            "registry admin action is stale or future-dated",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn verify_release(
     package_bytes: &[u8],
@@ -307,6 +356,10 @@ pub fn parse_public_key(value: &str) -> Result<[u8; 32], NivError> {
     decode_key(value.trim())
 }
 
+pub fn parse_secret_key(value: &str) -> Result<[u8; 32], NivError> {
+    decode_hex(value.trim(), "secret key")
+}
+
 fn authorization_bytes(value: &PublisherAuthorization) -> Vec<u8> {
     canonical(
         b"nivren.publisher-authorization.v1",
@@ -380,6 +433,47 @@ fn advisory_bytes(value: &Advisory) -> Vec<u8> {
             &[u8::from(value.withdrawn)],
         ],
     )
+}
+
+fn admin_action_bytes(value: &RegistryAdminAction) -> Vec<u8> {
+    canonical(
+        b"nivren.registry-admin-action.v1",
+        &[
+            &value.format.to_le_bytes(),
+            value.action.as_bytes(),
+            value.package.as_bytes(),
+            value.version.as_bytes(),
+            &value.generation.to_le_bytes(),
+            &value.issued_at.to_le_bytes(),
+            &value.expires_at.to_le_bytes(),
+            value.reason.as_bytes(),
+        ],
+    )
+}
+
+fn validate_admin_action(value: &RegistryAdminAction) -> Result<(), NivError> {
+    if value.format != 1 || !matches!(value.action.as_str(), "yank" | "unyank") {
+        return Err(trust_error("invalid registry admin action"));
+    }
+    if !valid_publisher(&value.package)
+        || value.version.len() > 64
+        || value.version.split('.').count() != 3
+        || !value
+            .version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return Err(trust_error("registry admin package identity is invalid"));
+    }
+    if value.generation == 0
+        || value.issued_at > value.expires_at
+        || value.reason.trim().is_empty()
+        || value.reason.len() > 1024
+        || value.reason.chars().any(char::is_control)
+    {
+        return Err(trust_error("registry admin bounds are invalid"));
+    }
+    Ok(())
 }
 
 fn canonical(domain: &[u8], fields: &[&[u8]]) -> Vec<u8> {

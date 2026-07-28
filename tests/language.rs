@@ -6151,6 +6151,121 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
     );
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
     assert!(String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
+    let yank = nivren::trust::sign_admin_action(
+        root_secret,
+        nivren::trust::RegistryAdminAction {
+            format: 1,
+            action: "yank".into(),
+            package: "trusted".into(),
+            version: "1.0.0".into(),
+            generation: 1,
+            issued_at: 1_000,
+            expires_at: 2_000,
+            reason: "release validation incident".into(),
+            signature: String::new(),
+        },
+    )
+    .unwrap();
+    assert!(nivren::trust::verify_admin_action(&yank, root_public, 1_100, 0).is_ok());
+    assert!(
+        nivren::trust::verify_admin_action(&yank, root_public, 1_100, 1)
+            .unwrap_err()
+            .message
+            .contains("replayed")
+    );
+    let yank_json = serde_json::to_vec(&yank).unwrap();
+    let mut admin_request = format!(
+        "POST /v1/admin HTTP/1.1\r\nHost: registry.test\r\nContent-Type: application/vnd.nivren.admin-v1+json\r\nContent-Length: {}\r\n\r\n",
+        yank_json.len()
+    )
+    .into_bytes();
+    admin_request.extend_from_slice(&yank_json);
+    let response =
+        nivren::registry_server::handle_request_for_test(&admin_request, &registry, 1_100, 0);
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    let response = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/search/trust HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        0,
+    );
+    assert!(!String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
+    let replay =
+        nivren::registry_server::handle_request_for_test(&admin_request, &registry, 1_100, 0);
+    assert!(replay.starts_with(b"HTTP/1.1 422 Unprocessable Content\r\n"));
+    let audit = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/admin/1.json HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        0,
+    );
+    assert!(audit.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(String::from_utf8_lossy(&audit).contains("release validation incident"));
+    fs::write(registry.join("admin.reason"), "operator validation\n").unwrap();
+    fs::write(registry.join("root.secret"), hex(&root_secret)).unwrap();
+    fs::write(registry.join("root.public"), hex(&root_public)).unwrap();
+    let signed_path = registry.join("signed-admin.json");
+    let signed = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "registry",
+            "sign-admin",
+            "unyank",
+            "trusted",
+            "1.0.0",
+            "2",
+            "1000",
+            "2000",
+            registry.join("admin.reason").to_str().unwrap(),
+            registry.join("root.secret").to_str().unwrap(),
+            signed_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let verified = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "registry",
+            "verify-admin",
+            signed_path.to_str().unwrap(),
+            registry.join("root.public").to_str().unwrap(),
+            "1100",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(verified.status.success());
+    fs::write(
+        registry.join("v1/admin/pending.json"),
+        fs::read(&signed_path).unwrap(),
+    )
+    .unwrap();
+    let recovered = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args([
+            "registry",
+            "recover-admin",
+            registry.to_str().unwrap(),
+            "1100",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!registry.join("v1/admin/pending.json").exists());
+    let response = nivren::registry_server::handle_request_for_test(
+        b"GET /v1/search/trust HTTP/1.1\r\nHost: registry.test\r\n\r\n",
+        &registry,
+        1_100,
+        0,
+    );
+    assert!(String::from_utf8_lossy(&response).contains("\"name\":\"trusted\""));
     let response = nivren::registry_server::handle_request_for_test(
         b"GET /v1/packages/../root.pub HTTP/1.1\r\nHost: registry.test\r\n\r\n",
         &registry,
