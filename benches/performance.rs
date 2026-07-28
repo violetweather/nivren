@@ -48,21 +48,27 @@ fn main() {
     );
     println!("nivren_benchmark_complete_native_ratio {complete_native_ratio:.3}");
 
-    let recursive_source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } fibonacci(20)";
+    let recursive_source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } fibonacci(16)";
     let recursive_tokens = nivren::lexer::scan(recursive_source).unwrap();
     let recursive_program = nivren::parser::parse(recursive_tokens).unwrap();
     nivren::typecheck::check(&recursive_program).unwrap();
     let recursive_chunk = nivren::bytecode::compile(&recursive_program).unwrap();
     let recursive_tree = median(7, || {
-        let value = black_box(Interpreter::new().run(&recursive_program).unwrap());
-        assert_eq!(value, Value::Int(6765));
+        let mut value = Value::Null;
+        for _ in 0..16 {
+            value = black_box(Interpreter::new().run(&recursive_program).unwrap());
+        }
+        assert_eq!(value, Value::Int(987));
         value
     });
     let recursive_vm = median(7, || {
-        let mut interpreter = Interpreter::new();
-        interpreter.set_jit_threshold(u32::MAX);
-        let value = black_box(interpreter.run_bytecode(&recursive_chunk).unwrap());
-        assert_eq!(value, Value::Int(6765));
+        let mut value = Value::Null;
+        for _ in 0..16 {
+            let mut interpreter = Interpreter::new();
+            interpreter.set_jit_threshold(u32::MAX);
+            value = black_box(interpreter.run_bytecode(&recursive_chunk).unwrap());
+        }
+        assert_eq!(value, Value::Int(987));
         value
     });
     let recursive_speedup = recursive_tree.as_secs_f64() / recursive_vm.as_secs_f64();
