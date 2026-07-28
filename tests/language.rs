@@ -4909,6 +4909,51 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
 }
 
 #[test]
+fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
+    let source = "define sum9(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int) gives Int { give a + b + c + d + e + f + g + h + i; } sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(1);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(45));
+    assert_eq!(interpreter.jit_stats().executions, 1);
+}
+
+#[test]
+fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
+    let source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust(value: Int) gives Int { change result = value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(u32::MAX);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(97));
+    assert_eq!(interpreter.jit_stats().executions, 0);
+}
+
+#[test]
+fn integer_root_slots_preserve_bindings_between_bytecode_runs() {
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    let define = nivren::parser::parse(
+        nivren::lexer::scan("change answer = 40; answer = answer + 2; answer").unwrap(),
+    )
+    .unwrap();
+    nivren::typecheck::check(&define).unwrap();
+    let define = nivren::bytecode::compile(&define).unwrap();
+    assert_eq!(interpreter.run_bytecode(&define).unwrap(), Value::Int(42));
+
+    let load = nivren::parser::parse(nivren::lexer::scan("answer").unwrap()).unwrap();
+    let load = nivren::bytecode::compile(&load).unwrap();
+    assert_eq!(interpreter.run_bytecode(&load).unwrap(), Value::Int(42));
+
+    let redeclare =
+        nivren::parser::parse(nivren::lexer::scan("change answer = 0").unwrap()).unwrap();
+    let redeclare = nivren::bytecode::compile(&redeclare).unwrap();
+    assert!(interpreter.run_bytecode(&redeclare).is_err());
+}
+
+#[test]
 fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
     let directory = module_fixture("native-aot");
     fs::create_dir_all(directory.join("src")).unwrap();

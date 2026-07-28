@@ -79,6 +79,12 @@ impl AotObject {
 // addresses or create concurrent access to JITModule's non-Sync internals.
 unsafe impl Send for CompiledFunction {}
 
+// SAFETY: Compilation is complete before a `CompiledFunction` is published. Calls only
+// execute immutable machine code and use caller-owned argument and overflow buffers; they
+// never access or mutate the retained `JITModule`. The module remains owned until all calls
+// have finished because callers hold a shared reference to this value.
+unsafe impl Sync for CompiledFunction {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallError {
     Arity,
@@ -415,6 +421,8 @@ fn define_integer_function<M: Module>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{AotObject, CallError, CompiledFunction, IntOp};
 
     #[test]
@@ -442,5 +450,30 @@ mod tests {
         assert!(first.len() > 64);
         assert_eq!(first, second);
         assert!(AotObject::compile("invalid-name", 1, 1, &operations).is_err());
+    }
+
+    #[test]
+    fn finalized_native_functions_are_safe_to_call_concurrently() {
+        let function = Arc::new(
+            CompiledFunction::compile(
+                2,
+                2,
+                &[IntOp::Load(0), IntOp::Load(1), IntOp::Add, IntOp::Return],
+            )
+            .unwrap(),
+        );
+        let workers = (0..8)
+            .map(|worker| {
+                let function = function.clone();
+                std::thread::spawn(move || {
+                    for value in 0..1_000 {
+                        assert_eq!(function.call(&[worker, value]), Ok(worker + value));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 }

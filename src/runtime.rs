@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
@@ -415,19 +415,36 @@ pub struct Function {
     params: Vec<String>,
     body: FunctionBody,
     closure: Env,
+    fast_slots: Option<Arc<HashMap<String, usize>>>,
     #[cfg(feature = "host-runtime")]
-    jit: Mutex<JitState>,
+    jit: JitState,
+}
+
+struct FastFrame {
+    slots_by_name: Arc<HashMap<String, usize>>,
+    slots: Vec<FastBinding>,
+}
+
+struct FastBinding {
+    value: Value,
+    mutable: bool,
+    defined: bool,
+}
+
+struct FastRootSlots {
+    slots_by_name: Arc<HashMap<String, usize>>,
+    persistent: Vec<String>,
 }
 
 #[derive(Default)]
 #[cfg(feature = "host-runtime")]
 struct JitState {
     #[cfg(feature = "host-runtime")]
-    calls: u32,
+    calls: AtomicU32,
     #[cfg(feature = "host-runtime")]
-    compiled: Option<CompiledFunction>,
+    compiled: OnceLock<CompiledFunction>,
     #[cfg(feature = "host-runtime")]
-    disabled: bool,
+    disabled: AtomicBool,
 }
 
 enum FunctionBody {
@@ -867,6 +884,7 @@ pub struct Interpreter {
     max_call_depth: usize,
     event_loop: Arc<RuntimeEventLoop>,
     protocol_dispatch: HashMap<(String, String, String), Value>,
+    fast_frames: Vec<FastFrame>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1011,6 +1029,7 @@ impl Interpreter {
             max_call_depth: 256,
             event_loop: Arc::new(RuntimeEventLoop::default()),
             protocol_dispatch: HashMap::new(),
+            fast_frames: Vec::new(),
         }
     }
 
@@ -1080,7 +1099,46 @@ impl Interpreter {
 
     pub fn run_bytecode(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
         crate::bytecode::verify(chunk)?;
-        let result = match self.execute_chunk(chunk)? {
+        let root_slots = (self.debug_hook.is_none() && self.metrics.is_none())
+            .then(|| fast_root_slots(chunk))
+            .flatten();
+        let root_slots = root_slots.filter(|plan| {
+            let environment = self.environment.lock().unwrap();
+            plan.persistent
+                .iter()
+                .all(|name| !environment.values.contains_key(name))
+        });
+        if let Some(plan) = &root_slots {
+            self.fast_frames.push(FastFrame {
+                slots_by_name: plan.slots_by_name.clone(),
+                slots: std::iter::repeat_with(|| FastBinding {
+                    value: Value::Null,
+                    mutable: false,
+                    defined: false,
+                })
+                .take(plan.slots_by_name.len())
+                .collect(),
+            });
+        }
+        let execution = self.execute_chunk(chunk);
+        if let Some(plan) = &root_slots {
+            let frame = self.fast_frames.pop().unwrap();
+            let mut environment = self.environment.lock().unwrap();
+            for name in &plan.persistent {
+                let slot = plan.slots_by_name[name];
+                let binding = &frame.slots[slot];
+                if binding.defined {
+                    environment.values.insert(
+                        name.clone(),
+                        Binding {
+                            value: binding.value.clone(),
+                            mutable: binding.mutable,
+                        },
+                    );
+                }
+            }
+        }
+        let result = match execution? {
             VmFlow::Continue(value) => Ok(value),
             VmFlow::Return(_) => Err(NivError::new(
                 "give may only appear inside a function",
@@ -1318,8 +1376,9 @@ impl Interpreter {
                     params: params.iter().map(|param| param.name.clone()).collect(),
                     body: FunctionBody::Tree(body.clone()),
                     closure: self.environment.clone(),
+                    fast_slots: None,
                     #[cfg(feature = "host-runtime")]
-                    jit: Mutex::new(JitState::default()),
+                    jit: JitState::default(),
                 }));
                 self.environment.lock().unwrap().values.insert(
                     name.clone(),
@@ -1881,64 +1940,7 @@ impl Interpreter {
                     _ => (function.call)(arguments, span),
                 }
             }
-            Value::Function(function) => {
-                check_arity(&function.name, function.params.len(), arguments.len(), span)?;
-                if self.call_depth >= self.max_call_depth {
-                    return Err(NivError::new(
-                        format!("call depth limit of {} exceeded", self.max_call_depth),
-                        span.line,
-                        span.column,
-                    ));
-                }
-                self.call_depth += 1;
-                if let FunctionBody::Bytecode(body) = &function.body {
-                    match self.try_jit(&function, body, &arguments, span) {
-                        Ok(Some(value)) => {
-                            self.call_depth -= 1;
-                            return Ok(value);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            self.call_depth -= 1;
-                            return Err(error.with_frame(
-                                function.name.clone(),
-                                span.line,
-                                span.column,
-                            ));
-                        }
-                    }
-                }
-                let environment = self.child_scope(function.closure.clone());
-                for (name, value) in function.params.iter().zip(arguments) {
-                    environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: false,
-                        },
-                    );
-                }
-                let result = (|| match &function.body {
-                    FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
-                        Flow::Continue(_) => Ok(Value::Null),
-                        Flow::Return(value) => Ok(value),
-                    },
-                    FunctionBody::Bytecode(body) => {
-                        let previous = std::mem::replace(&mut self.environment, environment);
-                        self.roots.push(previous.clone());
-                        let result = self.execute_chunk(body);
-                        self.roots.pop();
-                        self.environment = previous;
-                        match result? {
-                            VmFlow::Continue(value) | VmFlow::Return(value) => Ok(value),
-                        }
-                    }
-                })();
-                self.call_depth -= 1;
-                result.map_err(|error: NivError| {
-                    error.with_frame(function.name.clone(), span.line, span.column)
-                })
-            }
+            Value::Function(function) => self.call_function(&function, &arguments, span),
             Value::RecordType(record) => {
                 check_arity(&record.name, record.fields.len(), arguments.len(), span)?;
                 Ok(Value::Record(Arc::new(RecordValue {
@@ -1998,6 +2000,104 @@ impl Interpreter {
                 span.column,
             )),
         }
+    }
+
+    fn call_function(
+        &mut self,
+        function: &Function,
+        arguments: &[Value],
+        span: Span,
+    ) -> Result<Value, NivError> {
+        check_arity(&function.name, function.params.len(), arguments.len(), span)?;
+        if self.call_depth >= self.max_call_depth {
+            return Err(NivError::new(
+                format!("call depth limit of {} exceeded", self.max_call_depth),
+                span.line,
+                span.column,
+            ));
+        }
+        self.call_depth += 1;
+        if let FunctionBody::Bytecode(body) = &function.body {
+            match self.try_jit(function, body, arguments, span) {
+                Ok(Some(value)) => {
+                    self.call_depth -= 1;
+                    return Ok(value);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.call_depth -= 1;
+                    return Err(error.with_frame(function.name.clone(), span.line, span.column));
+                }
+            }
+        }
+        let fast_slots = function.fast_slots.as_ref().filter(|_| {
+            self.debug_hook.is_none()
+                && self.metrics.is_none()
+                && arguments.iter().all(|value| matches!(value, Value::Int(_)))
+        });
+        let result = if let (Some(slots_by_name), FunctionBody::Bytecode(body)) =
+            (fast_slots, &function.body)
+        {
+            let mut slots = std::iter::repeat_with(|| FastBinding {
+                value: Value::Null,
+                mutable: false,
+                defined: false,
+            })
+            .take(slots_by_name.len())
+            .collect::<Vec<_>>();
+            for (name, value) in function.params.iter().zip(arguments) {
+                let slot = slots_by_name[name];
+                slots[slot] = FastBinding {
+                    value: value.clone(),
+                    mutable: false,
+                    defined: true,
+                };
+            }
+            self.fast_frames.push(FastFrame {
+                slots_by_name: slots_by_name.clone(),
+                slots,
+            });
+            let previous = std::mem::replace(&mut self.environment, function.closure.clone());
+            self.roots.push(previous.clone());
+            let execution = self.execute_chunk(body);
+            self.roots.pop();
+            self.environment = previous;
+            self.fast_frames.pop();
+            execution.map(|flow| match flow {
+                VmFlow::Continue(value) | VmFlow::Return(value) => value,
+            })
+        } else {
+            let environment = self.child_scope(function.closure.clone());
+            for (name, value) in function.params.iter().zip(arguments) {
+                environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+            }
+            (|| match &function.body {
+                FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
+                    Flow::Continue(_) => Ok(Value::Null),
+                    Flow::Return(value) => Ok(value),
+                },
+                FunctionBody::Bytecode(body) => {
+                    let previous = std::mem::replace(&mut self.environment, environment);
+                    self.roots.push(previous.clone());
+                    let execution = self.execute_chunk(body);
+                    self.roots.pop();
+                    self.environment = previous;
+                    execution.map(|flow| match flow {
+                        VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                    })
+                }
+            })()
+        };
+        self.call_depth -= 1;
+        result.map_err(|error: NivError| {
+            error.with_frame(function.name.clone(), span.line, span.column)
+        })
     }
 
     fn host_invoke(&self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -2171,43 +2271,60 @@ impl Interpreter {
         arguments: &[Value],
         span: Span,
     ) -> Result<Option<Value>, NivError> {
-        let integers = arguments
-            .iter()
-            .map(|value| match value {
-                Value::Int(value) => Some(*value),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(integers) = integers else {
-            return Ok(None);
-        };
-        let mut jit = function.jit.lock().unwrap();
-        if jit.disabled {
+        let jit = &function.jit;
+        if jit.disabled.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        jit.calls = jit.calls.saturating_add(1);
-        if jit.compiled.is_none() && jit.calls >= self.jit_threshold {
+        let calls = jit
+            .calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |calls| {
+                Some(calls.saturating_add(1))
+            })
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        if jit.compiled.get().is_none() && calls >= self.jit_threshold {
             let Some((slots, operations)) =
                 crate::bytecode::integer_native_plan(&function.params, body)
             else {
-                jit.disabled = true;
+                jit.disabled.store(true, Ordering::Relaxed);
                 return Ok(None);
             };
             match CompiledFunction::compile(function.params.len(), slots, &operations) {
                 Ok(compiled) => {
-                    jit.compiled = Some(compiled);
-                    self.jit_compilations = self.jit_compilations.saturating_add(1);
+                    if jit.compiled.set(compiled).is_ok() {
+                        self.jit_compilations = self.jit_compilations.saturating_add(1);
+                    }
                 }
                 Err(_) => {
-                    jit.disabled = true;
+                    jit.disabled.store(true, Ordering::Relaxed);
                     return Ok(None);
                 }
             }
         }
-        let Some(compiled) = &jit.compiled else {
+        let Some(compiled) = jit.compiled.get() else {
             return Ok(None);
         };
-        match compiled.call(&integers) {
+        let mut inline_arguments = [0i64; 8];
+        let mut allocated_arguments = Vec::new();
+        let integers = if arguments.len() <= inline_arguments.len() {
+            for (target, value) in inline_arguments.iter_mut().zip(arguments) {
+                let Value::Int(value) = value else {
+                    return Ok(None);
+                };
+                *target = *value;
+            }
+            &inline_arguments[..arguments.len()]
+        } else {
+            allocated_arguments.reserve(arguments.len());
+            for value in arguments {
+                let Value::Int(value) = value else {
+                    return Ok(None);
+                };
+                allocated_arguments.push(*value);
+            }
+            &allocated_arguments
+        };
+        match compiled.call(integers) {
             Ok(value) => {
                 self.jit_executions = self.jit_executions.saturating_add(1);
                 Ok(Some(Value::Int(value)))
@@ -2231,7 +2348,50 @@ impl Interpreter {
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
+        if let Some(frame) = self.fast_frames.last()
+            && let Some(slot) = frame.slots_by_name.get(name)
+            && frame.slots[*slot].defined
+        {
+            return Some(frame.slots[*slot].value.clone());
+        }
         lookup(&self.environment, name)
+    }
+
+    fn define_fast(&mut self, name: &str, value: Value, mutable: bool) -> bool {
+        let Some(frame) = self.fast_frames.last_mut() else {
+            return false;
+        };
+        let Some(slot) = frame.slots_by_name.get(name).copied() else {
+            return false;
+        };
+        frame.slots[slot] = FastBinding {
+            value,
+            mutable,
+            defined: true,
+        };
+        true
+    }
+
+    fn assign_fast(&mut self, name: &str, value: Value, span: Span) -> Result<bool, NivError> {
+        let Some(frame) = self.fast_frames.last_mut() else {
+            return Ok(false);
+        };
+        let Some(slot) = frame.slots_by_name.get(name).copied() else {
+            return Ok(false);
+        };
+        let binding = &mut frame.slots[slot];
+        if !binding.defined {
+            return Ok(false);
+        }
+        if !binding.mutable {
+            return Err(NivError::new(
+                format!("cannot assign to immutable '{name}'"),
+                span.line,
+                span.column,
+            ));
+        }
+        binding.value = value;
+        Ok(true)
     }
 
     fn task_spawn(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -2880,10 +3040,16 @@ impl Interpreter {
                 })?),
                 Op::Store(name) => {
                     let value = stack.last().cloned().unwrap();
-                    assign(&self.environment, name, value, item.span)?;
+                    if !self.assign_fast(name, value.clone(), item.span)? {
+                        assign(&self.environment, name, value, item.span)?;
+                    }
                 }
                 Op::Define { name, mutable } => {
                     let value = stack.last().cloned().unwrap();
+                    if self.define_fast(name, value.clone(), *mutable) {
+                        instruction += 1;
+                        continue;
+                    }
                     let replaced = self.environment.lock().unwrap().values.insert(
                         name.clone(),
                         Binding {
@@ -2928,6 +3094,16 @@ impl Interpreter {
                     }
                 }
                 Op::Call(arity) => {
+                    let argument_start = stack.len() - arity;
+                    let callee_index = argument_start - 1;
+                    if let Value::Function(function) = &stack[callee_index] {
+                        let value =
+                            self.call_function(function, &stack[argument_start..], item.span)?;
+                        stack.truncate(callee_index);
+                        stack.push(value);
+                        instruction += 1;
+                        continue;
+                    }
                     let arguments = stack.split_off(stack.len() - arity);
                     let callee = stack.pop().unwrap();
                     stack.push(self.call(callee, arguments, item.span)?);
@@ -2968,11 +3144,15 @@ impl Interpreter {
                     stack.push(Value::Null);
                 }
                 Op::EnterScope => {
-                    self.environment = self.child_scope(self.environment.clone());
+                    if self.fast_frames.is_empty() {
+                        self.environment = self.child_scope(self.environment.clone());
+                    }
                 }
                 Op::ExitScope => {
-                    let parent = self.environment.lock().unwrap().parent.clone().unwrap();
-                    self.environment = parent;
+                    if self.fast_frames.is_empty() {
+                        let parent = self.environment.lock().unwrap().parent.clone().unwrap();
+                        self.environment = parent;
+                    }
                 }
                 Op::MakeFunction { name, params, body } => {
                     stack.push(Value::Function(Arc::new(Function {
@@ -2980,8 +3160,9 @@ impl Interpreter {
                         params: params.clone(),
                         body: FunctionBody::Bytecode(body.clone()),
                         closure: self.environment.clone(),
+                        fast_slots: fast_integer_slots(name, params, body),
                         #[cfg(feature = "host-runtime")]
-                        jit: Mutex::new(JitState::default()),
+                        jit: JitState::default(),
                     })));
                 }
                 Op::Return => return Ok(VmFlow::Return(stack.pop().unwrap())),
@@ -3724,6 +3905,82 @@ impl Drop for Interpreter {
         };
         drop(values);
     }
+}
+
+fn fast_integer_slots(
+    function_name: &str,
+    parameters: &[String],
+    body: &Chunk,
+) -> Option<Arc<HashMap<String, usize>>> {
+    let mut slots = HashMap::new();
+    for parameter in parameters {
+        let next = slots.len();
+        if slots.insert(parameter.clone(), next).is_some() {
+            return None;
+        }
+    }
+    for instruction in &body.code {
+        match &instruction.op {
+            Op::Constant(Literal::Int(_) | Literal::Bool(_) | Literal::Null)
+            | Op::Load(_)
+            | Op::Pop
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::Call(_)
+            | Op::Print
+            | Op::EnterScope
+            | Op::ExitScope
+            | Op::Return => {}
+            Op::Define { name, .. } => {
+                let next = slots.len();
+                if slots.insert(name.clone(), next).is_some() {
+                    return None;
+                }
+            }
+            Op::Store(_) => {}
+            Op::Unary(TokenKind::Minus | TokenKind::Bang) => {}
+            Op::Binary(
+                TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::EqualEqual
+                | TokenKind::BangEqual
+                | TokenKind::Greater
+                | TokenKind::GreaterEqual
+                | TokenKind::Less
+                | TokenKind::LessEqual,
+            ) => {}
+            _ => return None,
+        }
+    }
+    for instruction in &body.code {
+        match &instruction.op {
+            Op::Load(name) if !slots.contains_key(name) && name != function_name => return None,
+            Op::Store(name) if !slots.contains_key(name) => return None,
+            _ => {}
+        }
+    }
+    Some(Arc::new(slots))
+}
+
+fn fast_root_slots(chunk: &Chunk) -> Option<FastRootSlots> {
+    let slots_by_name = fast_integer_slots("", &[], chunk)?;
+    let mut depth = 0usize;
+    let mut persistent = Vec::new();
+    for instruction in &chunk.code {
+        match &instruction.op {
+            Op::EnterScope => depth = depth.saturating_add(1),
+            Op::ExitScope => depth = depth.saturating_sub(1),
+            Op::Define { name, .. } if depth == 0 => persistent.push(name.clone()),
+            _ => {}
+        }
+    }
+    Some(FastRootSlots {
+        slots_by_name,
+        persistent,
+    })
 }
 
 fn lookup(environment: &Env, name: &str) -> Option<Value> {
