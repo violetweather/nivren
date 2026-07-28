@@ -1,6 +1,6 @@
 # Getting started with Nivren
 
-Nivren Edition 4 is a local pre-1.0 beta development build. The repository is intentionally not being published again until the full roadmap, documentation, installers, website, and validation gates agree.
+Nivren Edition 4 is a pre-1.0 beta. Published beta builds are working evaluation releases that pass the automated build and artifact matrix; they do not claim that the final Product Proof roadmap or independent audits are complete.
 
 ## Install a release build
 
@@ -21,7 +21,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```
 
-Use `--yes` on macOS/Linux or `-Yes` on Windows for recommended unattended choices. Until the coordinated beta is published, these URLs install the last public build rather than the local Edition 4 candidate described here.
+Use `--yes` on macOS/Linux or `-Yes` on Windows for recommended unattended choices. The website download manifest identifies the exact Edition 4 beta version offered by these installers.
 
 The installer writes a private ownership marker and `install-receipt.json`, retains the previously verified version, and updates one stable command. Roll back locally with `sh install.sh --rollback` on macOS/Linux or `.\install.ps1 -Rollback` on Windows. Uninstall with `--uninstall` or `-Uninstall`; the Unix flow removes only its verified managed command link and exact recorded PATH block, and both installers refuse an unmarked or unsafe root.
 

@@ -29,7 +29,7 @@ This is the blocking ledger for Checkpoint 4. Product Proof closes only when eve
 | Artifacts and supply chain | Reproducible native/Wasm builds, archives, static/shared libraries, containers, SBOM, checksums, GitHub attestations, channel manifests/signatures/rollback metadata, and a complete exact-set verifier for archives, members, SBOMs, Wasm, browser SDK, VSIX, sizes, and digests | Desktop/mobile bundles, production channel manifests/key recovery, and clean-runner evidence |
 | Packages and examples | All 25 official packages and their tests use Edition 4 declarations/bindings; real application examples cover the release set | Complete per-package references/recipes/failures/capabilities/performance notes, aggregate promised-capability coverage, and released-platform application fixtures |
 | Documentation | Language, standard library, embedding, AOT, Wasm, packages, installer, testing, performance, and release references | Remove stale Edition 3 behavior claims, add progressive CLI/HTTP/database/realtime/desktop/FFI/Wasm/GPU path, compile every snippet, and verify every download/version/link |
-| Website | Existing multi-route Nivren site with docs explorer, package catalog/detail routes, install/download pages, examples, benchmarks, responsive design, tests, and Sites configuration | Complete Edition 4 content/data synchronization, new platform/tooling pages, generated package detail depth, verified local downloads/versions/links, accessibility/build tests, and coordinated unpublished release state |
+| Website | Published multi-route Nivren beta site with docs explorer, package catalog/detail routes, install/download pages, examples, benchmarks, responsive design, tests, and Sites configuration | Complete Edition 4 content/data synchronization, new platform/tooling pages, generated package detail depth, verified release downloads/versions/links, accessibility/build tests, and stable-release coordination |
 | Platform and security evidence | Six native release jobs, Wasm jobs, fuzz schedules, RustSec, ASan/Valgrind gate, TLS/network suites, hostile artifact tests | Complete Product Proof matrix, installer clean machines, desktop/GPU fallbacks, audit scope checklist, critical/high finding closure, and independent audit evidence |
 
 ## Stop-and-correct policy
@@ -41,7 +41,7 @@ This is the blocking ledger for Checkpoint 4. Product Proof closes only when eve
 - Benchmarks must remain reproducible and include limitations.
 - Failed usability, security, performance, or platform evidence changes the product design before release criteria are reconsidered.
 
-## Product Proof progress — local, unpublished
+## Product Proof progress — incomplete; beta evidence only
 
 | Slice | State | Executable evidence | Remaining gate |
 | --- | --- | --- | --- |

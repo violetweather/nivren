@@ -1,6 +1,6 @@
 # Edition 4 checkpoint ledger
 
-This ledger prevents later Edition 4 work from bypassing the agreed proof gates. A checkpoint is complete only when every blocking row is passing. Edition 4 remains local and unpublished until Product Proof passes.
+This ledger prevents a stable Edition 4 release from bypassing the agreed proof gates. A checkpoint is complete only when every blocking row is passing. Working evaluation builds may be published as explicitly labeled beta prereleases, but they do not close Product Proof or authorize a stable release.
 
 ## Language Proof — passed 2026-07-28
 
@@ -75,4 +75,4 @@ The initial per-instruction trace failed performance at `1.766` times the tiered
 
 ## Product Proof — not started
 
-Compiler Proof passed. Product work may begin, but nothing is pushed or published until the Product Proof matrix also passes.
+Compiler Proof passed. Product work may begin. Beta prereleases may collect real installation and usage evidence while the Product Proof matrix remains open; stable publication stays blocked until that matrix passes.

@@ -2,7 +2,7 @@
 
 Audit date: 2026-07-26
 
-**Edition 4 Beta is not releasable and no repository/site publication is authorized yet.** Language, Intent, and Compiler Proof are implemented, including complete-language native execution/AOT, but `docs/EDITION_4_PRODUCT_PROOF_AUDIT.md` still records Product Proof gaps in platform/domain breadth, hosted ecosystem operations, deployment/signing, independent audits, usability trials, and production pilots. The separate 1.0 audit remains intentionally stricter and follows beta evidence.
+**Edition 4 is not eligible for a stable release yet.** Automated, explicitly labeled beta prereleases may be published after their complete build, test, reproducibility, artifact, and provenance matrix passes. Language, Intent, and Compiler Proof are implemented, including complete-language native execution/AOT, but `docs/EDITION_4_PRODUCT_PROOF_AUDIT.md` still records Product Proof gaps in platform/domain breadth, hosted ecosystem operations, deployment/signing, independent audits, usability trials, and production pilots. The stable and 1.0 audits remain intentionally stricter and follow beta evidence.
 
 ## Evidence currently passing locally
 
@@ -29,4 +29,4 @@ Every row in `docs/CAPABILITY_AUDIT.md` must have an idiomatic API, executable e
 - the language docs, generated API docs, examples, editor, installers, release archives, and website must describe the exact shipped behavior;
 - only after all gates pass may the language repository, release artifacts, and website be published.
 
-Past beta release attempts are historical evidence only. Successful partial jobs do not satisfy this audit, and failed/missing release objects must not be represented as shipped versions.
+Past beta release attempts are historical evidence only. Successful partial jobs do not satisfy this stable-release audit, and failed/missing release objects must not be represented as shipped versions. A published beta remains a prerelease and does not close this audit.
