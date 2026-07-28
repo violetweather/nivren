@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -24,6 +24,15 @@ pub struct Package {
     pub name: String,
     pub version: String,
     pub files: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheEntry {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub reachable: bool,
 }
 
 impl Package {
@@ -684,6 +693,106 @@ pub fn installed_lockfile(manifest: &Manifest) -> Result<String, NivError> {
         resolved.insert((name, version), digest);
     }
     Ok(manifest.resolved_lockfile(&resolved))
+}
+
+pub fn cache_entries(manifest: &Manifest) -> Result<Vec<CacheEntry>, NivError> {
+    installed_lockfile(manifest)?;
+    let store = manifest.root.join(".niv/deps");
+    if !store.exists() {
+        return Ok(Vec::new());
+    }
+    reject_symlink_if_present(&store)?;
+    let reachable = reachable_dependencies(manifest)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&store)
+        .map_err(|error| package_error(format!("cannot enumerate dependency cache: {error}")))?
+    {
+        let entry =
+            entry.map_err(|error| package_error(format!("cannot read cache entry: {error}")))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| package_error(format!("cannot inspect cache entry: {error}")))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(package_error(format!(
+                "dependency cache contains an unsafe entry: {}",
+                path.display()
+            )));
+        }
+        let archive = fs::read(path.join(".niv-package"))
+            .map_err(|error| package_error(format!("cannot read cached package: {error}")))?;
+        let package = Package::decode(&archive)?;
+        let expected_directory = format!("{}-{}", package.name, package.version);
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_directory.as_str()) {
+            return Err(package_error(
+                "cached package directory has the wrong identity",
+            ));
+        }
+        let digest = sha256(&archive);
+        let recorded = fs::read_to_string(path.join(".niv-package-sha256"))
+            .map_err(|error| package_error(format!("cannot read cached checksum: {error}")))?;
+        if recorded.trim() != digest || !installed_package_matches(&package, &path, &digest)? {
+            return Err(package_error(format!(
+                "cached package '{}' {} failed integrity verification",
+                package.name, package.version
+            )));
+        }
+        entries.push(CacheEntry {
+            reachable: reachable.contains(&(package.name.clone(), package.version.clone())),
+            name: package.name,
+            version: package.version,
+            sha256: digest,
+            bytes: u64::try_from(archive.len())
+                .map_err(|_| package_error("cached package size exceeds platform range"))?,
+        });
+        if entries.len() > 4096 {
+            return Err(package_error("dependency cache exceeds 4096 packages"));
+        }
+    }
+    entries.sort_by(|left, right| (&left.name, &left.version).cmp(&(&right.name, &right.version)));
+    Ok(entries)
+}
+
+pub fn prune_cache(manifest: &Manifest) -> Result<(usize, u64), NivError> {
+    let entries = cache_entries(manifest)?;
+    let store = manifest.root.join(".niv/deps");
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.into_iter().filter(|entry| !entry.reachable) {
+        let directory = store.join(format!("{}-{}", entry.name, entry.version));
+        reject_symlink_if_present(&directory)?;
+        fs::remove_dir_all(&directory).map_err(|error| {
+            package_error(format!(
+                "cannot remove unreachable cache entry '{}': {error}",
+                directory.display()
+            ))
+        })?;
+        removed += 1;
+        bytes = bytes.saturating_add(entry.bytes);
+    }
+    Ok((removed, bytes))
+}
+
+fn reachable_dependencies(manifest: &Manifest) -> Result<BTreeSet<(String, String)>, NivError> {
+    let store = manifest.root.join(".niv/deps");
+    let mut pending = manifest
+        .dependencies
+        .iter()
+        .map(|(name, version)| (name.clone(), version.clone()))
+        .collect::<Vec<_>>();
+    let mut reachable = BTreeSet::new();
+    while let Some((name, version)) = pending.pop() {
+        if !reachable.insert((name.clone(), version.clone())) {
+            continue;
+        }
+        let dependency = Manifest::load(&store.join(format!("{name}-{version}")))?;
+        pending.extend(
+            dependency
+                .dependencies
+                .iter()
+                .map(|(name, version)| (name.clone(), version.clone())),
+        );
+    }
+    Ok(reachable)
 }
 
 fn reject_symlink_if_present(path: &Path) -> Result<(), NivError> {

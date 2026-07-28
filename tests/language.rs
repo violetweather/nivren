@@ -1,4 +1,5 @@
 use nivren::runtime::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -2494,6 +2495,53 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
         nivren::runtime::Interpreter::new().run(&program).unwrap(),
         Value::Int(42)
     );
+
+    let unused = nivren::package::Package {
+        name: "unused".into(),
+        version: "1.0.0".into(),
+        files: BTreeMap::from([
+            (
+                "niv.toml".into(),
+                b"[package]\nname = \"unused\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n"
+                    .to_vec(),
+            ),
+            ("main.niv".into(), b"42".to_vec()),
+        ]),
+    };
+    let unused_archive = unused.encode().unwrap();
+    let unused_root = app.join(".niv/deps/unused-1.0.0");
+    unused.extract(&unused_root).unwrap();
+    fs::write(unused_root.join(".niv-package"), &unused_archive).unwrap();
+    fs::write(
+        unused_root.join(".niv-package-sha256"),
+        hex(&Sha256::digest(&unused_archive)),
+    )
+    .unwrap();
+    let entries = nivren::package::cache_entries(&app_manifest).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "answerlib" && entry.reachable)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "unused" && !entry.reachable)
+    );
+    let listed = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["cache", "list", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("unused"));
+    let pruned = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["cache", "prune", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(pruned.status.success());
+    assert!(!unused_root.exists());
+    assert!(app.join(".niv/deps/answerlib-1.0.0").exists());
 
     fs::write(
         app.join(".niv/deps/answerlib-1.0.0/main.niv"),

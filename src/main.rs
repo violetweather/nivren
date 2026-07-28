@@ -76,6 +76,10 @@ fn main() -> ExitCode {
         [command, flag, path] if command == "install" && flag == "--offline" => {
             install_offline_project(path)
         }
+        [command, action] if command == "cache" && action == "list" => cache_list("."),
+        [command, action, path] if command == "cache" && action == "list" => cache_list(path),
+        [command, action] if command == "cache" && action == "prune" => cache_prune("."),
+        [command, action, path] if command == "cache" && action == "prune" => cache_prune(path),
         [command, registry] if command == "install" => install_project(".", registry),
         [command, registry, path] if command == "install" => install_project(path, registry),
         [command] if command == "package" => package_project("."),
@@ -548,6 +552,60 @@ fn install_offline_project(path: &str) -> ExitCode {
     match nivren::package::install_offline_dependencies(&manifest) {
         Ok(count) => {
             println!("verified {count} cached package(s); no network used");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn cache_list(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::cache_entries(&manifest) {
+        Ok(entries) => {
+            for entry in &entries {
+                println!(
+                    "{} {} {} {} bytes {}",
+                    entry.name,
+                    entry.version,
+                    entry.sha256,
+                    entry.bytes,
+                    if entry.reachable {
+                        "reachable"
+                    } else {
+                        "unused"
+                    }
+                );
+            }
+            println!("{} cached package(s)", entries.len());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report(path, "", &[error]);
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn cache_prune(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    match nivren::package::prune_cache(&manifest) {
+        Ok((removed, bytes)) => {
+            println!("removed {removed} unused package(s), {bytes} archive bytes");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -2481,5 +2539,6 @@ fn help() {
     println!(
         "\nTest profiles:\n  niv test --property [path]\n  niv test --compat [path]\n  niv test --fuzz-smoke [path]\n  niv test --time <unix-seconds> [path]"
     );
+    println!("\nDependency cache:\n  niv cache list [project]\n  niv cache prune [project]");
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");
 }

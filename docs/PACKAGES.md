@@ -12,6 +12,8 @@ Use `niv install --trusted https://registry.example root.pub [project]` for a pu
 
 After one verified install, `niv install --offline [project]` reconstructs and verifies the complete dependency graph from the immutable archives cached under `.niv/deps`, then rewrites the exact lockfile without making a network request. Missing, altered, or identity-mismatched cache entries fail closed.
 
+`niv cache list [project]` verifies every cached archive, installed source tree, checksum, and package/directory identity before listing its exact digest, archive bytes, and whether the current dependency graph can reach it. `niv cache prune [project]` performs the same verification first, then removes only verified package directories that are unreachable from the manifest’s complete transitive graph. It never removes a reachable dependency, follows no symlinks, and refuses malformed or ambiguous cache entries instead of guessing.
+
 ## Archive format
 
 All integers are unsigned little-endian. Strings are UTF-8 prefixed by a `u32` byte length.
