@@ -4352,6 +4352,18 @@ impl Drop for Interpreter {
         if let Some(cancellation) = &self.cancellation {
             cancellation.store(true, Ordering::Release);
         }
+        // A function owns its captured environment, while that environment can
+        // own the function through a binding. The collector breaks unreachable
+        // cycles during execution; shutdown must also dismantle every tracked
+        // child scope because there is no later collection after Interpreter
+        // fields begin dropping.
+        for environment in &self.environments {
+            if let Some(environment) = environment.upgrade() {
+                let mut scope = environment.lock().unwrap();
+                scope.values.clear();
+                scope.parent = None;
+            }
+        }
         let values = {
             let mut globals = self.globals.lock().unwrap();
             std::mem::take(&mut globals.values)
