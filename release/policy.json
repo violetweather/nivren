@@ -1,31 +1,36 @@
 {
-  "format": 2,
-  "edition": "3",
-  "roadmap_complete": false,
-  "freeze_started": "",
-  "freeze_ends": "",
-  "freeze_ends_unix": 0,
-  "minimum_pilots": 3,
-  "minimum_pilot_days": 30,
-  "minimum_conformance_cases": 15,
-  "baseline_sha256": "20b55401d0bae30890c36275c3c5bfaf8c41c7e8f4d07582fcaf59600c90d396",
+  "format": 3,
+  "edition": "4",
+  "release_track": "beta",
+  "expected_version": "0.10.0-beta.6",
+  "product_proof_complete": false,
+  "completed_checkpoints": [
+    "language",
+    "intent",
+    "compiler"
+  ],
+  "minimum_conformance_cases": 5,
+  "baseline_path": "conformance/edition4-language-proof.json",
+  "baseline_sha256": "d507ed7fa0ca6218185ff1f5f1851927bf5abdda8f17bf3bd27cc446896dd1a6",
   "required_files": [
-    "spec/LANGUAGE-3.md",
-    "spec/STANDARD-LIBRARY-3.md",
-    "spec/BYTECODE-3.md",
+    "spec/LANGUAGE-4-DRAFT.md",
+    "spec/BYTECODE-7.md",
     "spec/PACKAGE-1.md",
     "spec/WASM-1.md",
-    "conformance/edition3-baseline.json",
-    "docs/CAPABILITY_AUDIT.md",
-    "docs/STYLE_GUIDE.md",
-    "docs/WASM.md",
+    "conformance/edition4-language-proof.json",
+    "docs/EDITION_4_CHECKPOINTS.md",
+    "docs/EDITION_4_PRODUCT_PROOF_AUDIT.md",
+    "docs/LANGUAGE.md",
+    "docs/STANDARD_LIBRARY.md",
+    "docs/GETTING_STARTED.md",
+    "docs/RELEASE_AUDIT.md",
+    "docs/RELEASES.md",
+    "docs/SECURITY_AUDIT_SCOPE.md",
     "sdk/browser/nivren.mjs",
     "containers/Dockerfile",
     "crates/nivren-ffi/include/nivren.h",
     "SECURITY.md",
     "CHANGELOG.md",
-    "docs/GETTING_STARTED.md",
-    "docs/RELEASE_AUDIT.md",
     "tools/package_release.py"
   ],
   "tier_one_platforms": [
@@ -35,5 +40,49 @@
     "macos-15",
     "windows-2025",
     "windows-11-arm"
+  ],
+  "required_evidence": [
+    {
+      "gate": "platform-matrix",
+      "path": "release/evidence/platform-matrix.json",
+      "maximum_age_seconds": 1209600,
+      "independent": false
+    },
+    {
+      "gate": "installer-recovery",
+      "path": "release/evidence/installer-recovery.json",
+      "maximum_age_seconds": 1209600,
+      "independent": false
+    },
+    {
+      "gate": "artifact-reproducibility",
+      "path": "release/evidence/artifact-reproducibility.json",
+      "maximum_age_seconds": 1209600,
+      "independent": false
+    },
+    {
+      "gate": "application-capability",
+      "path": "release/evidence/application-capability.json",
+      "maximum_age_seconds": 1209600,
+      "independent": false
+    },
+    {
+      "gate": "documentation-site",
+      "path": "release/evidence/documentation-site.json",
+      "maximum_age_seconds": 1209600,
+      "independent": false
+    },
+    {
+      "gate": "security-audit",
+      "path": "release/evidence/security-audit.json",
+      "maximum_age_seconds": 7776000,
+      "independent": true
+    },
+    {
+      "gate": "signing-recovery-drill",
+      "path": "release/evidence/signing-recovery-drill.json",
+      "maximum_age_seconds": 7776000,
+      "independent": true
+    }
   ]
 }

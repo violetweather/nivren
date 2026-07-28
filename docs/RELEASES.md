@@ -4,7 +4,7 @@ Release tags are `vMAJOR.MINOR.PATCH` and must exactly match every workspace pac
 
 Edition 4 Beta is checkpoint-gated. Language, Intent, Compiler, and Product Proof evidence must pass before a coordinated language/site release. The later 1.0 decision additionally requires independent production pilots and a compatibility freeze; pilot evidence belongs in `release/pilots/*.json`, and synthetic records never count.
 
-Run `niv release check [repository]` for the long-term 1.0 gate. Edition 4 Beta uses the stricter Product Proof ledger and release workflow until that policy replaces the retained 1.0 audit implementation.
+Run `niv release check [repository]` for the machine-enforced Edition 4 Beta gate. It verifies the frozen Edition 4 corpus, required release files and platform jobs, checkpoint state, and fresh named evidence receipts for the platform, installer, artifact, application, docs/site, independent security, and independent signing-recovery gates. Missing or stale evidence fails closed. The later 1.0 decision additionally requires the production pilots and compatibility freeze described above.
 
 ## Signed update channels
 
