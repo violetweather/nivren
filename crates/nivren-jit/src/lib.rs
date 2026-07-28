@@ -21,7 +21,7 @@ pub enum IntOp {
 }
 
 pub struct CompiledFunction {
-    _module: JITModule,
+    module: Option<JITModule>,
     function: unsafe extern "C" fn(*const i64, *mut u8) -> i64,
     parameters: usize,
 }
@@ -38,7 +38,7 @@ pub type TraceCallback = unsafe extern "C" fn(*mut std::ffi::c_void, u64) -> i64
 /// Individual value operations use the runtime helper ABI, while instruction
 /// selection, jumps, loops, and termination execute as native control flow.
 pub struct CompiledTrace {
-    _module: JITModule,
+    module: Option<JITModule>,
     function: unsafe extern "C" fn(*mut std::ffi::c_void, TraceCallback) -> i64,
     instructions: usize,
 }
@@ -90,7 +90,7 @@ impl CompiledTrace {
             >(pointer)
         };
         Ok(Self {
-            _module: module,
+            module: Some(module),
             function,
             instructions,
         })
@@ -128,6 +128,18 @@ impl CompiledTrace {
     #[must_use]
     pub fn instructions(&self) -> usize {
         self.instructions
+    }
+}
+
+impl Drop for CompiledTrace {
+    fn drop(&mut self) {
+        if let Some(module) = self.module.take() {
+            // SAFETY: The module and its only exposed function pointer are
+            // owned by this value. Drop runs only after the last borrow (and
+            // last Arc owner in the runtime) has ended, so no trace can still
+            // be executing or call the pointer after this point.
+            unsafe { module.free_memory() };
+        }
     }
 }
 
@@ -499,7 +511,7 @@ impl CompiledFunction {
             )
         };
         Ok(Self {
-            _module: module,
+            module: Some(module),
             function,
             parameters,
         })
@@ -515,6 +527,16 @@ impl CompiledFunction {
             Ok(value)
         } else {
             Err(CallError::Overflow)
+        }
+    }
+}
+
+impl Drop for CompiledFunction {
+    fn drop(&mut self) {
+        if let Some(module) = self.module.take() {
+            // SAFETY: The finalized pointer cannot outlive this wrapper and
+            // Drop cannot run while a safe call still borrows the wrapper.
+            unsafe { module.free_memory() };
         }
     }
 }
