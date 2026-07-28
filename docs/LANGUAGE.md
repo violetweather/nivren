@@ -1,179 +1,192 @@
-# Nivren language guide — Edition 3 draft
+# Nivren language guide — Edition 4 beta candidate
 
-Nivren is an intent-first application language: code says what it keeps, changes, needs, starts, waits for, and gives back. The normative draft is `spec/LANGUAGE-3.md`; this guide is the practical tour.
+Nivren is an intent-first application language: source says what it keeps, changes, takes, gives, needs, prepares, performs, starts, waits for, and chooses. The executable candidate specification is `spec/LANGUAGE-4-DRAFT.md`; the conformance corpus and proof programs test the behavior described here.
 
 ## Values and bindings
 
 ```nivren
-keep name: String = "Nivren"
-keep bytes: Bytes = std.bytes.from_string(name)
-keep scores: Map<String, Int> = std.map.single("clarity", 10)
-keep tags: Set<String> = std.set.single("safe")
-change attempts: Int = 0
+keep name is String set "Nivren"
+keep bytes set std.bytes.from_string with { value set name }
+keep scores set std.map.single with { key set "clarity" value set 10 }
+keep tags set std.set.single with { value set "safe" }
+change attempts is Int set 0
+change attempts to attempts + 1
 ```
 
-`keep` is immutable. `change` permits reassignment without changing type. Core values include checked signed `Int`, fixed-width `I8`/`I16`/`I32` and `U8`/`U16`/`U32`/`U64`, binary64 `Float`, exact base-10 `Decimal`, arbitrary-precision signed `BigInt`, Unicode `String`, `Bool`, `none`, homogeneous arrays, immutable `Bytes`, persistent `Map<K,V>` and `Set<T>`, nullable `T?`, and `Result<T,E>`. There is no implicit truthiness or numeric conversion.
+`keep` introduces an immutable fact. `change` introduces state whose value can later change without changing type. Core values include checked signed `Int`, fixed-width integers, `Float`, exact `Decimal`, `BigInt`, Unicode `String`, `Bool`, `none`, arrays, immutable `Bytes`, persistent maps and sets, `maybe Value`, and `Value or Problem`. There is no implicit truthiness or numeric conversion.
 
-## Functions, generics, and protocols
+## Functions, labeled calls, and nominal data
 
 ```nivren
-define identity<Value>(value: Value) gives Value { give value }
+type UserId from Int
 
-define add<Value: Number>(left: Value, right: Value) gives Value {
-    give left + right
+shape User holds {
+    id is UserId
+    name is String
+    email is maybe String
+} with Json, Compare, Display, Validate
+
+define greeting
+takes {
+    user is User
+    prefix is String
+}
+gives String
+{
+    give prefix + ", " + user.name
+}
+
+keep text set greeting with {
+    user set User with {
+        id set UserId with { value set 7 }
+        name set "Mira"
+        email set none
+    }
+    prefix set "Hello"
 }
 ```
 
-Generic arguments are inferred per call. Constraints are visible and checked. The sealed draft protocols are `Comparable`, `Number`, `Ordered`, `Iterable`, `Closable`, and `Sendable`.
+Function parameters and shape fields use `name is Type`. Calls use `with { name set value }`, so arguments remain identifiable after refactoring. Labels are checked for spelling, order, omissions, and duplicates. A nominal `type Name from Representation` prevents accidentally mixing values that share a representation.
 
-Applications and packages can declare marker protocols or protocols with required behavior:
+Generic arguments are inferred and may be constrained by protocols. Protocol declarations and adoptions are module-scoped, coherent, and statically dispatched. Built-in safety protocols remain sealed, and a package must own the protocol or the adopted type.
+
+Shapes are immutable nominal records. Choices are sealed alternatives:
 
 ```nivren
-protocol Named {
-    define name(value: Self) gives String
+choice State holds {
+    case Idle
+    case Running
+    case Failed carries String
+    case Done
 }
-shape User { name: String }
-define user_name(value: User) gives String { give value.name }
-adopt Named for User { name = user_name }
 
-define present<Value: Named>(value: Value) gives String {
-    give Named.name(value)
-}
-```
-
-Protocols and adoptions are module scoped and use fully qualified identities. Every required member is mapped exactly once to a signature- and capability-compatible function. `Protocol.member(value)` is statically constrained and dispatches coherently by nominal receiver type in both execution engines. Each protocol/type pair can be adopted once; one package must own either the protocol or type, preventing conflicting third-party implementations. Built-in safety protocols stay sealed. Empty protocols remain available as lightweight semantic categories.
-
-Functions are lexical closures. Public APIs should annotate every parameter, result, generic constraint, and capability.
-
-## Pipelines and collections
-
-`through` passes the current value as the first argument of the next stage:
-
-```nivren
-define double(value: Int) gives Int { give value * 2 }
-define even(value: Int) gives Bool { give value % 2 == 0 }
-
-keep values: [Int] = [1, 2, 3, 4]
-    through std.list.transform(double)
-    through std.list.select(even)
-```
-
-List algorithms include `transform`, `select`, `fold`, `any`, and `every`. Callback types and callback capabilities are checked.
-
-Edition 4 preserves pipelines in the checked tree. Pure stages fuse to the same operations as direct calls and allocate no runtime plan; effectful stages retain source order. Labeled pipeline stages omit only the piped first value:
-
-```nivren
-define batches takes {} gives [[Int]] or String {
-    give [1, 2, 3, 4, 5]
-        through std.list.batch with { size set 2 }
+keep state set State.Failed("network unavailable")
+keep label set choose state {
+    case Idle => "idle"
+    case Running => "running"
+    case Failed carries problem => problem
+    case Done => "done"
 }
 ```
 
-`batch` rejects zero or oversized batches and returns bounded arrays. Structured tasks supply parallel/race stages, while lazy iterators and bounded channels provide streaming and backpressure. `prepare` materializes an immutable typed plan, and `perform` is the visible external-effect boundary. `niv explain` reports allocation, capability/resource flow, ordering, cancellation, buffering, blocking, fusion, target choice, and portability.
+`choose` must cover every case exactly once. The built-in derives are `Json`, `Compare`, `Display`, `Key`, `Validate`, `Binary`, `DatabaseRow`, and `Arguments`. Derive eligibility is checked from field types; unsupported resources, secrets, callbacks, tasks, and handles are rejected with a field-specific diagnostic.
 
-## Decisions, loops, shapes, and choices
+## Decisions, loops, and pipelines
 
 ```nivren
-when attempts < 3 { show("ready") } otherwise { show("waiting") }
-repeat attempts < 3 { attempts = attempts + 1 }
-each value within [1, 2, 3] { show(value) }
-
-shape User { name: String, active: Bool }
-choice State { Idle, Running, Failed(String), Done }
-shape Pair<Left, Right> { left: Left, right: Right }
-choice Maybe<Value> { Some(Value), None }
-
-keep state = State.Failed("network unavailable")
-keep label = choose state {
-    Idle => "idle",
-    Running => "running",
-    Failed(problem) => problem,
-    Done => "done"
+change total set 0
+each value within [1, 2, 3, 4] {
+    when value % 2 == 0 {
+        change total to total + value
+    }
 }
+
+repeat total < 10 {
+    change total to total + 1
+}
+
+keep batches set [1, 2, 3, 4, 5]
+    through std.list.batch with { size set 2 }
 ```
 
-Shapes are immutable nominal records. Shapes and choices may declare inferred, constrained type parameters; `Pair<String, Int>` and `Maybe<Int>` remain nominally distinct from other applications. Choices are sealed and may give a variant one typed payload. Payload variants are one-argument constructors, bare variants are values, and `choose` must exhaustively bind exactly the variants that carry data. Choices may refer to themselves through a payload, such as `Array([Response])`. Blocks and each iteration create lexical scopes. Semicolons are optional; block comments nest.
+`when`/`otherwise`, `each`/`within`, and `repeat` keep control flow explicit. `through` passes the current value as the first parameter of the next stage; the remaining parameters stay labeled. Pure stages lower without runtime plan allocation. Effectful stages preserve source order, typed failure, cleanup, cancellation, and tracing.
 
 ## Typed failure
 
-Use `choose` when each outcome needs explicit behavior. Use `or give` when the current function should return the same typed error unchanged:
+Expected failure appears in the signature as `gives Value or Problem`:
 
 ```nivren
-define load(path: String) gives Result<String, String> needs FileRead {
-    give std.files.read(path)
-}
-
-define configuration() gives Result<String, String> needs FileRead {
-    keep text: String = load("app.json") or give
+define configuration
+gives String or String
+needs FileRead
+{
+    keep text set perform std.files.read with { path set "app.json" } or give
     give ok(text)
 }
 ```
 
-`or give` only accepts `Result` and only appears inside a function returning a compatible `Result`, so failure propagation remains statically visible.
+Use `or give` when the current function should propagate the same problem unchanged. Use `choose` when the function can recover, translate, log, or fall back. There are no exceptions, implicit nulls, or unchecked result extraction.
 
-## Checked capabilities and project permissions
-
-Effects belong in function signatures:
+## Intent and visible effects
 
 ```nivren
-define fetch(url: String) gives Result<String, String> needs Network {
-    give std.web.get(url, 10.0)
+shape FetchPlan holds {
+    url is String
+    timeout is Float
+} with Display, Validate
+
+define fetch
+takes { plan is FetchPlan }
+gives String or String
+needs Network within "api.example.com"
+{
+    give perform std.web.get with {
+        url set plan.url
+        timeout set plan.timeout
+    }
 }
+
+prepare request as FetchPlan with {
+    url set "https://api.example.com/users"
+    timeout set 5.0
+}
+
+perform fetch with { plan set perform request }
 ```
 
-Calls propagate `needs` transitively, including callbacks and started tasks. A project separately grants runtime authority:
+`prepare` creates an immutable typed plan. `perform` is the visible boundary for external work and explicitly stored plans. `needs` states the required authority; `within` narrows it at the source boundary. Pure computation remains direct and allocation-free. Only portable plans made entirely of data may be serialized.
+
+`niv explain program.niv` emits a deterministic intent graph showing capabilities, resources, allocation, effect order, cancellation, retries, timeouts, buffering, blocking, fusion, target selection, and portability.
+
+## Project authority
+
+A declaration explains an effect. The project manifest separately authorizes it:
 
 ```toml
 [capabilities]
-FileRead = "allow"
-Network = "host:api.example.com"
+FileRead = "path:./data"
+Network = "host:api.example.com;method:GET"
 
 [limits]
 instructions = "1000000"
 memory_bytes = "67108864"
 ```
 
-The current capabilities are `FileRead`, `FileWrite`, `Environment`, `Time`, `Process`, `Network`, `Task`, `Channel`, `Log`, `Native`, and `Random`. Filesystem grants may use `path:<directory-or-file>` and network grants may use `host:<name>` or `host:*.example.com`; `allow` remains the explicit whole-capability grant. A declaration explains an effect; a manifest grant authorizes it. `Random` controls operating-system entropy, while deterministic cryptographic verification remains capability-free. Runtime policy, shared task-tree instruction budgets, conservative memory budgets, and call-depth limits are enforced again during execution.
+Capabilities include `FileRead`, `FileWrite`, `Environment`, `Time`, `Process`, `Network`, `Task`, `Channel`, `Log`, `Native`, and `Random`. Filesystem, host, environment, process, and native grants can be scoped. Runtime policy, shared task-tree instruction budgets, memory budgets, and call-depth limits are enforced during execution.
 
-## Structured concurrency
+## Structured concurrency and resources
 
 ```nivren
-define first() gives Int { give 20 }
-define second() gives Int { give 22 }
+define first gives Int { give 20 }
+define second gives Int { give 22 }
 
-keep joined = together [start first, start second]
-keep quickest = race [start first, start second]
-keep one = wait start first
+keep joined set together [start first, start second]
+keep quickest set race [start first, start second]
+keep one set wait start first
 ```
 
-`start`, `wait`, `together`, and `race` are the preferred forms. Tasks are owned, cancellation-aware, joined on drop, and cannot silently outlive their owner. Only `Sendable` values cross task and channel boundaries.
+Tasks are owned, cancellation-aware, joined on drop, and cannot silently outlive their scope. Only `Sendable` values cross task and channel boundaries. Bounded channels provide backpressure.
 
-## Deterministic resources
+Own closeable resources with `using`:
 
 ```nivren
-define load(path: String) gives Result<String, String> needs FileRead {
-    keep opened = std.files.open_read(path)
+define load
+takes { path is String }
+gives String or String
+needs FileRead
+{
+    keep opened set perform std.files.open_read with { path set path }
     using file = opened or give {
-        give std.files.read_open(file, 1048576)
+        give perform std.files.read_open with { file set file maximum set 1048576 }
     }
 }
 ```
 
-`using` closes `File`, `TcpListener`, `TlsListener`, `TcpStream`, `WebSocket`, `LockGuard`, `NativeHandle`, `NativeLibrary`, and transaction values on normal completion, `give`, `or give`, and runtime failure. Closing is idempotent where the resource protocol permits it, and bounded operations fail safely after close. Resource handles are neither transferable task/channel values nor stable map/set keys.
+`using` closes files, listeners, streams, WebSockets, locks, native handles and libraries, and transactions on normal completion, `give`, propagated failure, and runtime failure. Cleanup is deterministic and resources cannot be serialized or used as stable keys.
 
-## Modules and projects
+## Modules, projects, and tooling
 
-Declarations are private unless exposed:
-
-```nivren
-// math.niv
-define double(value: Int) gives Int { give value * 2 }
-expose { double }
-```
-
-`use "math.niv"` creates the `math` namespace. `use "@package"` loads an exact, declared dependency. Modules are loaded once, cannot cycle, and cannot escape the project root.
-
-The everyday project path is:
+Declarations are private unless exposed. `use "math.niv"` creates a namespace; `use "@package"` loads an exact locked dependency. Modules load once, cannot cycle, and cannot escape the project root.
 
 ```text
 niv new my-app
@@ -181,19 +194,18 @@ cd my-app
 niv add package 1.2.3
 niv dev
 niv test
+niv explain src/main.niv
 niv ship
 ```
 
-`ship` checks and builds the project, runs its tests, generates `target/doc/api.md`, creates a deterministic package, and emits a directly executable standalone application that embeds verified bytecode plus its capability/resource policy. It does not publish externally.
+`ship` checks and builds the project, runs tests, generates API documentation, creates a deterministic package, and emits a standalone application. It does not publish externally.
 
-## Native integration and compiler tooling
+The formatter owns the canonical spelling and layout. `niv fmt` is idempotent. The LSP, debugger adapter, VM, JIT, native AOT, browser Wasm, and WASI paths consume the same checked language model; the Product Proof ledger records which distribution and platform gates still need external evidence.
 
-`std.host.invoke` is the capability-gated escape hatch used by embedding applications and generated bindings. `std.host.open`, `call`, and `close` add opaque `NativeHandle` ownership for long-lived foreign resources, with deterministic `using` cleanup. The stable compiler facade checks, formats, compiles, documents, generates C schema views, and executes source without exposing compiler internals. C ABI version 3 provides check/format/compile/VM-run/complete-native-run operations, an owned-buffer host callback contract, and an asynchronous completion/cancellation/wake bridge. Shared and static libraries and `nivren.h` ship beside every supported native release.
+## Native and unsafe boundaries
 
-Direct C libraries use `std.native.open`, `call_int`, `call_float`, and `close`. `NativeLibrary` is an opaque closable resource: symbols never escape a call, primitive call arity is capped at six, and `using` cleanup prevents use after unload. These calls require `needs Native` because loading or invoking foreign code trusts its initializers and declared C signatures. Project policy may restrict opening to an approved path.
+`std.host.invoke` is the capability-gated embedding escape hatch. `std.native.open` and bounded primitive/buffer calls support dynamic C libraries through opaque owned handles. Generated C11/C++17 bindings and the stable compiler facade use checked public declarations. Native access requires `needs Native` and an explicit project grant because library initializers and declared C signatures cross the safe-language boundary.
 
-`std.reflect.schema(User)` inspects a shape or choice declaration through deterministic string metadata rather than runtime object layout. It is safe, fallible, and side-effect free. Compiler facade v3 and `niv bindgen c` use checked public declarations and emit ordinary inspectable source; Nivren has no hidden unhygienic text-substitution macro phase.
+Declared unsafe modules contain raw memory, stable layout, allocators, atomics, threads, SIMD, device access, and unchecked FFI. Unsafe authority never appears implicitly in safe modules. Nivren has no syntax macros or unrestricted runtime reflection; schema reflection is deterministic declaration metadata.
 
-`Iterator<T>` is a typed single-pass value. Build one from a snapshot with `std.iter.from` or from a lazy end-exclusive numeric source with `std.iter.range(start, end, step)`; adapt it with `transform`, `select`, `skip`, `take`, or `chain`; then consume it with `next`, `collect`, `count`, `fold`, `find`, `any`, `every`, or `each value within iterator`. Range stores only cursor state, while query terminals short-circuit and leave the unvisited suffix available. Consumption is explicit: adapters drain their input, iterators cannot cross task/channel boundaries, and work is bounded to one million values per call.
-
-See `docs/STYLE_GUIDE.md` for the conformance-tested idiomatic style.
+See `docs/STYLE_GUIDE.md`, `docs/STANDARD_LIBRARY.md`, and `docs/UNSAFE_MODULES.md` for the idiomatic, library, and systems-level references.

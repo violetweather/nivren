@@ -1,8 +1,8 @@
-# Nivren Language Specification, Edition 4 (intent-proof draft)
+# Nivren Language Specification, Edition 4 (beta candidate)
 
 ## 1. Status
 
-This executable draft defines the passed Language Proof and Intent Proof source semantics for Edition 4. It is not a release specification. The Edition 4 conformance corpus, six application proofs, intent snapshot, and checkpoint ledger are normative evidence. Complete native compilation remains gated by Checkpoint 3.
+This executable candidate defines the passed Language Proof, Intent Proof, and Compiler Proof source semantics for Edition 4. It is not frozen as a release specification until Product Proof passes. The Edition 4 conformance corpus, application proofs, intent snapshots, cross-engine conformance evidence, and checkpoint ledger are normative evidence.
 
 ## 2. Identity invariants
 

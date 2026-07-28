@@ -24,7 +24,7 @@ Operation results pack status in bits 63–60, byte length in bits 59–32, and 
 
 An implementation accepts no input or result larger than 16 MiB. It rejects nonzero-length null input, invalid UTF-8, and ranges the host cannot lawfully make readable. It contains panics at the exported boundary.
 
-`check` produces empty success or UTF-8 diagnostics. `format` produces UTF-8 Edition 3 source. `compile` produces verified NIVB bytecode. `run` checks, compiles, and executes source in the portable VM and produces the value display as UTF-8.
+`check` produces empty success or UTF-8 diagnostics. `format` produces canonical UTF-8 source for the declared edition, including Edition 4. `compile` produces verified NIVB bytecode. `run` checks, compiles, and executes source in the portable VM and produces the value display as UTF-8.
 
 ## Capabilities
 

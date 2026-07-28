@@ -21,7 +21,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```
 
-Use `--yes` on macOS/Linux or `-Yes` on Windows for recommended unattended choices. Until the next release is published, these URLs install the last public build rather than the local Edition 3 work described here.
+Use `--yes` on macOS/Linux or `-Yes` on Windows for recommended unattended choices. Until the coordinated beta is published, these URLs install the last public build rather than the local Edition 4 candidate described here.
 
 The installer writes a private ownership marker and `install-receipt.json`, retains the previously verified version, and updates one stable command. Roll back locally with `sh install.sh --rollback` on macOS/Linux or `.\install.ps1 -Rollback` on Windows. Uninstall with `--uninstall` or `-Uninstall`; the Unix flow removes only its verified managed command link and exact recorded PATH block, and both installers refuse an unmarked or unsafe root.
 

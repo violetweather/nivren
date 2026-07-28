@@ -176,3 +176,87 @@ fn bundled_sqlite_host_executes_real_edition_four_driver_workflow() {
         let _ = std::fs::remove_dir(&root);
     }
 }
+
+fn nivren_markdown_blocks(markdown: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = None;
+    for line in markdown.lines() {
+        if line.trim() == "```nivren" {
+            current = Some(String::new());
+        } else if line.trim() == "```" {
+            if let Some(source) = current.take() {
+                blocks.push(source);
+            }
+        } else if let Some(source) = current.as_mut() {
+            source.push_str(line);
+            source.push('\n');
+        }
+    }
+    assert!(current.is_none(), "unterminated nivren documentation fence");
+    blocks
+}
+
+#[test]
+fn release_facing_language_snippets_are_checked_edition_four() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let guides = [
+        root.join("docs/LANGUAGE.md"),
+        root.join("docs/STYLE_GUIDE.md"),
+        root.join("docs/GETTING_STARTED.md"),
+    ];
+    let mut checked = 0;
+    for guide in guides {
+        let markdown = std::fs::read_to_string(&guide).unwrap();
+        for (index, source) in nivren_markdown_blocks(&markdown).into_iter().enumerate() {
+            nivren::check(&source).unwrap_or_else(|errors| {
+                panic!(
+                    "{} Nivren block {} did not check: {errors:?}\n{source}",
+                    guide.display(),
+                    index + 1
+                )
+            });
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked, 12,
+        "release guide snippet count changed; review it"
+    );
+}
+
+#[test]
+fn current_release_docs_do_not_reintroduce_edition_three_claims() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "docs/LANGUAGE.md",
+        "docs/STANDARD_LIBRARY.md",
+        "docs/STYLE_GUIDE.md",
+        "docs/GETTING_STARTED.md",
+        "docs/RELEASE_AUDIT.md",
+    ] {
+        let contents = std::fs::read_to_string(root.join(relative)).unwrap();
+        for stale in [
+            "Edition 3 draft",
+            "local Edition 3",
+            "new Edition 3 examples",
+            "Edition 3 style corpus",
+            "Twenty-two official packages",
+        ] {
+            assert!(
+                !contents.contains(stale),
+                "{relative} contains stale release-facing text: {stale}"
+            );
+        }
+    }
+    for entry in std::fs::read_dir(root.join("packages")).unwrap() {
+        let readme = entry.unwrap().path().join("README.md");
+        if readme.is_file() {
+            let contents = std::fs::read_to_string(&readme).unwrap();
+            assert!(
+                !contents.contains("for Nivren Edition 3"),
+                "{} still advertises Edition 3",
+                readme.display()
+            );
+        }
+    }
+}

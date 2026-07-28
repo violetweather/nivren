@@ -1,6 +1,6 @@
-# Nivren Edition 3 standard library guide
+# Nivren Edition 4 standard library guide
 
-The normative draft is `spec/STANDARD-LIBRARY-3.md`. Fallible operations return `Result<T, String>`; absence returns `T?`; host effects declare and require capabilities.
+This guide describes the Edition 4 beta-candidate library. The retained `spec/STANDARD-LIBRARY-3.md` records the inherited low-level API contracts while `spec/LANGUAGE-4-DRAFT.md` defines the canonical Edition 4 call and failure syntax. Fallible operations are written as `gives Value or Problem`; absence is `maybe Value`; host effects declare and require capabilities.
 
 ## Data
 
@@ -139,4 +139,4 @@ Every operation needs `Native`. A manifest may grant all native access or restri
 
 ## Core globals
 
-`show`, `len`, `type`, `append`, `assert`, `ok`, and `err` remain available. `clock()` and float-returning `std.time.now()` are retained for Edition 2; Edition 3 code should use `std.time.now_zoned(zone)`.
+`show`, `len`, `type`, `append`, `assert`, `ok`, and `err` remain available. `clock()` and float-returning `std.time.now()` are compatibility APIs; Edition 4 code should use `std.time.now_zoned` with a labeled `zone` argument.

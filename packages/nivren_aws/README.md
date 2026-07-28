@@ -1,6 +1,6 @@
 # nivren_aws
 
-Official AWS Signature Version 4 request signing for Nivren Edition 3.
+Official AWS Signature Version 4 request signing for Nivren Edition 4.
 
 `sign_v4` accepts an already canonical method, URI, query, lowercase header block, signed-header list, and payload. It derives the date/region/service signing key with HMAC-SHA-256 and returns the authorization header plus payload and canonical-request hashes. Network authority remains outside the package: applications attach these values to a bounded certificate-verified `std.web.request`.
 

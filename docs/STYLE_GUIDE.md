@@ -18,17 +18,27 @@ Nivren code should read like a small, precise account of intent. The formatter o
 Put pure transformations near the center and effects at the edge:
 
 ```nivren
-define normalize(name: String) gives String {
+define normalize
+takes { name is String }
+gives String
+{
     give "Hello, " + name
 }
 
-define load_name(path: String) gives Result<String, String> needs FileRead {
-    give std.files.read(path)
+define load_name
+takes { path is String }
+gives String or String
+needs FileRead
+{
+    give perform std.files.read with { path set path }
 }
 
-define main() gives Result<Null, String> needs FileRead, Log {
-    keep name = load_name("name.txt") or give
-    std.log.info(normalize(name))
+define main
+gives Null or String
+needs FileRead, Log
+{
+    keep name set perform load_name with { path set "name.txt" } or give
+    perform std.log.info with { message set normalize with { name set name } }
     give ok(none)
 }
 ```
@@ -40,8 +50,11 @@ The `needs` list is part of the public contract, not bookkeeping. Project grants
 Return `Result<Success, Problem>` for expected failure. Error strings should say what was attempted and retain actionable context. Avoid sentinel values such as an empty string or `-1` when the operation can fail.
 
 ```nivren
-define title(document: Map<String, String>) gives Result<String, String> {
-    keep value = std.map.get(document, "title")
+define title
+takes { document is Map<String, String> }
+gives String or String
+{
+    keep value set std.map.get with { map set document key set "title" }
     when value == none {
         give err("document has no title")
     }
@@ -51,7 +64,7 @@ define title(document: Map<String, String>) gives Result<String, String> {
 
 ## Prefer stable namespaces
 
-Everyday code should begin with `std.files`, `std.web`, `std.json`, `std.time`, `std.tasks`, `std.channels`, `std.locks`, `std.process`, and `std.log`. Use `DateTime` with an explicit IANA zone for application time. These plural intent namespaces are final for 1.x. Compatibility aliases remain behavior-identical for the full 1.x line, but tooling and new Edition 3 examples always prefer the canonical form.
+Everyday code should begin with `std.files`, `std.web`, `std.json`, `std.time`, `std.tasks`, `std.channels`, `std.locks`, `std.process`, and `std.log`. Use `DateTime` with an explicit IANA zone for application time. These plural intent namespaces are canonical for Edition 4. Compatibility aliases remain behavior-identical where documented, but tooling and Edition 4 examples always prefer the canonical form.
 
 ## Punctuation budget
 
@@ -65,4 +78,4 @@ Use parentheses when they clarify precedence, not as ceremony. Do not compress m
 - Keep packages capability-light. A data-format package should not unexpectedly need network or process authority.
 - Run `niv fmt`, `niv check`, `niv test`, and `niv doc` before `niv ship`.
 
-This guide is conformance-tested through the Edition 3 style corpus. New syntax earns a place only when it makes representative programs more readable without weakening diagnostics, tooling, or predictable execution.
+This guide is checked against the Edition 4 proof and documentation corpus. New syntax earns a place only when it makes representative programs more readable without weakening diagnostics, tooling, or predictable execution.
