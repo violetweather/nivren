@@ -40,4 +40,11 @@ proptest! {
         });
         prop_assert!(result.is_ok());
     }
+
+    #[test]
+    fn formatter_is_idempotent_for_arbitrary_source(source in ".{0,4096}") {
+        let once = nivren::formatter::format(&source);
+        let twice = nivren::formatter::format(&once);
+        prop_assert_eq!(once, twice);
+    }
 }

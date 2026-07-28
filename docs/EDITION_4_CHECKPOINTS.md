@@ -13,7 +13,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Labeled argument safety | Partial | Labels survive the AST; same-unit functions/shapes and imported module exports validate exact names/order; complete standard-library metadata remains open |
 | Derive behavior | Partial | All eight names, dependencies, field constraints, deterministic diagnostics, Compare/Json operation gates, and dual-engine positive evidence pass; generated Validate/Binary/DatabaseRow/Arguments entry points remain open |
 | Scoped source capabilities | Passing for Language Proof | Fixed capability vocabulary, bounded scope metadata, host-only Network validation, and generated documentation pass; runtime authorization remains gated by Intent Proof |
-| Canonical formatter | Partial | Existing formatter remains comment-safe and idempotent; complete Edition 4 canonical reprinting remains open |
+| Canonical formatter | Partial | Edition 4 spacing, indentation, comments, strings, and operators have deterministic output; example and arbitrary-source idempotence properties pass; canonical line breaking remains open |
 | Usability corpus | Passing, provisional | Twelve paired tasks type-check and remain within the 1.15 median token budget; maintenance-choice evidence remains open |
 | Clippy warnings denied | Passing | The complete workspace passes Rust 1.97 clippy with warnings denied |
 

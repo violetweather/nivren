@@ -2237,6 +2237,42 @@ fn formatter_is_comment_safe_and_idempotent() {
 }
 
 #[test]
+fn edition_four_formatter_canonicalizes_spacing_without_moving_comments() {
+    let source = r#"shape   User   holds {
+name   is   String // public label
+}
+define   greet
+takes {
+user   is   User
+}
+gives   String
+{
+keep   text is String set user.name
+give   text
+}
+greet   with { user   set   User with { name set "Mira" } }
+"#;
+    let expected = r#"shape User holds {
+    name is String // public label
+}
+define greet
+takes {
+    user is User
+}
+gives String
+{
+    keep text is String set user.name
+    give text
+}
+greet with { user set User with { name set "Mira" } }
+"#;
+    let formatted = nivren::formatter::format(source);
+    assert_eq!(formatted, expected);
+    assert_eq!(nivren::formatter::format(&formatted), formatted);
+    assert!(nivren::check(&formatted).is_ok());
+}
+
+#[test]
 fn documentation_lists_only_explicit_module_exports() {
     let source =
         "define public(value: Int) gives Int { give value; } keep hidden = 1; expose { public };";
