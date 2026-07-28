@@ -8,6 +8,10 @@ The native tier preserves checked `Int` semantics. Addition, subtraction, multip
 
 Set `NIVREN_JIT_THRESHOLD` to a positive call count when tuning workloads. `Interpreter::set_jit_threshold` and `jit_stats` support embedding and tests.
 
+## Application profiling
+
+`niv profile --json profile.json <program>` emits the additive `org.nivren.observation.v1` report. In addition to source-line and operation counts, it separates interpreter work, allocation work and heap collections, materialized plans and visible effect boundaries, ordered capability effects, async task submissions/joins/cancellations/event-loop waits, and JIT/native compilation, execution, and fallback counts. The text report presents the same memory, effect, and async totals. Profiling shares the program's capability, scope, instruction, memory, and call-depth policy; it does not reveal source text, values, secrets, or absolute project paths.
+
 ## Published benchmark
 
 `cargo bench --bench performance` runs a 200,000-iteration arithmetic workload through both the bytecode-only and tiered runtimes. It also compares recursive Fibonacci execution in the tree interpreter and bytecode VM so call-frame regressions remain visible, and reports a repeated eight-field shape workload to cover general slots and indexed properties. Every case reports a median over seven measured runs after warmup. Setting `NIVREN_BENCH_GATE=1` requires at least a 1.05x native-tier speedup and a 1.10x recursive bytecode speedup.

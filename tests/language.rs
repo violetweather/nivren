@@ -5318,7 +5318,17 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     let failing = directory.join("failing.niv");
     let profile = directory.join("profile.json");
     let crash = directory.join("crash.json");
-    fs::write(&healthy, "keep answer = 6 * 7; answer").unwrap();
+    fs::write(
+        &healthy,
+        "define one takes {} gives Int { give 1 }\n\
+         define many takes {} gives [Int] or String needs Task {\n\
+             keep first set perform std.tasks.spawn with { operation set one }\n\
+             keep second set perform std.tasks.spawn with { operation set one }\n\
+             give perform std.tasks.all with { tasks set [first, second] }\n\
+         }\n\
+         perform many with {}",
+    )
+    .unwrap();
     fs::write(
         &failing,
         "define secret() gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
@@ -5343,6 +5353,18 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     assert_eq!(report["schema"], "org.nivren.observation.v1");
     assert_eq!(report["kind"], "profile");
     assert!(report["instructions"].as_u64().unwrap() > 0);
+    assert!(report["execution"]["instructions"].as_u64().unwrap() > 0);
+    assert!(report["memory"]["allocation_work_bytes"].as_u64().unwrap() > 0);
+    assert!(
+        report["memory"]["heap"]["tracked_environments"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(report["effects"]["perform_boundaries"].as_u64().unwrap() >= 4);
+    assert!(report["effects"]["count"].as_u64().unwrap() >= 3);
+    assert_eq!(report["async_tasks"]["spawns"], 2);
+    assert_eq!(report["async_tasks"]["joins"], 2);
+    assert!(report["engines"]["native"]["fallbacks"].as_u64().is_some());
 
     let output = std::process::Command::new(niv)
         .args([

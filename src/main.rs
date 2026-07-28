@@ -1684,6 +1684,8 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
     let elapsed = started.elapsed();
     let metrics = interpreter.execution_metrics().unwrap_or_default();
     let jit = interpreter.jit_stats();
+    let native = interpreter.native_stats();
+    let heap = interpreter.heap_stats();
     if let Some(output) = output {
         let executable = if coverage {
             let mut lines = BTreeSet::new();
@@ -1705,6 +1707,43 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
             "line_hits": metrics.line_hits,
             "operation_hits": metrics.operation_hits,
             "jit": { "compilations": jit.compilations, "executions": jit.executions },
+            "execution": {
+                "instructions": metrics.instructions,
+                "operation_hits": metrics.operation_hits,
+                "line_hits": metrics.line_hits,
+            },
+            "memory": {
+                "allocation_work_bytes": metrics.allocation_work_bytes,
+                "plan_allocations": metrics.plan_allocations,
+                "heap": {
+                    "tracked_environments": heap.tracked_environments,
+                    "live_environments": heap.live_environments,
+                    "collections": heap.collections,
+                    "minor_collections": heap.minor_collections,
+                    "major_collections": heap.major_collections,
+                    "concurrent_marking": heap.concurrent_marking,
+                },
+            },
+            "effects": {
+                "perform_boundaries": metrics.perform_boundaries,
+                "count": metrics.effect_sequence.len(),
+                "sequence": metrics.effect_sequence,
+            },
+            "async_tasks": {
+                "spawns": metrics.task_spawns,
+                "blocking_submissions": metrics.blocking_task_submissions,
+                "joins": metrics.task_joins,
+                "cancellations": metrics.task_cancellations,
+                "event_loop_waits": metrics.event_loop_waits,
+            },
+            "engines": {
+                "jit": { "compilations": jit.compilations, "executions": jit.executions },
+                "native": {
+                    "compilations": native.compilations,
+                    "executions": native.executions,
+                    "fallbacks": native.fallbacks,
+                },
+            },
             "coverage": if coverage { Some(serde_json::json!({
                 "executable": executable.len(),
                 "hit": executable.len().saturating_sub(missed.len()),
@@ -1763,6 +1802,23 @@ fn observe_path(path: &str, coverage: bool, output: Option<&str>) -> ExitCode {
         println!(
             "  native tier: {} compilation(s), {} execution(s)",
             jit.compilations, jit.executions
+        );
+        println!(
+            "  memory: {} allocation-work byte(s), {} plan allocation(s), {} live environment(s)",
+            metrics.allocation_work_bytes, metrics.plan_allocations, heap.live_environments
+        );
+        println!(
+            "  effects: {} perform boundary/boundaries, {} observed effect(s)",
+            metrics.perform_boundaries,
+            metrics.effect_sequence.len()
+        );
+        println!(
+            "  async: {} spawn(s), {} blocking submission(s), {} join(s), {} cancellation(s), {} event-loop wait(s)",
+            metrics.task_spawns,
+            metrics.blocking_task_submissions,
+            metrics.task_joins,
+            metrics.task_cancellations,
+            metrics.event_loop_waits
         );
     }
     ExitCode::SUCCESS

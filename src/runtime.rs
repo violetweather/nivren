@@ -967,6 +967,11 @@ pub struct ExecutionMetrics {
     pub allocation_work_bytes: u64,
     pub plan_allocations: u64,
     pub perform_boundaries: u64,
+    pub task_spawns: u64,
+    pub blocking_task_submissions: u64,
+    pub task_joins: u64,
+    pub task_cancellations: u64,
+    pub event_loop_waits: u64,
     pub effect_sequence: Vec<String>,
     pub line_hits: BTreeMap<usize, u64>,
     pub operation_hits: BTreeMap<String, u64>,
@@ -2632,7 +2637,12 @@ impl Interpreter {
         let worker_host = self.host_callback.clone();
         let worker_call_depth_limit = self.max_call_depth;
         let worker_event_loop = self.event_loop.clone();
+        let worker_metrics = self.metrics.clone();
         let worker_native = self.native_execution_depth > 0;
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.task_spawns = metrics.task_spawns.saturating_add(1);
+        }
         let mut inherited_cancellations = self.inherited_cancellations.clone();
         if let Some(cancellation) = &self.cancellation {
             inherited_cancellations.push(cancellation.clone());
@@ -2647,6 +2657,7 @@ impl Interpreter {
             worker.host_callback = worker_host;
             worker.max_call_depth = worker_call_depth_limit;
             worker.event_loop = worker_event_loop;
+            worker.metrics = worker_metrics;
             worker.cancellation = Some(worker_cancelled);
             worker.inherited_cancellations = inherited_cancellations;
             worker.native_execution_depth = usize::from(worker_native);
@@ -2672,6 +2683,10 @@ impl Interpreter {
         span: Span,
         operation: impl FnOnce() -> Result<Value, NivError> + Send + 'static,
     ) -> Value {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.blocking_task_submissions = metrics.blocking_task_submissions.saturating_add(1);
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
         let event_loop = self.event_loop.clone();
@@ -2771,6 +2786,7 @@ impl Interpreter {
         let handle = task.lock().unwrap().take().ok_or_else(|| {
             NivError::new("task has already been awaited", span.line, span.column)
         })?;
+        self.record_task_joins(1);
         Ok(join_task(handle))
     }
 
@@ -2789,12 +2805,15 @@ impl Interpreter {
                 let handle = task.lock().unwrap().take().ok_or_else(|| {
                     NivError::new("task has already been awaited", span.line, span.column)
                 })?;
+                self.record_task_joins(1);
                 return Ok(join_task(handle));
             }
             if Instant::now() >= deadline {
                 task_cancel_flag(&arguments[0]);
+                self.record_task_cancellations(1);
                 return Ok(result_error("task deadline exceeded"));
             }
+            self.record_event_loop_wait();
             self.event_loop
                 .wait_until_change(observed, deadline.saturating_duration_since(Instant::now()));
         }
@@ -2806,12 +2825,14 @@ impl Interpreter {
             other => return Err(expected_value("std.task.cancel", "Task", other, span)),
         };
         task.cancelled.store(true, Ordering::Release);
+        self.record_task_cancellations(1);
         Ok(Value::Null)
     }
 
     fn task_all(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let tasks = task_array(&arguments[0], "std.task.all", span)?;
         ensure_pending_tasks(&tasks, "std.task.all", span)?;
+        self.record_task_joins(tasks.len());
         let mut values = Vec::with_capacity(tasks.len());
         for task in tasks {
             let handle = task
@@ -2855,17 +2876,20 @@ impl Interpreter {
                     .take()
                     .expect("validated task handle");
                 let result = join_task(winner_handle);
+                self.record_task_joins(tasks.len());
                 for (index, task) in tasks.iter().enumerate() {
                     if index == winner {
                         continue;
                     }
                     task.cancelled.store(true, Ordering::Release);
+                    self.record_task_cancellations(1);
                     if let Some(handle) = task.handle.lock().unwrap().take() {
                         let _ = handle.join();
                     }
                 }
                 return Ok(result);
             }
+            self.record_event_loop_wait();
             self.event_loop
                 .wait_until_change(observed, Duration::from_millis(100));
         }
@@ -3945,6 +3969,31 @@ impl Interpreter {
             })
             .map(|_| ())
             .map_err(|_| NivError::new("memory limit exceeded", span.line, span.column))
+    }
+
+    fn record_task_joins(&self, count: usize) {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.task_joins = metrics
+                .task_joins
+                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn record_task_cancellations(&self, count: usize) {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.task_cancellations = metrics
+                .task_cancellations
+                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn record_event_loop_wait(&self) {
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.event_loop_waits = metrics.event_loop_waits.saturating_add(1);
+        }
     }
 
     fn child_scope(&mut self, parent: Env) -> Env {
