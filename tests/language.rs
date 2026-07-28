@@ -503,6 +503,7 @@ fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
     }
     ratios.sort_by(f64::total_cmp);
     let median = (ratios[5] + ratios[6]) / 2.0;
+    eprintln!("edition_four_median_token_ratio {median:.3}");
     assert!(
         median <= 1.15,
         "Edition 4 median token ratio {median:.3} exceeds the 1.15 language-proof budget"
