@@ -463,14 +463,14 @@ fn build_standalone(path: &str) -> ExitCode {
         let permissions = env::current_exe()
             .and_then(fs::metadata)
             .map(|metadata| metadata.permissions());
-        if let Ok(permissions) = permissions {
-            if let Err(error) = fs::set_permissions(&output, permissions) {
-                eprintln!(
-                    "error: cannot make {} executable: {error}",
-                    output.display()
-                );
-                return ExitCode::from(73);
-            }
+        if let Ok(permissions) = permissions
+            && let Err(error) = fs::set_permissions(&output, permissions)
+        {
+            eprintln!(
+                "error: cannot make {} executable: {error}",
+                output.display()
+            );
+            return ExitCode::from(73);
         }
     }
     println!("standalone {}", output.display());
@@ -1600,11 +1600,11 @@ fn check_project(path: &str, write_lock: bool) -> ExitCode {
                     return ExitCode::from(65);
                 }
             };
-            if fs::read_to_string(&lockfile).ok().as_deref() != Some(expected_lock.as_str()) {
-                if let Err(error) = fs::write(&lockfile, expected_lock) {
-                    eprintln!("error: cannot write {}: {error}", lockfile.display());
-                    return ExitCode::from(73);
-                }
+            if fs::read_to_string(&lockfile).ok().as_deref() != Some(expected_lock.as_str())
+                && let Err(error) = fs::write(&lockfile, expected_lock)
+            {
+                eprintln!("error: cannot write {}: {error}", lockfile.display());
+                return ExitCode::from(73);
             }
             println!(
                 "fresh {} {} ({})",

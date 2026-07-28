@@ -305,12 +305,10 @@ pub fn search(query: &str, registry: &Path) -> Result<Vec<SearchResult>, NivErro
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "json")
+                && let Some(version) = path.file_stem().and_then(|value| value.to_str())
+                && validate_identity("search-result", version).is_ok()
             {
-                if let Some(version) = path.file_stem().and_then(|value| value.to_str()) {
-                    if validate_identity("search-result", version).is_ok() {
-                        versions.push(version.to_string());
-                    }
-                }
+                versions.push(version.to_string());
             }
         }
         versions.sort_by_key(|version| std::cmp::Reverse(version_parts(version)));

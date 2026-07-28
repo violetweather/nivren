@@ -76,6 +76,7 @@ fn declaration_signature(statement: &Stmt) -> String {
             params,
             return_type,
             needs,
+            capability_needs,
             ..
         } => {
             let generics = if type_params.is_empty() {
@@ -98,7 +99,19 @@ fn declaration_signature(statement: &Stmt) -> String {
                 .as_ref()
                 .map(|ty| format!(" gives {}", type_name(ty)))
                 .unwrap_or_default();
-            let capabilities = if needs.is_empty() {
+            let capabilities = if capability_needs.iter().any(|need| need.boundary.is_some()) {
+                format!(
+                    " needs {}",
+                    capability_needs
+                        .iter()
+                        .map(|need| need.boundary.as_ref().map_or_else(
+                            || need.capability.clone(),
+                            |boundary| format!("{} within \"{}\"", need.capability, boundary)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else if needs.is_empty() {
                 String::new()
             } else {
                 format!(" needs {}", needs.join(", "))

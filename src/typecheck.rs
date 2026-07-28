@@ -1695,6 +1695,7 @@ impl Checker {
                 iterable,
                 body,
                 span,
+                ..
             } => {
                 let element = match self.expression(iterable) {
                     Type::Array(element) => *element,
@@ -1754,38 +1755,34 @@ impl Checker {
                 if matches!(
                     resource_type,
                     Type::TcpListener | Type::TcpStream | Type::WebSocket | Type::TlsListener
-                ) {
-                    if let Some(available) = self.needs.last() {
-                        if !available.iter().any(|need| need == "Network") {
-                            self.errors.push(NivError::new(
-                                "closing this resource needs Network; add it to the function's needs list",
-                                span.line,
-                                span.column,
-                            ));
-                        }
-                    }
+                ) && let Some(available) = self.needs.last()
+                    && !available.iter().any(|need| need == "Network")
+                {
+                    self.errors.push(NivError::new(
+                        "closing this resource needs Network; add it to the function's needs list",
+                        span.line,
+                        span.column,
+                    ));
                 }
-                if matches!(resource_type, Type::LockGuard) {
-                    if let Some(available) = self.needs.last() {
-                        if !available.iter().any(|need| need == "Task") {
-                            self.errors.push(NivError::new(
-                                "closing this lock guard needs Task; add it to the function's needs list",
-                                span.line,
-                                span.column,
-                            ));
-                        }
-                    }
+                if matches!(resource_type, Type::LockGuard)
+                    && let Some(available) = self.needs.last()
+                    && !available.iter().any(|need| need == "Task")
+                {
+                    self.errors.push(NivError::new(
+                        "closing this lock guard needs Task; add it to the function's needs list",
+                        span.line,
+                        span.column,
+                    ));
                 }
-                if matches!(resource_type, Type::NativeHandle | Type::NativeLibrary) {
-                    if let Some(available) = self.needs.last() {
-                        if !available.iter().any(|need| need == "Native") {
-                            self.errors.push(NivError::new(
+                if matches!(resource_type, Type::NativeHandle | Type::NativeLibrary)
+                    && let Some(available) = self.needs.last()
+                    && !available.iter().any(|need| need == "Native")
+                {
+                    self.errors.push(NivError::new(
                                 "closing this native handle needs Native; add it to the function's needs list",
                                 span.line,
                                 span.column,
                             ));
-                        }
-                    }
                 }
                 self.in_scope(|checker| {
                     checker.declare(
@@ -1807,6 +1804,7 @@ impl Checker {
                 needs,
                 body,
                 span,
+                ..
             } => {
                 let generic_names = type_params
                     .iter()
@@ -1825,14 +1823,14 @@ impl Checker {
                     })
                     .collect::<HashMap<_, _>>();
                 for parameter in type_params {
-                    if let Some(constraint) = &parameter.constraint {
-                        if !self.known_protocol(constraint) {
-                            self.errors.push(NivError::new(
-                                format!("unknown protocol '{constraint}'"),
-                                parameter.span.line,
-                                parameter.span.column,
-                            ));
-                        }
+                    if let Some(constraint) = &parameter.constraint
+                        && !self.known_protocol(constraint)
+                    {
+                        self.errors.push(NivError::new(
+                            format!("unknown protocol '{constraint}'"),
+                            parameter.span.line,
+                            parameter.span.column,
+                        ));
                     }
                 }
                 self.generics.push(generic_names.clone());
@@ -2542,29 +2540,28 @@ impl Checker {
                                     Type::Function(_, _, _, _, found_needs),
                                     Type::Function(_, _, _, _, expected_needs),
                                 ) = (found, expected)
+                                    && expected_needs.iter().any(|need| need == "$effects")
                                 {
-                                    if expected_needs.iter().any(|need| need == "$effects") {
-                                        for need in found_needs {
-                                            if !effective_required.contains(need) {
-                                                effective_required.push(need.clone());
-                                            }
+                                    for need in found_needs {
+                                        if !effective_required.contains(need) {
+                                            effective_required.push(need.clone());
                                         }
                                     }
                                 }
                             }
                         }
                         for (parameter, constraint) in &constraints {
-                            if let Some(found) = substitutions.get(parameter) {
-                                if !self.satisfies(found, constraint) {
-                                    self.errors.push(NivError::new(
-                                        format!(
-                                            "{} does not satisfy {constraint} for {parameter}",
-                                            found.name()
-                                        ),
-                                        span.line,
-                                        span.column,
-                                    ));
-                                }
+                            if let Some(found) = substitutions.get(parameter)
+                                && !self.satisfies(found, constraint)
+                            {
+                                self.errors.push(NivError::new(
+                                    format!(
+                                        "{} does not satisfy {constraint} for {parameter}",
+                                        found.name()
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
                             }
                         }
                         if let Some(available) = self.needs.last() {
@@ -2989,17 +2986,16 @@ impl Checker {
                                 {
                                     if let Some(index) =
                                         parameters.iter().position(|name| name == &parameter)
+                                        && !self.satisfies(&arguments[index], &constraint)
                                     {
-                                        if !self.satisfies(&arguments[index], &constraint) {
-                                            self.errors.push(NivError::new(
-                                                format!(
-                                                    "{} does not satisfy {constraint} for {parameter}",
-                                                    arguments[index].name()
-                                                ),
-                                                span.line,
-                                                span.column,
-                                            ));
-                                        }
+                                        self.errors.push(NivError::new(
+                                            format!(
+                                                "{} does not satisfy {constraint} for {parameter}",
+                                                arguments[index].name()
+                                            ),
+                                            span.line,
+                                            span.column,
+                                        ));
                                     }
                                 }
                                 if self.records.contains_key(&qualified) {

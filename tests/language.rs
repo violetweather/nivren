@@ -148,6 +148,62 @@ fn edition_four_diagnostics_name_the_intended_forms() {
 }
 
 #[test]
+fn edition_four_preserves_scoped_needs_as_checked_metadata() {
+    let source = "define fetch gives String or String needs Network within \"api.example.test\" { give err(\"offline\") } expose { fetch }";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let nivren::ast::Stmt::Function {
+        capability_needs, ..
+    } = &program[0]
+    else {
+        panic!("expected function");
+    };
+    assert_eq!(capability_needs[0].capability, "Network");
+    assert_eq!(
+        capability_needs[0].boundary.as_deref(),
+        Some("api.example.test")
+    );
+    let docs = nivren::documentation::generate("proof", "4.0.0-beta", &program);
+    assert!(docs.contains("Network within \"api.example.test\""));
+}
+
+#[test]
+fn edition_four_protocol_clauses_dispatch_in_both_engines() {
+    let source = r#"
+protocol Named {
+    define name
+    takes {
+        value is Self
+    }
+    gives String
+}
+
+shape User holds {
+    name is String
+}
+
+define user_name
+takes {
+    value is User
+}
+gives String
+{
+    give value.name
+}
+
+adopt Named for User {
+    name set user_name
+}
+
+keep user set User with {
+    name set "Mira"
+}
+Named.name(user)
+"#;
+    assert_eq!(eval_tree(source), Value::String("Mira".into()));
+    assert_eq!(eval_vm(source), Value::String("Mira".into()));
+}
+
+#[test]
 fn through_pipelines_values_into_readable_stages() {
     assert_eq!(
         eval(

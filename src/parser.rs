@@ -1,4 +1,6 @@
-use crate::ast::{Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef};
+use crate::ast::{
+    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef,
+};
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
 use std::collections::{BTreeSet, HashMap};
@@ -212,19 +214,31 @@ impl Parser {
             None
         };
         let mut needs = vec![];
+        let mut capability_needs = vec![];
         if self.matches(&[TokenKind::Needs]) {
             loop {
+                let need_span = Span {
+                    line: self.peek().line,
+                    column: self.peek().column,
+                };
                 let capability = self.consume_identifier("expected capability after needs")?;
                 if needs.contains(&capability) {
                     return Err(self.error_here("duplicate capability in needs list"));
                 }
-                needs.push(capability);
-                if self.matches(&[TokenKind::In]) {
+                needs.push(capability.clone());
+                let boundary = if self.matches(&[TokenKind::In]) {
                     match self.advance().kind.clone() {
-                        TokenKind::String(_) => {}
+                        TokenKind::String(boundary) => Some(boundary),
                         _ => return Err(self.error_here("a scoped need expects a quoted boundary")),
                     }
-                }
+                } else {
+                    None
+                };
+                capability_needs.push(CapabilityNeed {
+                    capability,
+                    boundary,
+                    span: need_span,
+                });
                 if !self.matches(&[TokenKind::Comma]) {
                     break;
                 }
@@ -245,6 +259,7 @@ impl Parser {
             params,
             return_type,
             needs,
+            capability_needs,
             body,
             span,
         })
@@ -270,8 +285,8 @@ impl Parser {
                 {
                     return Err(self.error_here("duplicate generic type parameter"));
                 }
-                let constraint = if self.matches(&[TokenKind::Colon]) {
-                    Some(self.consume_identifier("expected protocol after ':'")?)
+                let constraint = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+                    Some(self.consume_identifier("expected protocol constraint")?)
                 } else {
                     None
                 };
@@ -460,39 +475,65 @@ impl Parser {
                 self.consume(&TokenKind::Fun, "expected 'define' before protocol member")?;
                 let member_span = self.previous_span();
                 let member_name = self.consume_identifier("expected protocol member name")?;
-                self.consume(
-                    &TokenKind::LeftParen,
-                    "expected '(' after protocol member name",
-                )?;
                 let mut params = vec![];
-                if !self.check(&TokenKind::RightParen) {
-                    loop {
+                if self.matches(&[TokenKind::Takes]) {
+                    self.consume(&TokenKind::LeftBrace, "expected '{' after 'takes'")?;
+                    while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
                         let parameter_span = Span {
                             line: self.peek().line,
                             column: self.peek().column,
                         };
                         let parameter_name =
                             self.consume_identifier("expected protocol parameter name")?;
-                        self.consume(
-                            &TokenKind::Colon,
-                            "protocol parameters require an explicit type",
-                        )?;
+                        self.consume(&TokenKind::Is, "a protocol input states its type with 'is'")?;
                         params.push(Param {
                             name: parameter_name,
                             ty: Some(self.type_ref()?),
                             span: parameter_span,
                         });
-                        if !self.matches(&[TokenKind::Comma]) {
-                            break;
+                        self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                    }
+                    self.consume(&TokenKind::RightBrace, "expected '}' after protocol inputs")?;
+                } else {
+                    self.consume(
+                        &TokenKind::LeftParen,
+                        "expected 'takes' or '(' after protocol member name",
+                    )?;
+                    if !self.check(&TokenKind::RightParen) {
+                        loop {
+                            let parameter_span = Span {
+                                line: self.peek().line,
+                                column: self.peek().column,
+                            };
+                            let parameter_name =
+                                self.consume_identifier("expected protocol parameter name")?;
+                            self.consume(
+                                &TokenKind::Colon,
+                                "protocol parameters require an explicit type",
+                            )?;
+                            params.push(Param {
+                                name: parameter_name,
+                                ty: Some(self.type_ref()?),
+                                span: parameter_span,
+                            });
+                            if !self.matches(&[TokenKind::Comma]) {
+                                break;
+                            }
                         }
                     }
+                    self.consume(
+                        &TokenKind::RightParen,
+                        "expected ')' after protocol parameters",
+                    )?;
                 }
-                self.consume(
-                    &TokenKind::RightParen,
-                    "expected ')' after protocol parameters",
-                )?;
                 self.consume(&TokenKind::Arrow, "protocol members require a 'gives' type")?;
-                let return_type = self.type_ref()?;
+                let value_type = self.type_ref()?;
+                let return_type = if self.matches(&[TokenKind::Or]) {
+                    let problem_type = self.type_ref()?;
+                    TypeRef::Result(Box::new(value_type), Box::new(problem_type), member_span)
+                } else {
+                    value_type
+                };
                 let mut needs = vec![];
                 if self.matches(&[TokenKind::Needs]) {
                     loop {
@@ -542,7 +583,9 @@ impl Parser {
                     column: self.peek().column,
                 };
                 let member = self.consume_identifier("expected protocol member name")?;
-                self.consume(&TokenKind::Equal, "expected '=' after protocol member name")?;
+                if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+                    return Err(self.error_here("a protocol adoption maps a member with 'set'"));
+                }
                 let implementation =
                     self.consume_identifier("expected implementation function name")?;
                 members.push(crate::ast::AdoptionMember {

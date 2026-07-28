@@ -38,6 +38,13 @@ pub struct TypeParam {
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityNeed {
+    pub capability: String,
+    pub boundary: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldDef {
     pub name: String,
@@ -153,6 +160,7 @@ pub enum Stmt {
         params: Vec<Param>,
         return_type: Option<TypeRef>,
         needs: Vec<String>,
+        capability_needs: Vec<CapabilityNeed>,
         body: Vec<Stmt>,
         span: Span,
     },

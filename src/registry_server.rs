@@ -323,24 +323,24 @@ fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
         if bytes.len() > MAX_HEADER + MAX_BODY + 4 {
             return Err("request exceeds size limit".into());
         }
-        if target.is_none() {
-            if let Some(boundary) = find(&bytes, b"\r\n\r\n") {
-                if boundary > MAX_HEADER {
-                    return Err("HTTP headers exceed 64 KiB".into());
-                }
-                let head =
-                    std::str::from_utf8(&bytes[..boundary]).map_err(|_| "headers are not UTF-8")?;
-                let mut length = 0usize;
-                for line in head.split("\r\n").skip(1) {
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse().map_err(|_| "invalid Content-Length")?;
-                    }
-                }
-                if length > MAX_BODY {
-                    return Err("request body exceeds 66 MiB".into());
-                }
-                target = Some(boundary + 4 + length);
+        if target.is_none()
+            && let Some(boundary) = find(&bytes, b"\r\n\r\n")
+        {
+            if boundary > MAX_HEADER {
+                return Err("HTTP headers exceed 64 KiB".into());
             }
+            let head =
+                std::str::from_utf8(&bytes[..boundary]).map_err(|_| "headers are not UTF-8")?;
+            let mut length = 0usize;
+            for line in head.split("\r\n").skip(1) {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().map_err(|_| "invalid Content-Length")?;
+                }
+            }
+            if length > MAX_BODY {
+                return Err("request body exceeds 66 MiB".into());
+            }
+            target = Some(boundary + 4 + length);
         }
         if target.is_some_and(|target| bytes.len() >= target) {
             break;

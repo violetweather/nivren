@@ -715,10 +715,10 @@ impl TaskHandle {
 impl Drop for Task {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Ok(slot) = self.handle.get_mut() {
-            if let Some(handle) = slot.take() {
-                let _ = handle.join();
-            }
+        if let Ok(slot) = self.handle.get_mut()
+            && let Some(handle) = slot.take()
+        {
+            let _ = handle.join();
         }
     }
 }
@@ -3345,10 +3345,9 @@ impl Interpreter {
                     | Op::MakeFunction { .. }
                     | Op::DefineRecord { .. }
                     | Op::DefineEnum { .. }
-            ) {
-                if let Some(value) = stack.last() {
-                    self.charge_memory(value, item.span)?;
-                }
+            ) && let Some(value) = stack.last()
+            {
+                self.charge_memory(value, item.span)?;
             }
             instruction += 1;
         }
@@ -3688,7 +3687,7 @@ impl Collector for GenerationalCollector {
             }
         }
         self.cycles = self.cycles.saturating_add(1);
-        if self.pending.is_none() && self.cycles % 8 == 0 {
+        if self.pending.is_none() && self.cycles.is_multiple_of(8) {
             let globals = globals.clone();
             let current = current.clone();
             let roots = roots.to_vec();
@@ -5634,67 +5633,68 @@ fn decode_schema_value(
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Value::Array(Arc::new(values)));
     }
-    if let Some(arguments) = generic_schema_arguments(schema, "Array") {
-        if arguments.len() == 1 {
-            return decode_schema_value(
-                value,
-                &format!("[{}]", arguments[0]),
-                path,
-                catalog,
-                choices,
-                owner,
-            );
-        }
+    if let Some(arguments) = generic_schema_arguments(schema, "Array")
+        && arguments.len() == 1
+    {
+        return decode_schema_value(
+            value,
+            &format!("[{}]", arguments[0]),
+            path,
+            catalog,
+            choices,
+            owner,
+        );
     }
-    if let Some(arguments) = generic_schema_arguments(schema, "Set") {
-        if arguments.len() == 1 {
-            let Value::Array(values) = decode_schema_value(
-                value,
-                &format!("[{}]", arguments[0]),
-                path,
-                catalog,
-                choices,
-                owner,
-            )?
-            else {
-                unreachable!();
-            };
-            let mut unique = Vec::with_capacity(values.len());
-            for value in values.iter() {
-                if unique.contains(value) {
-                    return Err(format!("{path} contains a duplicate Set value"));
-                }
-                unique.push(value.clone());
+    if let Some(arguments) = generic_schema_arguments(schema, "Set")
+        && arguments.len() == 1
+    {
+        let Value::Array(values) = decode_schema_value(
+            value,
+            &format!("[{}]", arguments[0]),
+            path,
+            catalog,
+            choices,
+            owner,
+        )?
+        else {
+            unreachable!();
+        };
+        let mut unique = Vec::with_capacity(values.len());
+        for value in values.iter() {
+            if unique.contains(value) {
+                return Err(format!("{path} contains a duplicate Set value"));
             }
-            return Ok(Value::Set(Arc::new(unique)));
+            unique.push(value.clone());
         }
+        return Ok(Value::Set(Arc::new(unique)));
     }
-    if let Some(arguments) = generic_schema_arguments(schema, "Map") {
-        if arguments.len() == 2 && arguments[0] == "String" {
-            let serde_json::Value::Object(values) = value else {
-                return Err(format!(
-                    "{path} expects {schema}, found JSON {}",
-                    json_kind(&value)
-                ));
-            };
-            return values
-                .into_iter()
-                .map(|(key, value)| {
-                    Ok((
-                        Value::String(key.clone()),
-                        decode_schema_value(
-                            value,
-                            &arguments[1],
-                            &format!("{path}.{key}"),
-                            catalog,
-                            choices,
-                            owner,
-                        )?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()
-                .map(|entries| Value::Map(Arc::new(entries)));
-        }
+    if let Some(arguments) = generic_schema_arguments(schema, "Map")
+        && arguments.len() == 2
+        && arguments[0] == "String"
+    {
+        let serde_json::Value::Object(values) = value else {
+            return Err(format!(
+                "{path} expects {schema}, found JSON {}",
+                json_kind(&value)
+            ));
+        };
+        return values
+            .into_iter()
+            .map(|(key, value)| {
+                Ok((
+                    Value::String(key.clone()),
+                    decode_schema_value(
+                        value,
+                        &arguments[1],
+                        &format!("{path}.{key}"),
+                        catalog,
+                        choices,
+                        owner,
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(|entries| Value::Map(Arc::new(entries)));
     }
     match schema {
         "Unknown" => {

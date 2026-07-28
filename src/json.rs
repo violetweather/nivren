@@ -304,11 +304,9 @@ fn separator(output: &mut String, indent: Option<usize>, depth: usize, index: us
     }
 }
 fn close(output: &mut String, indent: Option<usize>, depth: usize, empty: bool) {
-    if !empty {
-        if let Some(width) = indent {
-            output.push('\n');
-            output.push_str(&" ".repeat(width * depth));
-        }
+    if !empty && let Some(width) = indent {
+        output.push('\n');
+        output.push_str(&" ".repeat(width * depth));
     }
 }
 fn write_string(value: &str, output: &mut String) {

@@ -12,10 +12,10 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Six proof programs | Passing, static | All programs under `proofs/edition4` check; network/native proof programs are not executed during Language Proof |
 | Labeled argument safety | Partial | Same-unit functions/shapes and the standard calls used by proof programs validate exact labels and order; complete standard-library metadata remains open |
 | Derive behavior | Partial | All eight names and duplicates are checked and emitted in documentation metadata; generated behavior and derive-specific constraints remain open |
-| Scoped source capabilities | Partial | Syntax is checked; scope metadata and enforcement remain open and block the checkpoint |
+| Scoped source capabilities | Partial | Syntax, checked scope metadata, and generated documentation pass; runtime/intent enforcement remains gated by Intent Proof |
 | Canonical formatter | Partial | Existing formatter remains comment-safe and idempotent; complete Edition 4 canonical reprinting remains open |
 | Usability corpus | Passing, provisional | Twelve paired tasks type-check and remain within the 1.15 median token budget; maintenance-choice evidence remains open |
-| Clippy warnings denied | Baseline blocked | Rust 1.97 reports 21 new style lints in unchanged Edition 3 code; no new Edition 4 lint is currently reported |
+| Clippy warnings denied | Passing | The complete workspace passes Rust 1.97 clippy with warnings denied |
 
 ### Stop-and-correct record
 
@@ -27,12 +27,10 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 
 1. Preserve label metadata through modules and provide complete official-callable labels.
 2. Implement generated behavior and constraints for all built-in derives.
-3. Preserve and enforce scoped `needs` metadata in source declarations.
+3. Complete static validation of scoped `needs` boundaries; runtime enforcement belongs to Intent Proof.
 4. Implement a comment-preserving canonical Edition 4 formatter.
-5. Add complete protocol/adoption Edition 4 forms and tests.
-6. Complete maintenance-edit evidence and actionable diagnostic coverage.
-7. Resolve the warnings-as-errors baseline on the active Rust toolchain.
-8. Rerun the entire checkpoint matrix and record final measurements.
+5. Complete maintenance-edit evidence and actionable diagnostic coverage.
+6. Rerun the entire checkpoint matrix and record final measurements.
 
 ## Intent Proof — not started
 

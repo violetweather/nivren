@@ -33,11 +33,10 @@ proptest! {
     #[test]
     fn arbitrary_source_never_panics(source in ".{0,4096}") {
         let result = std::panic::catch_unwind(|| {
-            if let Ok(tokens) = nivren::lexer::scan(&source) {
-                if let Ok(program) = nivren::parser::parse(tokens) {
+            if let Ok(tokens) = nivren::lexer::scan(&source)
+                && let Ok(program) = nivren::parser::parse(tokens) {
                     let _ = nivren::typecheck::check(&program);
                 }
-            }
         });
         prop_assert!(result.is_ok());
     }
