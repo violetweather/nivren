@@ -92,7 +92,10 @@ jobs:
           & "install/install.ps1" -Uninstall -InstallRoot $root
           if (Test-Path $root) { throw "uninstaller left its managed root behind" }
       - name: Test release source
-        run: cargo test --workspace --all-targets --locked
+        run: |
+          cargo test --workspace --all-targets --locked
+          python tools/test_release_packager.py
+          python tools/test_verify_release_artifacts.py
       - name: Enforce the 1.0 release policy
         if: startsWith(github.ref_name, 'v1.')
         run: cargo run --locked -- release check .
@@ -218,6 +221,9 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Enforce Edition 4 Product Proof
+        run: cargo run --locked -- release check .
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -246,6 +252,8 @@ jobs:
       - name: Write checksums
         working-directory: release-assets
         run: sha256sum nivren-* > SHA256SUMS
+      - name: Verify the complete release set
+        run: python tools/verify_release_artifacts.py release-assets "${RELEASE_LABEL}"
       - name: Sign release provenance
         uses: actions/attest@v4
         with:

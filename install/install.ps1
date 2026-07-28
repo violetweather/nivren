@@ -95,7 +95,7 @@ try {
         if (-not $ChannelKey) { $ChannelKey = Join-Path $InstallRoot "channel-public-key" }
         if (-not (Test-Path $ChannelKey -PathType Leaf)) { throw "Channel public key is missing; pass -ChannelKey from a separately trusted source" }
         $channelPath = Join-Path $temporary "channel-$Channel.json"
-        Invoke-WebRequest -UseBasicParsing "https://github.com/violetweather/nivren/releases/latest/download/channel-$Channel.json" -OutFile $channelPath
+        Invoke-WebRequest -UseBasicParsing "https://violetweather.github.io/nivren-site/channel-$Channel.json" -OutFile $channelPath
         $minimumPath = Join-Path $InstallRoot "channel-$Channel-generation"
         $minimum = if (Test-Path $minimumPath -PathType Leaf) { (Get-Content -Raw $minimumPath).Trim() } else { "0" }
         if ($minimum -notmatch '^\d+$') { throw "Stored channel generation is invalid" }

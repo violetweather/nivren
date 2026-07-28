@@ -14,6 +14,8 @@ Release automation signs an unsigned manifest with `niv release sign-channel <ma
 
 Install receipts retain the highest trusted generation per channel. Switching channels is explicit; pinning a version disables automatic movement until the pin is removed. A signing-key incident freezes the affected channel, publishes a separately authorized recovery notice, rotates the channel key, and increments generation without reusing an earlier value.
 
-Release attestations can be verified with `gh attestation verify --repo OWNER/REPOSITORY <artifact>`. Verify `SHA256SUMS` as well and obtain registry root keys through a separate trusted channel.
+The coordinated website publishes signed pointers at `https://violetweather.github.io/nivren-site/channel-CHANNEL.json` only after the referenced immutable GitHub release and complete site verification pass. GitHub's `releases/latest` endpoint excludes prereleases and is deliberately not used for beta/nightly discovery.
+
+Release automation runs `python tools/verify_release_artifacts.py release-assets vVERSION` before attestation or publication. The verifier requires the exact six native archives, two Wasm modules, browser SDK, VSIX, and sorted checksum manifest; verifies every digest; rejects symlinks, traversal, duplicates, extras, unsafe sizes, and missing archive contents; validates SPDX SBOMs, Wasm magic, browser API, and VSIX integrity. Release attestations can then be verified with `gh attestation verify --repo OWNER/REPOSITORY <artifact>`. Obtain registry and channel public keys through a separate trusted channel.
 
 To inspect an archive before installation, list its members and confirm it contains a single `nivren-VERSION-PLATFORM` directory. Install the executable from that directory's `bin` folder somewhere on `PATH`; retain the accompanying notices and specifications when redistributing it.

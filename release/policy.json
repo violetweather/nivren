@@ -32,7 +32,8 @@
     "crates/nivren-ffi/include/nivren.h",
     "SECURITY.md",
     "CHANGELOG.md",
-    "tools/package_release.py"
+    "tools/package_release.py",
+    "tools/verify_release_artifacts.py"
   ],
   "tier_one_platforms": [
     "ubuntu-24.04",

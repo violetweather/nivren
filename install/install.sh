@@ -140,7 +140,7 @@ if [ -n "$CHANNEL" ]; then
   [ -n "$CHANNEL_KEY" ] || CHANNEL_KEY="$INSTALL_ROOT/channel-public-key"
   [ -f "$CHANNEL_KEY" ] || { echo "channel public key is missing; pass --channel-key from a separately trusted source" >&2; exit 65; }
   manifest="$temporary/$CHANNEL.json"
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$manifest" "https://github.com/violetweather/nivren/releases/latest/download/channel-$CHANNEL.json"
+  curl --fail --location --proto '=https' --tlsv1.2 --output "$manifest" "https://violetweather.github.io/nivren-site/channel-$CHANNEL.json"
   minimum=0
   [ ! -f "$INSTALL_ROOT/channel-$CHANNEL-generation" ] || minimum=$(cat "$INSTALL_ROOT/channel-$CHANNEL-generation")
   case "$minimum" in ""|*[!0-9]*) echo "stored channel generation is invalid" >&2; exit 65 ;; esac
