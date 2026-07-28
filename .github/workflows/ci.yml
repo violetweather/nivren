@@ -103,8 +103,7 @@ jobs:
           RUSTFLAGS: -Zsanitizer=address
           ASAN_OPTIONS: detect_leaks=1:symbolize=1
         run: |
-          symbolizer="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-symbolizer"
-          test -x "$symbolizer"
+          symbolizer="$(rustup which --toolchain nightly llvm-symbolizer)"
           ASAN_SYMBOLIZER_PATH="$symbolizer" cargo test --target x86_64-unknown-linux-gnu --test compiler_proof --locked
       - name: Valgrind native CLI execution
         run: |
