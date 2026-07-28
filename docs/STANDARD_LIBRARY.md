@@ -22,7 +22,7 @@ The normative draft is `spec/STANDARD-LIBRARY-3.md`. Fallible operations return 
 - `std.encoding.hex`/`unhex`, `base64`/`unbase64`, and `base64url`/`unbase64url` provide canonical lowercase hexadecimal, padded RFC 4648 base64, and unpadded URL-safe base64. Encoded text is capped at 16 MiB; source bytes are capped at 8 MiB for hex and 12 MiB for base64 so native allocations remain bounded. Decoders reject odd hex, invalid alphabets, noncanonical padding, and oversized output through typed errors.
 - `std.map.single`, `set`, `get`, `contains`, `remove`, `length`, `keys`, and `values`
 - `std.set.single`, `add`, `contains`, `remove`, `length`, and `values`
-- `std.list.transform`, `select`, `fold`, `any`, and `every`
+- `std.list.batch`, `transform`, `select`, `fold`, `any`, and `every`; `batch` returns bounded typed groups and composes as a labeled `through` stage
 - `std.iter.from`, lazy end-exclusive `range`, `next`, `take`, `skip`, `transform`, `select`, `chain`, and `collect` provide typed single-pass iterator values and adapters. `range(start,end,step)` keeps only cursor state, rejects a zero step, and caps its calculated length at one million. `transform` and `select` are truly lazy: construction invokes no callback, and each downstream request pulls only as far as needed through the shared cursor. Adapter nesting is capped at 1,024 stages. `fold`, `find`, `any`, `every`, and `count` are typed terminal algorithms; predicate terminals short-circuit while preserving the unvisited suffix. Callback capabilities remain transitive, `each` accepts iterators, and materializing operations are capped at one million values.
 - `std.bigint.parse`, `from_int`, `format`, and `to_int` support arbitrary-precision signed integers.
 - `std.decimal.parse`, `from_int`, `format`, and `to_int` support exact base-10 arithmetic.
@@ -109,7 +109,7 @@ Atomic operations are sequentially consistent across structured tasks. The porta
 
 - `std.log.info`, `warn`, and `error` emit leveled text and need `Log`.
 - `std.log.event(level, message, Map<String,String>)` emits deterministic JSON and needs `Log`.
-- `niv profile`, `niv coverage`, `niv debug`, and `niv inspect` observe the same project capability, instruction, memory, and call-depth policy as `niv run`. Profile and coverage accept `--json <output>` and emit the stable `org.nivren.observation.v1` schema. `niv inspect <program> <output.jsonl>` flushes versioned `org.nivren.inspect.v1` start, instruction, and completion events as execution happens; it includes operation, location, stack, variable names, metrics, and heap counts but omits source and variable values.
+- `niv explain [--no-optimize] <program>` emits deterministic `org.nivren.intent.v1` JSON for plans, capabilities, resources, cancellation, retries, timeouts, buffering, blocking, fusion, effect order, target choice, and portability. `niv profile`, `niv coverage`, `niv debug`, and `niv inspect` observe the same project capability, instruction, memory, and call-depth policy as `niv run`. Profile and coverage accept `--json <output>` and emit the stable `org.nivren.observation.v1` schema. `niv inspect <program> <output.jsonl>` flushes versioned `org.nivren.inspect.v1` start, instruction, and completion events as execution happens; it includes operation, location, stack, variable names, metrics, and heap counts but omits source and variable values.
 - `niv run --crash-report <output> <program>` writes `org.nivren.crash.v1` after a runtime failure. Reports include the basename, location, and call frames while deliberately omitting source, arguments, environment variables, and local values.
 
 ## Native hosts
@@ -135,7 +135,7 @@ Every operation needs `Native`. A manifest may grant all native access or restri
 - `std.reflect.kind(value)` returns the public runtime type name.
 - `std.reflect.fields(shapeValue)` returns a `Result<Map<String,String>,String>` of declared field names to runtime value kinds.
 - `std.reflect.schema(ShapeOrChoice)` returns deterministic declaration metadata. `$kind` is `shape` or `choice`, `$name` is the qualified name, shape entries map fields to canonical type schemas, and choice entries map variants to stable declaration ordinals.
-- `niv bindgen c` and compiler facade v2 consume the same checked public AST/schema contract. Generated output is ordinary inspectable source; it receives no access to lexical values, runtime memory, or compiler internals.
+- `niv bindgen c` and Rust compiler facade v3 consume the same checked public AST/schema contract. The C ABI remains independently versioned at v2. Generated output is ordinary inspectable source; it receives no access to lexical values, runtime memory, or compiler internals.
 
 ## Core globals
 

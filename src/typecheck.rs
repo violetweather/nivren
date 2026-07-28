@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ast::{Expr, Literal, Span, Stmt, TypeRef};
 use crate::error::NivError;
@@ -135,6 +135,32 @@ pub fn check(program: &[Stmt]) -> Result<(), Vec<NivError>> {
     } else {
         Err(checker.errors)
     }
+}
+
+/// Returns the checker-owned effect catalog used by intent inspection. This is
+/// derived from the same standard-library types that enforce `needs`, avoiding
+/// a second capability table that could drift from actual behavior.
+pub(crate) fn standard_effects() -> BTreeMap<String, Vec<String>> {
+    fn collect(path: &str, ty: &Type, effects: &mut BTreeMap<String, Vec<String>>) {
+        match ty {
+            Type::Function(_, _, _, _, required) if !required.is_empty() => {
+                effects.insert(path.to_string(), required.clone());
+            }
+            Type::Module(members) => {
+                let mut names = members.keys().collect::<Vec<_>>();
+                names.sort();
+                for name in names {
+                    collect(&format!("{path}.{name}"), &members[name], effects);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let checker = Checker::new();
+    let mut effects = BTreeMap::new();
+    collect("std", &checker.scopes[0]["std"].ty, &mut effects);
+    effects
 }
 
 struct Checker {
@@ -1648,6 +1674,15 @@ impl Checker {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Prepare {
+                name,
+                initializer,
+                span,
+                ..
+            } => {
+                let ty = self.expression(initializer);
+                self.declare(name, Binding { ty, mutable: false }, *span);
+            }
             Stmt::Let {
                 name,
                 mutable,
@@ -2795,6 +2830,10 @@ impl Checker {
                     Type::Unknown
                 }
             },
+            Expr::Perform(value, _) => self.expression(value),
+            Expr::Through(input, stage, span) => {
+                self.expression(&crate::ast::lower_through(input, stage, *span))
+            }
             Expr::Get(object, name, span) => match self.expression(object) {
                 Type::Record(record, arguments) => self
                     .records
@@ -3433,7 +3472,8 @@ impl Checker {
 
 fn declared_name(statement: &Stmt) -> Option<&str> {
     match statement {
-        Stmt::Let { name, .. }
+        Stmt::Prepare { name, .. }
+        | Stmt::Let { name, .. }
         | Stmt::Function { name, .. }
         | Stmt::Record { name, .. }
         | Stmt::Enum { name, .. }
@@ -4082,6 +4122,19 @@ fn list_functions() -> Vec<(&'static str, Type)> {
         )
     };
     vec![
+        (
+            "batch",
+            generic(
+                vec!["Element"],
+                vec![Type::Array(Box::new(element.clone())), Type::Int],
+                Type::Result(
+                    Box::new(Type::Array(Box::new(Type::Array(Box::new(
+                        element.clone(),
+                    ))))),
+                    Box::new(Type::String),
+                ),
+            ),
+        ),
         (
             "transform",
             generic(

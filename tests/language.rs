@@ -2487,7 +2487,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
     nivren::bytecode::verify(&chunk).unwrap();
     let first = nivren::bytecode::disassemble(&chunk);
     assert_eq!(first, nivren::bytecode::disassemble(&chunk));
-    assert!(first.starts_with("NIVB 6\n"));
+    assert!(first.starts_with("NIVB 7\n"));
 
     let mut incompatible = chunk;
     incompatible.version += 1;
@@ -2510,7 +2510,7 @@ fn source_maps_are_stable_nested_and_exportable() {
     assert_eq!(first, second);
     let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(parsed["schema"], "org.nivren.sourcemap.v1");
-    assert_eq!(parsed["bytecodeVersion"], 6);
+    assert_eq!(parsed["bytecodeVersion"], 7);
     assert!(
         parsed["mappings"]
             .as_array()

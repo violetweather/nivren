@@ -1,0 +1,10 @@
+define double
+takes {
+    value is Int
+}
+gives Int
+{
+    give value * 2
+}
+
+21 through double

@@ -22,7 +22,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 
 - The first lexer revision made `set` and `from` globally reserved and broke existing package APIs and a valid local binding. They were corrected to contextual uses before work continued.
 - Labeled calls initially discarded their names after parsing. Same-unit callable metadata and exact canonical-order validation were added before the proof corpus was accepted.
-- `prepare` and `perform` currently use the explicitly provisional Checkpoint 1 lowering described by the draft specification. They do not count as Intent Proof.
+- `prepare` and `perform` used provisional Checkpoint 1 lowering when Language Proof closed. Intent Proof subsequently replaced that lowering with preserved AST boundaries and Bytecode 7 `Prepare`, `Perform`, and fused `PerformCall` semantics without reopening or weakening the Language Proof gate.
 - The first structural formatter pass split `<=` and merged adjacent assignment statements. Operator joining and executable-vs-data block layout were corrected; all 29 Edition 3 examples and six Edition 4 proofs then passed after formatting.
 
 ### Final Language Proof gate
@@ -33,13 +33,43 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 - Bench evidence: VM 784.602 ms; tiered 560.310 ms; JIT speedup 1.400x; recursive tree 56.150 ms; recursive VM 36.950 ms; recursive speedup 1.520x; repeated record fields 585.130 ms.
 - Stop-and-correct triggers: none remain active. Language Proof is closed and later work may now begin at Intent Proof without weakening this gate.
 
-## Intent Proof — ready to begin
+## Intent Proof — passed 2026-07-28
 
-Language Proof passed. Intent Proof has not started.
+| Evidence | Status | Current result |
+| --- | --- | --- |
+| Typed intent graph | Passing | `prepare`, `perform`, and `through` survive parsing; `org.nivren.intent.v1` records typed operation, allocation, authority, resources, cancellation, retries, timeout policy, buffering, blocking, fusion, target, effect order, and portability decisions |
+| Pure zero-allocation lowering | Passing | Pure pipelines compile to the same ordinary operations as direct calls; property and operation-equivalence tests report zero pure runtime plan allocations |
+| Explicit plans and portability | Passing | Bytecode 7 records one immutable materialized plan per `prepare`; only self-contained literal data plans produce `org.nivren.portable-plan.v1` serialization, while variables, handles, callbacks, secrets, authority, and effects are rejected |
+| Visible effect boundary | Passing | Direct `perform` calls fuse into `PerformCall` without an extra dispatch; stored plans use `Perform`; graph validation rejects effect calls outside a visible boundary |
+| Authority and effect order | Passing | Native capability and scope authorization completes before an effect enters runtime metrics; denied effects leave no sequence entry; authorized file/environment effects retain source order |
+| Pipeline execution model | Passing | Verified pure fusion, bounded `std.list.batch`, structured parallel/race tasks, lazy streams, bounded channels, backpressure, and serial effect stages are exercised without plan allocation for pure work |
+| `niv explain` | Passing | File and project commands support optimized and `--no-optimize` graphs; output is deterministic, validates canonically, and matches a reviewed snapshot |
+| Files, HTTP, database, concurrency | Passing | Each domain appears with its real checker-owned capability/resource metadata; runtime integration tests cover bounded I/O, transactions, tasks, channels, slow-consumer backpressure, cancellation, cleanup, and injected failure |
+| Throughput and latency | Passing | Release gate ratios versus direct forms: files 0.864, loopback HTTP 0.856, database 0.973, concurrency 0.989; every result is below the 1.10 ceiling |
+| Memory | Passing | Conservative allocation-work ratio is 1.000 for all four performance domains; pure plans allocate zero runtime plan objects |
+| Optimization equivalence | Passing | Generated programs execute identically with optimized and non-optimized intent graphs; direct and pipeline pure bytecode operations are equivalent |
+| Fuzz/property safety | Passing | 512-case arbitrary-source schedules cannot panic graph construction; generated graphs validate; denied generated effects never execute or enter the effect sequence |
+| Baseline preservation | Passing | Complete workspace matrix passes with 22 library tests, 3 conformance suites, 7 intent integration tests, 154 language tests plus one intentionally ignored live-Redis test, 6 property tests, both benchmark programs, 2 FFI, 3 JIT, 1 native, and 1 Wasm test |
 
-## Compiler Proof — not started
+### Stop-and-correct record
 
-Blocked on Intent Proof.
+- The first runtime lowering emitted a separate `Perform` instruction after each call. Files, HTTP, and database passed, but bounded-channel concurrency regressed by 23.8%, activating the performance stop gate.
+- The compiler was corrected to emit one fused `PerformCall` instruction with identical call stack behavior and visible-boundary metrics. The rerun produced a 0.989 concurrency ratio. The 10% threshold was not relaxed.
+- Labeled pipeline stages were initially validated as complete calls before the pipeline inserted their first value. Parser suffix validation plus canonical first-label insertion corrected this without allowing incomplete ordinary calls.
+- A generated denied-effect property initially called its effectful wrapper outside `perform`. Graph validation stopped the matrix; the property was corrected and the full suite rerun.
+
+### Final Intent Proof gate
+
+- `cargo fmt --all --check`: passing.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passing.
+- `cargo test --workspace --all-targets --locked`: passing with only the explicitly ignored live-Redis release test.
+- `NIVREN_INTENT_BENCH_GATE=1 cargo bench --bench intent_proof --locked`: passing all four time and memory ratios.
+- Deterministic explain snapshot, optimized/non-optimized properties, unauthorized-effect properties, batching/parallel/backpressure tests, Bytecode 7 bundle verification, and existing cleanup/cancellation failure suites: passing.
+- Stop-and-correct triggers: none remain active. Intent Proof is closed and Compiler Proof may now begin without weakening this gate.
+
+## Compiler Proof — ready to begin
+
+Intent Proof passed. Compiler Proof has not started.
 
 ## Product Proof — not started
 

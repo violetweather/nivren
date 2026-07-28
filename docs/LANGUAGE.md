@@ -60,6 +60,17 @@ keep values: [Int] = [1, 2, 3, 4]
 
 List algorithms include `transform`, `select`, `fold`, `any`, and `every`. Callback types and callback capabilities are checked.
 
+Edition 4 preserves pipelines in the checked tree. Pure stages fuse to the same operations as direct calls and allocate no runtime plan; effectful stages retain source order. Labeled pipeline stages omit only the piped first value:
+
+```nivren
+define batches takes {} gives [[Int]] or String {
+    give [1, 2, 3, 4, 5]
+        through std.list.batch with { size set 2 }
+}
+```
+
+`batch` rejects zero or oversized batches and returns bounded arrays. Structured tasks supply parallel/race stages, while lazy iterators and bounded channels provide streaming and backpressure. `prepare` materializes an immutable typed plan, and `perform` is the visible external-effect boundary. `niv explain` reports allocation, capability/resource flow, ordering, cancellation, buffering, blocking, fusion, target choice, and portability.
+
 ## Decisions, loops, shapes, and choices
 
 ```nivren
@@ -181,7 +192,7 @@ niv ship
 
 Direct C libraries use `std.native.open`, `call_int`, `call_float`, and `close`. `NativeLibrary` is an opaque closable resource: symbols never escape a call, primitive call arity is capped at six, and `using` cleanup prevents use after unload. These calls require `needs Native` because loading or invoking foreign code trusts its initializers and declared C signatures. Project policy may restrict opening to an approved path.
 
-`std.reflect.schema(User)` inspects a shape or choice declaration through deterministic string metadata rather than runtime object layout. It is safe, fallible, and side-effect free. Compiler facade v2 and `niv bindgen c` use checked public declarations and emit ordinary inspectable source; Nivren has no hidden unhygienic text-substitution macro phase.
+`std.reflect.schema(User)` inspects a shape or choice declaration through deterministic string metadata rather than runtime object layout. It is safe, fallible, and side-effect free. Compiler facade v3 and `niv bindgen c` use checked public declarations and emit ordinary inspectable source; Nivren has no hidden unhygienic text-substitution macro phase.
 
 `Iterator<T>` is a typed single-pass value. Build one from a snapshot with `std.iter.from` or from a lazy end-exclusive numeric source with `std.iter.range(start, end, step)`; adapt it with `transform`, `select`, `skip`, `take`, or `chain`; then consume it with `next`, `collect`, `count`, `fold`, `find`, `any`, `every`, or `each value within iterator`. Range stores only cursor state, while query terminals short-circuit and leave the unvisited suffix available. Consumption is explicit: adapters drain their input, iterators cannot cross task/channel boundaries, and work is bounded to one million values per call.
 

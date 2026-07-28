@@ -49,6 +49,21 @@ The public harness now leads with representative short-lived workflows instead o
 
 The checker row is explicitly unlike work: Nivren performs semantic, type, and capability checks while `node --check` checks JavaScript syntax. In the typed JSON pair, both implementations read, validate, canonicalize, and print the same document; Nivren additionally enforces the declared shape and `FileRead` grant. The compute-heavy rows remain in the report as current limits.
 
+## Edition 4 Intent Proof gate
+
+`NIVREN_INTENT_BENCH_GATE=1 cargo bench --bench intent_proof` compares direct and optimized intent-oriented forms over seven measured runs after warmup. It fails when latency/throughput or conservative runtime allocation work regresses by more than 10% for files, loopback HTTP, managed database transactions, or bounded channels. The benchmark validates identical results and uses the same runtime implementation on both sides; `perform` calls use Bytecode 7's fused `PerformCall` so inspection does not add a second dispatch.
+
+The passing Apple M4 gate on July 28, 2026 was:
+
+| Workload | Direct | Optimized intent | Time ratio | Allocation-work ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Files | 1.403 ms | 1.212 ms | 0.864 | 1.000 |
+| Loopback HTTP | 0.894 ms | 0.765 ms | 0.856 | 1.000 |
+| Managed database transactions | 0.772 ms | 0.751 ms | 0.973 | 1.000 |
+| Bounded channel concurrency | 0.222 ms | 0.220 ms | 0.989 | 1.000 |
+
+An earlier gate correctly stopped when separate `Perform` instructions made the channel workload 23.8% slower. Fusing the visible boundary with the call corrected the design; the 10% requirement was not weakened. Absolute times vary by machine, so the enforced values are paired ratios.
+
 ## Managed environments
 
 Closure environments use two generations. Frequent minor collections reclaim unreachable young scopes and promote survivors after two marks. Every eighth collection starts old-generation marking on a background worker while the bytecode mutator continues. Before sweeping, the runtime performs a final root remark and unions it with the concurrent snapshot, so values made reachable during marking cannot be reclaimed. `HeapStats` exposes minor/major counts and an in-progress concurrent-mark flag; GC stress tests exercise escaping closures and cyclic environments.

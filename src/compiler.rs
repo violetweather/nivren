@@ -8,7 +8,7 @@ use crate::error::NivError;
 use crate::runtime::{Interpreter, Value};
 
 /// Version of the compiler facade contract.
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -61,6 +61,26 @@ impl Compiler {
             format_version,
             bytes,
         })
+    }
+
+    /// Explains Edition 4 intent, authority, resource, allocation, fusion, and
+    /// execution-target decisions as deterministic versioned JSON.
+    pub fn explain(&self, source: &str, optimized: bool) -> Result<String, Vec<Diagnostic>> {
+        let program = parse_checked(source)?;
+        let optimization = if optimized {
+            crate::intent::Optimization::Enabled
+        } else {
+            crate::intent::Optimization::Disabled
+        };
+        let graph = crate::intent::analyze(&program, optimization);
+        graph.validate().map_err(|message| {
+            vec![Diagnostic {
+                message,
+                line: 1,
+                column: 1,
+            }]
+        })?;
+        Ok(graph.to_json())
     }
 
     #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]
@@ -127,7 +147,7 @@ mod tests {
     #[test]
     fn facade_checks_formats_compiles_runs_and_documents() {
         let compiler = Compiler::new();
-        assert_eq!(API_VERSION, 2);
+        assert_eq!(API_VERSION, 3);
         assert!(compiler.check("keep answer: Int = 42\nanswer").is_ok());
         assert_eq!(compiler.format("keep answer=42"), "keep answer = 42\n");
         let artifact = compiler.compile("40 + 2").unwrap();
@@ -146,5 +166,8 @@ mod tests {
         let bindings = compiler.c_bindings("shape Answer { value: Int }").unwrap();
         assert!(bindings.contains("struct Nivren_Answer"));
         assert!(compiler.check("keep answer: Int = true").is_err());
+        let explained = compiler.explain("40 + 2", true).unwrap();
+        assert!(explained.contains("org.nivren.intent.v1"));
+        assert_eq!(explained, compiler.explain("40 + 2", true).unwrap());
     }
 }

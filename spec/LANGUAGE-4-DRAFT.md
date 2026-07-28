@@ -1,8 +1,8 @@
-# Nivren Language Specification, Edition 4 (language-proof draft)
+# Nivren Language Specification, Edition 4 (intent-proof draft)
 
 ## 1. Status
 
-This executable draft defines the Checkpoint 1 source surface for Edition 4. It is not a release specification. The Edition 4 conformance corpus and the six programs under `proofs/edition4` are normative for the language-proof checkpoint. Intent-graph optimization and external-effect plan semantics remain gated by Checkpoint 2 and MUST NOT be claimed by a Checkpoint 1 build.
+This executable draft defines the passed Language Proof and Intent Proof source semantics for Edition 4. It is not a release specification. The Edition 4 conformance corpus, six application proofs, intent snapshot, and checkpoint ledger are normative evidence. Complete native compilation remains gated by Checkpoint 3.
 
 ## 2. Identity invariants
 
@@ -44,21 +44,27 @@ unary          = "perform", unary | edition-three-unary ;
 
 The built-in derive names are `Json`, `Compare`, `Display`, `Key`, `Validate`, `Binary`, `DatabaseRow`, and `Arguments`. Derive metadata is part of the checked declaration and gates the corresponding generated operation. `Key` also requires `Compare`. Data derives reject functions, secrets, iterators, resources, handles, tasks, and channels. `DatabaseRow` accepts scalar or nullable-scalar columns (including nominal scalar wrappers), while `Arguments` accepts command-line scalar or nullable-scalar fields. Diagnostics name the derive, field, and unsupported type. A declaration with an explicit derive list cannot use an omitted generated operation. Unadorned Edition 3 shapes retain their structural compatibility behavior while the Edition 4 proof is developed.
 
-Derives generate labeled shape methods: `to_json`/`from_json`, `compare`, `display`, `key`, `validate`, `to_binary`/`from_binary`, `from_row`, and `from_arguments`, respectively. JSON and binary methods return typed failures; the binary Language Proof representation is the deterministic UTF-8 JSON representation and remains versionable. `from_row` consumes a strict JSON row object. `from_arguments` accepts `--name=value` entries, rejects duplicates and unexpected or missing fields, and recognizes nullable fields plus checked string, boolean, and numeric values. Generated methods preserve identical metadata and behavior in the tree interpreter and Bytecode 6 VM.
+Derives generate labeled shape methods: `to_json`/`from_json`, `compare`, `display`, `key`, `validate`, `to_binary`/`from_binary`, `from_row`, and `from_arguments`, respectively. JSON and binary methods return typed failures; the binary Language Proof representation is the deterministic UTF-8 JSON representation and remains versionable. `from_row` consumes a strict JSON row object. `from_arguments` accepts `--name=value` entries, rejects duplicates and unexpected or missing fields, and recognizes nullable fields plus checked string, boolean, and numeric values. Generated methods preserve identical metadata and behavior in the tree interpreter and Bytecode 7 VM.
 
 Labeled-call names are preserved in the checked syntax tree. Local functions and shapes use their declared parameters or fields; imported module exports retain that metadata and are checked at the call site. Official callables use the same canonical metadata catalog. A labeled call with missing metadata is rejected rather than silently reverting to positional behavior.
 
 The canonical formatter removes layout-only blank lines, emits four-space block indentation, places structural braces deterministically, keeps executable statements on separate lines, and compacts fields or labeled values within their data boundary before applying the structural layout. Function `takes`, `gives`, and `needs` clauses receive deterministic clause breaks. Strings and nested block or line comments are never interpreted as structure. Formatting is idempotent, preserves comments, and maps compact and vertical spellings of the same checked token sequence to one representation.
 
-Scoped `needs` declarations preserve both the capability and boundary. Capabilities are drawn from the fixed capability vocabulary. Boundaries must be non-empty, bounded, and free of control characters; `Network` boundaries name hosts rather than URLs. This is static Language Proof validation only. Authorization and enforcement belong to the Intent Proof checkpoint.
+Scoped `needs` declarations preserve both the capability and boundary. Capabilities are drawn from the fixed capability vocabulary. Boundaries must be non-empty, bounded, and free of control characters; `Network` boundaries name hosts rather than URLs. The runtime enforces these grants before an effect enters the authorized effect sequence, and `niv explain` reports the capability and resource flow.
 
 `gives Value or Problem` denotes the same checked result type represented internally as `Result<Value, Problem>`. `maybe Value` denotes the standard optional type. Edition 4 source MUST NOT require `T?` or `Result<T, E>` spellings.
 
-## 4. Checkpoint 1 lowering
+## 4. Intent semantics
 
-The language-proof compiler lowers the new surface into the existing checked AST, tree interpreter, and bytecode VM. A nominal `type Name from Representation` is provisionally represented by a one-value nominal shape. Labeled calls preserve declaration order and lower to existing calls after label validation.
+The compiler preserves `prepare`, `perform`, and `through` in the checked tree. A nominal `type Name from Representation` is represented by a one-value nominal shape. Labeled calls preserve declaration order; a labeled pipeline stage receives the pipeline value as its canonical first label.
 
-`prepare name as Shape with { ... }` provisionally constructs an immutable typed plan-shaped value. `perform value` marks the source boundary and evaluates to that value during Checkpoint 1. This provisional lowering exists only to execute grammar proof programs. It does not satisfy the zero-allocation intent graph, inspection, authorization, or effect-ordering requirements of Checkpoint 2.
+`prepare name as Shape with { ... }` materializes one immutable, typed, record-backed plan. The Bytecode 7 `Prepare` marker makes this allocation visible to runtime metrics. A prepared plan is portable only when inspection proves it contains data rather than a handle, secret, callback, local authority, or effect. Tooling MUST refuse to describe any other plan as serializable.
+
+`perform expression` is the visible external-effect boundary. Direct calls lower to one fused `PerformCall` instruction, preserving the boundary without a second VM dispatch; performing a stored plan uses `Perform`. Capability and scope authorization occurs before the runtime records or executes the effect. Denied effects therefore cannot enter the effect sequence.
+
+`through` preserves source-to-sink order. Pure stages lower to the same optimized operations as their direct-call form and allocate zero runtime plans. Verified pure stages may be fused. Effectful stages remain serial, preserve typed failures, cancellation, cleanup and tracing, and may not be reordered. `std.list.batch` supplies bounded batching, structured task operations supply parallel/race stages, iterators and bounded channels provide streaming and backpressure.
+
+`niv explain` emits deterministic `org.nivren.intent.v1` JSON. It reports allocation, capabilities, resources, cancellation, retries, timeout policy, buffering, blocking, target choice, fusion, source effect order, and portability. The graph rejects non-canonical metadata, reordered effects, pure-plan allocation, and effects outside `perform`.
 
 ## 5. Compatibility
 

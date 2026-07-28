@@ -9,6 +9,7 @@ pub mod documentation;
 pub mod error;
 pub mod fixed;
 pub mod formatter;
+pub mod intent;
 pub mod json;
 pub mod lexer;
 #[cfg(feature = "host-runtime")]

@@ -117,6 +117,10 @@ fn main() -> ExitCode {
         [command] if command == "doc" => document_project("."),
         [command, path] if command == "doc" => document_project(path),
         [command, path] if command == "disasm" => disassemble_path(path),
+        [command, path] if command == "explain" => explain_path(path, true),
+        [command, flag, path] if command == "explain" && flag == "--no-optimize" => {
+            explain_path(path, false)
+        }
         [command, path, output] if command == "sourcemap" => source_map_path(path, output),
         [command, path] if command == "debug" => debug_path(path),
         [command, path, output] if command == "inspect" => inspect_path(path, output),
@@ -1448,6 +1452,59 @@ fn inspect_path(path: &str, output: &str) -> ExitCode {
     }
 }
 
+fn explain_path(path: &str, optimized: bool) -> ExitCode {
+    let output = if is_project_path(Path::new(path)) {
+        let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                report(path, "", &[error]);
+                return ExitCode::from(65);
+            }
+        };
+        let program = match nivren::modules::load_project(&manifest.root, &manifest.entry_path()) {
+            Ok(program) => program,
+            Err(errors) => {
+                report(path, "", &errors);
+                return ExitCode::from(65);
+            }
+        };
+        if let Err(errors) = nivren::typecheck::check(&program) {
+            report(path, "", &errors);
+            return ExitCode::from(65);
+        }
+        let optimization = if optimized {
+            nivren::intent::Optimization::Enabled
+        } else {
+            nivren::intent::Optimization::Disabled
+        };
+        let graph = nivren::intent::analyze(&program, optimization);
+        if let Err(message) = graph.validate() {
+            report(path, "", &[NivError::new(message, 1, 1)]);
+            return ExitCode::from(70);
+        }
+        graph.to_json()
+    } else {
+        let source = match read_source(path) {
+            Ok(source) => source,
+            Err(code) => return code,
+        };
+        match nivren::compiler::Compiler::new().explain(&source, optimized) {
+            Ok(output) => output,
+            Err(errors) => {
+                for error in errors {
+                    eprintln!(
+                        "{path}:{}:{}: error: {}",
+                        error.line, error.column, error.message
+                    );
+                }
+                return ExitCode::from(65);
+            }
+        }
+    };
+    print!("{output}");
+    ExitCode::SUCCESS
+}
+
 fn executable_lines(chunk: &nivren::bytecode::Chunk, lines: &mut BTreeSet<usize>) {
     for instruction in &chunk.code {
         lines.insert(instruction.span.line);
@@ -1954,7 +2011,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");

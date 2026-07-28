@@ -918,6 +918,10 @@ pub struct HeapStats {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecutionMetrics {
     pub instructions: u64,
+    pub allocation_work_bytes: u64,
+    pub plan_allocations: u64,
+    pub perform_boundaries: u64,
+    pub effect_sequence: Vec<String>,
     pub line_hits: BTreeMap<usize, u64>,
     pub operation_hits: BTreeMap<String, u64>,
 }
@@ -1230,6 +1234,30 @@ impl Interpreter {
     fn execute(&mut self, statement: &Stmt) -> Result<Flow, NivError> {
         self.charge(statement_span(statement))?;
         match statement {
+            Stmt::Prepare {
+                name, initializer, ..
+            } => {
+                let value = self.evaluate(initializer)?;
+                if let Value::EarlyReturn(value) = value {
+                    return Ok(Flow::Return(value.as_ref().clone()));
+                }
+                let mut scope = self.environment.lock().unwrap();
+                if scope.values.contains_key(name) {
+                    return Err(NivError::new(
+                        format!("'{name}' is already declared in this scope"),
+                        initializer.span().line,
+                        initializer.span().column,
+                    ));
+                }
+                scope.values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                Ok(Flow::Continue(value))
+            }
             Stmt::Let {
                 name,
                 mutable,
@@ -1697,6 +1725,10 @@ impl Interpreter {
                     span.column,
                 )),
             },
+            Expr::Perform(value, _) => self.evaluate(value),
+            Expr::Through(input, stage, span) => {
+                self.evaluate(&crate::ast::lower_through(input, stage, *span))
+            }
             Expr::Get(object, name, span) => match evaluate_part!(self, object) {
                 Value::Record(record) => record
                     .field_indices
@@ -1948,6 +1980,13 @@ impl Interpreter {
                         ));
                     }
                     self.authorize_scope(capability, &arguments, span)?;
+                    if let Some(metrics) = &self.metrics {
+                        metrics
+                            .lock()
+                            .unwrap()
+                            .effect_sequence
+                            .push(format!("{capability}:{}", function.name));
+                    }
                 }
                 match function.name {
                     "spawn" => self.task_spawn(arguments, span),
@@ -1960,6 +1999,7 @@ impl Interpreter {
                     "send" => self.channel_send(arguments, span),
                     "receive" => self.channel_receive(arguments, span),
                     "transform" => self.list_transform(arguments, span),
+                    "batch" => self.list_batch(arguments, span),
                     "select" => self.list_select(arguments, span),
                     "fold" => self.list_fold(arguments, span),
                     "any" => self.list_any(arguments, span),
@@ -2757,6 +2797,23 @@ impl Interpreter {
         Ok(Value::Array(Arc::new(output)))
     }
 
+    fn list_batch(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+        let values = expect_array(&arguments[0], "std.list.batch", span)?;
+        let size = match arguments[1] {
+            Value::Int(value) if (1..=1_048_576).contains(&value) => value as usize,
+            _ => {
+                return Ok(result_error(
+                    "std.list.batch size must be an Int from 1 through 1048576",
+                ));
+            }
+        };
+        let batches = values
+            .chunks(size)
+            .map(|batch| Value::Array(Arc::new(batch.to_vec())))
+            .collect();
+        Ok(Value::Ok(Arc::new(Value::Array(Arc::new(batches)))))
+    }
+
     fn list_select(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let values = expect_array(&arguments[0], "std.list.select", span)?;
         let callback = arguments[1].clone();
@@ -3192,6 +3249,25 @@ impl Interpreter {
                     let callee = stack.pop().unwrap();
                     stack.push(self.call(callee, arguments, item.span)?);
                 }
+                Op::PerformCall(arity) => {
+                    if let Some(metrics) = &self.metrics {
+                        let mut metrics = metrics.lock().unwrap();
+                        metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
+                    }
+                    let argument_start = stack.len() - arity;
+                    let callee_index = argument_start - 1;
+                    if let Value::Function(function) = &stack[callee_index] {
+                        let value =
+                            self.call_function(function, &stack[argument_start..], item.span)?;
+                        stack.truncate(callee_index);
+                        stack.push(value);
+                        instruction += 1;
+                        continue;
+                    }
+                    let arguments = stack.split_off(stack.len() - arity);
+                    let callee = stack.pop().unwrap();
+                    stack.push(self.call(callee, arguments, item.span)?);
+                }
                 Op::MakeArray(length) => {
                     let values = stack.split_off(stack.len() - length);
                     stack.push(Value::Array(Arc::new(values)));
@@ -3349,6 +3425,18 @@ impl Interpreter {
                         Value::Bool(true)
                     });
                 }
+                Op::Prepare(_) => {
+                    if let Some(metrics) = &self.metrics {
+                        let mut metrics = metrics.lock().unwrap();
+                        metrics.plan_allocations = metrics.plan_allocations.saturating_add(1);
+                    }
+                }
+                Op::Perform => {
+                    if let Some(metrics) = &self.metrics {
+                        let mut metrics = metrics.lock().unwrap();
+                        metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
+                    }
+                }
                 Op::Match(arms) => {
                     let subject = stack.pop().unwrap();
                     match self.execute_bytecode_match(subject, arms, item.span)? {
@@ -3384,6 +3472,7 @@ impl Interpreter {
                 Op::Constant(_)
                     | Op::Binary(_)
                     | Op::Call(_)
+                    | Op::PerformCall(_)
                     | Op::MakeArray(_)
                     | Op::Index
                     | Op::Get(_)
@@ -3629,10 +3718,14 @@ impl Interpreter {
     }
 
     fn charge_memory(&self, value: &Value, span: Span) -> Result<(), NivError> {
+        let bytes = estimated_value_bytes(value).max(1);
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.allocation_work_bytes = metrics.allocation_work_bytes.saturating_add(bytes);
+        }
         let Some(budget) = &self.memory_budget else {
             return Ok(());
         };
-        let bytes = estimated_value_bytes(value).max(1);
         budget
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(bytes)
@@ -4035,6 +4128,7 @@ fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotP
             | Op::Jump(_)
             | Op::JumpIfFalse(_)
             | Op::Call(_)
+            | Op::PerformCall(_)
             | Op::MakeArray(_)
             | Op::Index
             | Op::Coalesce(_)
@@ -4042,6 +4136,7 @@ fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotP
             | Op::Get(_)
             | Op::Print
             | Op::Return => None,
+            Op::Prepare(_) | Op::Perform => None,
             Op::Load(name) | Op::Store(name) => scopes
                 .iter()
                 .rev()
@@ -4166,6 +4261,7 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Jump(_) => "jump",
         Op::JumpIfFalse(_) => "jump_if_false",
         Op::Call(_) => "call",
+        Op::PerformCall(_) => "perform_call",
         Op::MakeArray(_) => "make_array",
         Op::Index => "index",
         Op::Coalesce(_) => "coalesce",
@@ -4180,6 +4276,8 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::DefineEnum { .. } => "define_enum",
         Op::DefineProtocol { .. } => "define_protocol",
         Op::AdoptProtocol { .. } => "adopt_protocol",
+        Op::Prepare(_) => "prepare",
+        Op::Perform => "perform",
         Op::Match(_) => "choose",
         Op::DefineModule { .. } => "define_module",
         Op::Iterate { .. } => "iterate",
@@ -4814,6 +4912,7 @@ fn standard_library() -> Value {
         (
             "list".into(),
             native_module(&[
+                ("batch", 2, native_intrinsic, None),
                 ("transform", 2, native_intrinsic, None),
                 ("select", 2, native_intrinsic, None),
                 ("fold", 3, native_intrinsic, None),
@@ -11305,7 +11404,8 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
 
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
-        Stmt::Let { span, .. }
+        Stmt::Prepare { span, .. }
+        | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }

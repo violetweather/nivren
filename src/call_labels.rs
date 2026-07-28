@@ -101,7 +101,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.list",
-        "transform:values,transform;select:values,predicate;fold:values,initial,combine;any:values,predicate;every:values,predicate",
+        "batch:values,size;transform:values,transform;select:values,predicate;fold:values,initial,combine;any:values,predicate;every:values,predicate",
     );
     add(
         &mut labels,

@@ -10,7 +10,7 @@ takes {
 gives String or String
 needs Network within "api.example.test"
 {
-    give std.web.get with {
+    give perform std.web.get with {
         url set plan.url
         timeout set plan.timeout
     }
@@ -21,6 +21,6 @@ prepare request as FetchPlan with {
     timeout set 5.0
 }
 
-fetch with {
+perform fetch with {
     plan set perform request
 }

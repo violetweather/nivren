@@ -96,6 +96,13 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>, Span),
     Coalesce(Box<Expr>, Box<Expr>, Span),
     Propagate(Box<Expr>, Span),
+    /// An explicit external-effect boundary. The wrapped expression is kept in
+    /// the tree so intent analysis can prove ordering and authority before the
+    /// bytecode compiler lowers it without allocating a runtime plan.
+    Perform(Box<Expr>, Span),
+    /// A source pipeline. Keeping the stage separate lets intent analysis fuse
+    /// pure stages while effectful stages retain source order.
+    Through(Box<Expr>, Box<Expr>, Span),
     Get(Box<Expr>, String, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
 }
@@ -113,14 +120,60 @@ impl Expr {
             | Self::Array(_, span)
             | Self::Index(_, _, span)
             | Self::Coalesce(_, _, span)
-            | Self::Propagate(_, span) => *span,
+            | Self::Propagate(_, span)
+            | Self::Perform(_, span)
+            | Self::Through(_, _, span) => *span,
             Self::Get(_, _, span) | Self::Match(_, _, span) => *span,
         }
     }
 }
 
+/// Produces the ordinary call represented by a `through` expression. Keeping
+/// this lowering in one place guarantees the checker, tree interpreter, and
+/// bytecode compiler observe identical argument ordering.
+#[must_use]
+pub fn lower_through(input: &Expr, stage: &Expr, span: Span) -> Expr {
+    match stage {
+        Expr::Call(callee, arguments, labels, _) => {
+            let mut arguments = arguments.clone();
+            arguments.insert(0, input.clone());
+            let labels = labels.clone().map(|mut labels| {
+                if let Some(path) = expression_path(callee)
+                    && let Some(expected) = crate::call_labels::get(&path)
+                    && expected.len() == labels.len() + 1
+                {
+                    labels.insert(0, expected[0].clone());
+                }
+                labels
+            });
+            Expr::Call(callee.clone(), arguments, labels, span)
+        }
+        Expr::Variable(_, _) | Expr::Get(_, _, _) => {
+            Expr::Call(Box::new(stage.clone()), vec![input.clone()], None, span)
+        }
+        _ => unreachable!("the parser only constructs callable through stages"),
+    }
+}
+
+fn expression_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Variable(name, _) => Some(name.clone()),
+        Expr::Get(parent, name, _) => Some(format!("{}.{}", expression_path(parent)?, name)),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stmt {
+    /// An immutable, explicitly stored plan. `initializer` remains the typed
+    /// value representation used by Edition 3's runtime; the intent layer owns
+    /// the plan metadata and serialization decision.
+    Prepare {
+        name: String,
+        plan_type: String,
+        initializer: Expr,
+        span: Span,
+    },
     Let {
         name: String,
         mutable: bool,

@@ -181,6 +181,15 @@ impl Writer {
                     self.string(implementation)?;
                 }
             }
+            Op::Prepare(plan_type) => {
+                self.u8(28);
+                self.string(plan_type)?;
+            }
+            Op::Perform => self.u8(29),
+            Op::PerformCall(arity) => {
+                self.u8(30);
+                self.len(*arity)?;
+            }
         }
         Ok(())
     }
@@ -378,6 +387,9 @@ impl Reader<'_> {
                     mappings
                 },
             },
+            28 => Op::Prepare(self.string()?),
+            29 => Op::Perform,
+            30 => Op::PerformCall(self.count()?),
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };
         Ok(Instruction { op, span })

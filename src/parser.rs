@@ -761,10 +761,9 @@ impl Parser {
         let (labels, arguments) = self.intent_arguments()?;
         self.validate_labels(&plan_type, &labels, span)?;
         self.optional_semicolon();
-        Ok(Stmt::Let {
+        Ok(Stmt::Prepare {
             name,
-            mutable: false,
-            annotation: None,
+            plan_type: plan_type.clone(),
             initializer: Expr::Call(
                 Box::new(Expr::Variable(plan_type, span)),
                 arguments,
@@ -810,7 +809,7 @@ impl Parser {
         let Some(expected) = expected else {
             return Ok(());
         };
-        if labels == expected {
+        if labels == expected || (expected.len() == labels.len() + 1 && labels == &expected[1..]) {
             return Ok(());
         }
         Err(NivError::new(
@@ -989,22 +988,17 @@ impl Parser {
         while self.matches(&[TokenKind::Through]) {
             let span = self.previous_span();
             let stage = self.call()?;
-            expression = match stage {
-                Expr::Call(callee, mut arguments, labels, _) => {
-                    arguments.insert(0, expression);
-                    Expr::Call(callee, arguments, labels, span)
-                }
-                Expr::Variable(_, _) | Expr::Get(_, _, _) => {
-                    Expr::Call(Box::new(stage), vec![expression], None, span)
-                }
-                _ => {
-                    return Err(NivError::new(
-                        "through expects a function or function call",
-                        span.line,
-                        span.column,
-                    ));
-                }
-            };
+            if !matches!(
+                stage,
+                Expr::Call(_, _, _, _) | Expr::Variable(_, _) | Expr::Get(_, _, _)
+            ) {
+                return Err(NivError::new(
+                    "through expects a function or function call",
+                    span.line,
+                    span.column,
+                ));
+            }
+            expression = Expr::Through(Box::new(expression), Box::new(stage), span);
         }
         Ok(expression)
     }
@@ -1089,7 +1083,8 @@ impl Parser {
 
     fn unary_inner(&mut self) -> Result<Expr, NivError> {
         if self.matches(&[TokenKind::Perform]) {
-            return self.unary();
+            let span = self.previous_span();
+            return Ok(Expr::Perform(Box::new(self.unary()?), span));
         }
         for (kind, operation) in [
             (TokenKind::Start, "spawn"),

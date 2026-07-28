@@ -10,7 +10,7 @@ takes {
 gives Null or String
 needs FileRead
 {
-    keep contents set std.files.read with {
+    keep contents set perform std.files.read with {
         path set plan.source
     } or give
     give ok(none)
@@ -21,6 +21,6 @@ prepare copy as CopyPlan with {
     destination set "build/app.json"
 }
 
-copy_configuration with {
+perform copy_configuration with {
     plan set perform copy
 }

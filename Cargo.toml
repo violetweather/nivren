@@ -53,6 +53,11 @@ name = "performance"
 path = "benches/performance.rs"
 harness = false
 
+[[bench]]
+name = "intent_proof"
+path = "benches/intent_proof.rs"
+harness = false
+
 [profile.release]
 lto = true
 strip = true
