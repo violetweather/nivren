@@ -1,12 +1,15 @@
 use "../src/main.niv"
 
-define works() gives Result<Bool, String> {
-    keep base = main.canvas(320, 200) or give
-    keep background = main.rect(base, 0, 0, 320, 200, "#101828") or give
-    keep labelled = main.text(background, 16, 32, "Nivren <safe>", "white") or give
-    keep output = main.render(labelled) or give
-    assert(output == "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\"><rect x=\"0\" y=\"0\" width=\"320\" height=\"200\" fill=\"#101828\"/><text x=\"16\" y=\"32\" fill=\"white\">Nivren &lt;safe&gt;</text></svg>", "deterministic escaped SVG")
+define works
+takes { }
+gives Bool or String
+{
+    keep base set main.canvas with { width set 320 height set 200 } or give
+    keep background set main.rect with { value set base x set 0 y set 0 width set 320 height set 200 fill set "#101828" } or give
+    keep labelled set main.text with { value set background x set 16 y set 32 content set "Nivren <safe>" fill set "white" } or give
+    keep output set main.render with { value set labelled } or give
+    assert with { condition set output == "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox=\"0 0 320 200\"><rect x=\"0\" y=\"0\" width=\"320\" height=\"200\" fill=\"#101828\"/><text x=\"16\" y=\"32\" fill=\"white\">Nivren &lt;safe&gt;</text></svg>" message set "deterministic escaped SVG" }
     give ok(yes)
 }
 
-works()
+works with { }

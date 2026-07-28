@@ -5390,6 +5390,44 @@ fn official_packages_test_document_publish_install_and_run_together() {
     ];
     for name in package_names {
         let root = repository.join("packages").join(name);
+        let mut edition_sources = vec![root.join("src/main.niv")];
+        let tests_root = root.join("tests");
+        if tests_root.exists() {
+            edition_sources.extend(
+                fs::read_dir(&tests_root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "niv")),
+            );
+        }
+        for source_path in edition_sources {
+            let source = fs::read_to_string(&source_path).unwrap();
+            for (line_number, line) in source.lines().enumerate() {
+                let line = line.trim_start();
+                assert!(
+                    !(line.starts_with("define ") && line.contains('(')),
+                    "official package {name} uses an Edition 3 definition at {}:{}",
+                    source_path.display(),
+                    line_number + 1
+                );
+                assert!(
+                    !((line.starts_with("shape ") || line.starts_with("choice "))
+                        && line.contains('{')
+                        && !line.contains(" holds")),
+                    "official package {name} uses an Edition 3 declaration at {}:{}",
+                    source_path.display(),
+                    line_number + 1
+                );
+                assert!(
+                    !((line.starts_with("keep ") || line.starts_with("change "))
+                        && line.contains(" = ")
+                        && !line.contains(" set ")),
+                    "official package {name} uses Edition 3 binding syntax at {}:{}",
+                    source_path.display(),
+                    line_number + 1
+                );
+            }
+        }
         let tested = Command::new(env!("CARGO_BIN_EXE_niv"))
             .args(["test", root.to_str().unwrap()])
             .output()

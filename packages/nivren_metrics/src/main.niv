@@ -1,60 +1,64 @@
-shape Sample { name: String, help: String, kind: String, value: Float, labels: Map<String, String> }
+shape Sample holds { name is String help is String kind is String value is Float labels is Map<String, String> }
 
-define join(left: String, right: String) gives Result<String, String> { give std.text.concat(left, right) }
+define join
+takes { left is String right is String }
+gives String or String
+{ give std.text.concat with { left set left right set right } }
 
-define escape(value: String, help: Bool) gives Result<String, String> {
+define escape
+takes { value is String help is Bool }
+gives String or String
+{
     when len(value) > 65536 { give err("metric text exceeds 64 KiB") }
-    change output = ""
+    change output set ""
     each character within value {
-        change escaped = character
-        when character == "\\" { escaped = "\\\\" }
-        when character == "\n" { escaped = "\\n" }
-        when character == "\"" and !help { escaped = "\\\"" }
-        output = join(output, escaped) or give
+        change escaped set character
+        when character == "\\" { change escaped to "\\\\" }
+        when character == "\n" { change escaped to "\\n" }
+        when character == "\"" and !help { change escaped to "\\\"" }
+        change output to join with { left set output right set escaped } or give
     }
     give ok(output)
 }
 
-define sample(name: String, help: String, kind: String, value: Float, labels: Map<String, String>) gives Result<Sample, String> {
+define sample
+takes { name is String help is String kind is String value is Float labels is Map<String, String> }
+gives Sample or String
+{
     when name == "" or len(name) > 1024 { give err("metric name must contain 1 through 1024 characters") }
     when kind != "counter" and kind != "gauge" { give err("metric kind must be counter or gauge") }
-    when std.map.length(labels) > 128 { give err("metric sample exceeds 128 labels") }
+    when std.map.length with { map set labels } > 128 { give err("metric sample exceeds 128 labels") }
     give ok(Sample(name, help, kind, value, labels))
 }
 
-define encode(samples: [Sample]) gives Result<String, String> {
+define encode
+takes { samples is [Sample] }
+gives String or String
+{
     when len(samples) > 100000 { give err("metric export exceeds 100000 samples") }
-    change output = ""
+    change output set ""
     each item within samples {
-        keep safe_help = escape(item.help, yes) or give
-        output = join(output, "# HELP ") or give
-        output = join(output, item.name) or give
-        output = join(output, " ") or give
-        output = join(output, safe_help) or give
-        output = join(output, "\n# TYPE ") or give
-        output = join(output, item.name) or give
-        output = join(output, " ") or give
-        output = join(output, item.kind) or give
-        output = join(output, "\n") or give
-        output = join(output, item.name) or give
-        keep keys = std.map.keys(item.labels)
-        when len(keys) > 0 {
-            output = join(output, "{") or give
-            change index = 0
-            each key within keys {
-                when index > 0 { output = join(output, ",") or give }
-                keep safe = escape(std.map.get(item.labels, key) ?? "", no) or give
-                output = join(output, key) or give
-                output = join(output, "=\"") or give
-                output = join(output, safe) or give
-                output = join(output, "\"") or give
-                index = index + 1
-            }
-            output = join(output, "}") or give
+        keep safe_help set escape with { value set item.help help set yes } or give
+        each part within ["# HELP ", item.name, " ", safe_help, "\n# TYPE ", item.name, " ", item.kind, "\n", item.name] {
+            change output to join with { left set output right set part } or give
         }
-        output = join(output, " ") or give
-        output = join(output, std.float.format(item.value) or give) or give
-        output = join(output, "\n") or give
+        keep keys set std.map.keys with { map set item.labels }
+        when len(keys) > 0 {
+            change output to join with { left set output right set "{" } or give
+            change index set 0
+            each key within keys {
+                when index > 0 { change output to join with { left set output right set "," } or give }
+                keep safe set escape with { value set std.map.get with { map set item.labels key set key } ?? "" help set no } or give
+                each part within [key, "=\"", safe, "\""] {
+                    change output to join with { left set output right set part } or give
+                }
+                change index to index + 1
+            }
+            change output to join with { left set output right set "}" } or give
+        }
+        change output to join with { left set output right set " " } or give
+        change output to join with { left set output right set std.float.format with { value set item.value } or give } or give
+        change output to join with { left set output right set "\n" } or give
     }
     give ok(output)
 }

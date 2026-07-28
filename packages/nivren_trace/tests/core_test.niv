@@ -1,16 +1,23 @@
 use "../src/main.niv"
 
-define compatibility() gives Result<Bool, String> {
-    keep value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-    keep parsed = main.parse(value) or give
-    assert(main.traceparent(parsed) == ok(value), "W3C traceparent round trip")
-    assert(std.map.get(main.headers(parsed) or give, "traceparent") == value, "trace propagation header")
-    keep attribute = main.otlp_attribute("service.name", "nivren") or give
-    keep span = main.otlp_span(parsed, "request", "100", "250", [attribute]) or give
-    keep encoded = main.encode_otlp_json(span) or give
-    assert(encoded == "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"nivren\"}}],\"endTimeUnixNano\":\"250\",\"flags\":1,\"name\":\"request\",\"spanId\":\"00f067aa0ba902b7\",\"startTimeUnixNano\":\"100\",\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\"}]}]}]}", "OTLP JSON request")
-    assert(choose main.otlp_span(parsed, "request", "025", "250", []) { Ok(value) => no, Err(problem) => yes }, "canonical timestamps")
+define compatibility
+takes { }
+gives Bool or String
+{
+    keep value set "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    keep parsed set main.parse with { value set value } or give
+    assert with { condition set main.traceparent with { value set parsed } == ok(value) message set "W3C traceparent round trip" }
+    assert with { condition set std.map.get with { map set main.headers with { value set parsed } or give key set "traceparent" } == value message set "trace propagation header" }
+    keep attribute set main.otlp_attribute with { key set "service.name" value set "nivren" } or give
+    keep span set main.otlp_span with { value set parsed name set "request" start_unix_nano set "100" end_unix_nano set "250" attributes set [attribute] } or give
+    keep encoded set main.encode_otlp_json with { span set span } or give
+    assert with { condition set encoded == "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"nivren\"}}],\"endTimeUnixNano\":\"250\",\"flags\":1,\"name\":\"request\",\"spanId\":\"00f067aa0ba902b7\",\"startTimeUnixNano\":\"100\",\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\"}]}]}]}" message set "OTLP JSON request" }
+    keep rejected set choose main.otlp_span with { value set parsed name set "request" start_unix_nano set "025" end_unix_nano set "250" attributes set [] } {
+        case Ok carries value => no
+        case Err carries problem => yes
+    }
+    assert with { condition set rejected message set "canonical timestamps" }
     give ok(yes)
 }
 
-compatibility()
+compatibility with { }

@@ -1,54 +1,75 @@
-shape Canvas { width: Int, height: Int, elements: [String] }
+shape Canvas holds { width is Int height is Int elements is [String] }
 
-define join(parts: [String]) gives Result<String, String> {
-    change value = ""
-    each part within parts { value = std.text.concat(value, part) or give }
+define join
+takes { parts is [String] }
+gives String or String
+{
+    change value set ""
+    each part within parts { change value to std.text.concat with { left set value right set part } or give }
     give ok(value)
 }
 
-define escape(value: String) gives Result<String, String> {
+define escape
+takes { value is String }
+gives String or String
+{
     when len(value) > 1048576 { give err("SVG text exceeds 1 MiB") }
-    change output = ""
+    change output set ""
     each character within value {
-        change escaped = character
-        when character == "&" { escaped = "&amp;" }
-        when character == "<" { escaped = "&lt;" }
-        when character == ">" { escaped = "&gt;" }
-        when character == "\"" { escaped = "&quot;" }
-        output = std.text.concat(output, escaped) or give
+        change escaped set character
+        when character == "&" { change escaped to "&amp;" }
+        when character == "<" { change escaped to "&lt;" }
+        when character == ">" { change escaped to "&gt;" }
+        when character == "\"" { change escaped to "&quot;" }
+        change output to std.text.concat with { left set output right set escaped } or give
     }
     give ok(output)
 }
 
-define canvas(width: Int, height: Int) gives Result<Canvas, String> {
+define canvas
+takes { width is Int height is Int }
+gives Canvas or String
+{
     when width <= 0 or height <= 0 or width > 32768 or height > 32768 { give err("SVG dimensions must be 1 through 32768") }
     give ok(Canvas(width, height, []))
 }
 
-define add(value: Canvas, element: String) gives Result<Canvas, String> {
+define add
+takes { value is Canvas element is String }
+gives Canvas or String
+{
     when len(value.elements) >= 100000 { give err("SVG exceeds 100000 elements") }
     when len(element) > 1048576 { give err("SVG element exceeds 1 MiB") }
-    give ok(Canvas(value.width, value.height, append(value.elements, element)))
+    give ok(Canvas(value.width, value.height, append with { values set value.elements value set element }))
 }
 
-define rect(value: Canvas, x: Int, y: Int, width: Int, height: Int, fill: String) gives Result<Canvas, String> {
+define rect
+takes { value is Canvas x is Int y is Int width is Int height is Int fill is String }
+gives Canvas or String
+{
     when width < 0 or height < 0 { give err("rectangle dimensions must not be negative") }
-    keep color = escape(fill) or give
-    keep element = join(["<rect x=\"", std.int.format(x), "\" y=\"", std.int.format(y), "\" width=\"", std.int.format(width), "\" height=\"", std.int.format(height), "\" fill=\"", color, "\"/>"]) or give
-    give add(value, element)
+    keep color set escape with { value set fill } or give
+    keep element set join with { parts set ["<rect x=\"", std.int.format with { value set x }, "\" y=\"", std.int.format with { value set y }, "\" width=\"", std.int.format with { value set width }, "\" height=\"", std.int.format with { value set height }, "\" fill=\"", color, "\"/>"] } or give
+    give add with { value set value element set element }
 }
 
-define text(value: Canvas, x: Int, y: Int, content: String, fill: String) gives Result<Canvas, String> {
-    keep safe_content = escape(content) or give
-    keep color = escape(fill) or give
-    keep element = join(["<text x=\"", std.int.format(x), "\" y=\"", std.int.format(y), "\" fill=\"", color, "\">", safe_content, "</text>"]) or give
-    give add(value, element)
+define text
+takes { value is Canvas x is Int y is Int content is String fill is String }
+gives Canvas or String
+{
+    keep safe_content set escape with { value set content } or give
+    keep color set escape with { value set fill } or give
+    keep element set join with { parts set ["<text x=\"", std.int.format with { value set x }, "\" y=\"", std.int.format with { value set y }, "\" fill=\"", color, "\">", safe_content, "</text>"] } or give
+    give add with { value set value element set element }
 }
 
-define render(value: Canvas) gives Result<String, String> {
-    change output = join(["<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"", std.int.format(value.width), "\" height=\"", std.int.format(value.height), "\" viewBox=\"0 0 ", std.int.format(value.width), " ", std.int.format(value.height), "\">"]) or give
-    each element within value.elements { output = std.text.concat(output, element) or give }
-    give std.text.concat(output, "</svg>")
+define render
+takes { value is Canvas }
+gives String or String
+{
+    change output set join with { parts set ["<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"", std.int.format with { value set value.width }, "\" height=\"", std.int.format with { value set value.height }, "\" viewBox=\"0 0 ", std.int.format with { value set value.width }, " ", std.int.format with { value set value.height }, "\">"] } or give
+    each element within value.elements { change output to std.text.concat with { left set output right set element } or give }
+    give std.text.concat with { left set output right set "</svg>" }
 }
 
 expose { Canvas, canvas, add, rect, text, render }
