@@ -1,0 +1,50 @@
+[
+  {
+    "task": "add a field to a constructed shape",
+    "edition3_steps": 3,
+    "edition4_steps": 3,
+    "edition3_ambiguous_choices": 2,
+    "edition4_ambiguous_choices": 0,
+    "evidence": "field labels identify every constructor value and missing labels are diagnosed"
+  },
+  {
+    "task": "reorder two same-typed function inputs",
+    "edition3_steps": 3,
+    "edition4_steps": 2,
+    "edition3_ambiguous_choices": 3,
+    "edition4_ambiguous_choices": 0,
+    "evidence": "canonical label order is checked at local and module call sites"
+  },
+  {
+    "task": "make a stored binding mutable",
+    "edition3_steps": 2,
+    "edition4_steps": 2,
+    "edition3_ambiguous_choices": 1,
+    "edition4_ambiguous_choices": 0,
+    "evidence": "change declarations and change-to updates use distinct searchable forms"
+  },
+  {
+    "task": "add a recoverable failure to a function",
+    "edition3_steps": 4,
+    "edition4_steps": 3,
+    "edition3_ambiguous_choices": 2,
+    "edition4_ambiguous_choices": 1,
+    "evidence": "gives Value or Problem and or give expose the failure path"
+  },
+  {
+    "task": "restrict a network operation to one host",
+    "edition3_steps": 3,
+    "edition4_steps": 2,
+    "edition3_ambiguous_choices": 2,
+    "edition4_ambiguous_choices": 0,
+    "evidence": "needs Network within a host preserves checked scope metadata beside the function"
+  },
+  {
+    "task": "insert a pipeline stage",
+    "edition3_steps": 2,
+    "edition4_steps": 1,
+    "edition3_ambiguous_choices": 2,
+    "edition4_ambiguous_choices": 0,
+    "evidence": "through keeps source-to-sink order without nested call reconstruction"
+  }
+]

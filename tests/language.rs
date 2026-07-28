@@ -430,6 +430,43 @@ fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
 }
 
 #[test]
+fn edition_four_maintenance_corpus_reduces_ambiguous_choices() {
+    #[derive(serde::Deserialize)]
+    struct MaintenanceTask {
+        task: String,
+        edition3_steps: usize,
+        edition4_steps: usize,
+        edition3_ambiguous_choices: usize,
+        edition4_ambiguous_choices: usize,
+        evidence: String,
+    }
+
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/maintenance-corpus.json");
+    let tasks: Vec<MaintenanceTask> =
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(tasks.len() >= 6);
+    let mut old_choices = 0;
+    let mut new_choices = 0;
+    for task in tasks {
+        assert!(!task.task.is_empty() && !task.evidence.is_empty());
+        assert!(
+            task.edition4_steps <= task.edition3_steps,
+            "{} adds conceptual maintenance steps",
+            task.task
+        );
+        assert!(
+            task.edition4_ambiguous_choices <= task.edition3_ambiguous_choices,
+            "{} adds ambiguous maintenance choices",
+            task.task
+        );
+        old_choices += task.edition3_ambiguous_choices;
+        new_choices += task.edition4_ambiguous_choices;
+    }
+    assert!(new_choices < old_choices);
+}
+
+#[test]
 fn intent_concurrency_starts_waits_joins_and_races_scoped_tasks() {
     let source = r#"
 define one() gives Int { give 1 }
