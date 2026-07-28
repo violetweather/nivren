@@ -121,14 +121,14 @@ Once those dependencies are cached, `niv install --offline .` verifies and reloc
 
 ## Work across packages
 
-Put a strict `niv-workspace.toml` at the shared root. Members are normalized relative paths, limited to 256, and processed in the explicit listed order:
+Put a strict `niv-workspace.toml` at the shared root. Members are normalized relative paths and limited to 256. Nivren builds internal workspace dependencies first, preserves the listed order among otherwise independent members, rejects dependency cycles, and rejects an internal dependency whose exact requested version differs from the member version:
 
 ```toml
 [workspace]
 members = "packages/core, services/api, apps/desktop"
 ```
 
-Run `niv workspace check`, `build`, `test`, `bench`, or `ship`. Each member retains its own exact manifest, authority policy, dependency lock, artifacts, and incremental fingerprint. A repeated build reports members as fresh when neither their sources nor compiler/package inputs changed; the workspace never merges permissions or silently creates package dependencies.
+Run `niv workspace check`, `build`, `test`, `bench`, or `ship`. Each member retains its own exact manifest, authority policy, dependency lock, artifacts, and incremental fingerprint. A repeated build reports members as fresh when neither their sources nor compiler/package inputs changed; the workspace never merges permissions or silently creates package dependencies. Dependencies that are not workspace members remain ordinary exact, lockfile-verified registry dependencies.
 
 ## Editor and help
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -128,8 +128,68 @@ impl Workspace {
             }
             members.push(manifest);
         }
+        let members = dependency_order(members)?;
         Ok(Self { root, members })
     }
+}
+
+fn dependency_order(members: Vec<Manifest>) -> Result<Vec<Manifest>, NivError> {
+    let positions = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| (member.name.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut indegree = vec![0usize; members.len()];
+    let mut dependents = vec![Vec::new(); members.len()];
+    for (member_index, member) in members.iter().enumerate() {
+        for (dependency, required_version) in &member.dependencies {
+            let Some(&dependency_index) = positions.get(dependency) else {
+                continue;
+            };
+            let actual_version = &members[dependency_index].version;
+            if required_version != actual_version {
+                return Err(workspace_error(
+                    format!(
+                        "workspace package '{}' requires {dependency} {required_version}, but the member version is {actual_version}",
+                        member.name
+                    ),
+                    1,
+                ));
+            }
+            indegree[member_index] = indegree[member_index].saturating_add(1);
+            dependents[dependency_index].push(member_index);
+        }
+    }
+
+    let mut ordered_indices = Vec::with_capacity(members.len());
+    let mut emitted = vec![false; members.len()];
+    while ordered_indices.len() < members.len() {
+        let Some(next) = (0..members.len()).find(|&index| !emitted[index] && indegree[index] == 0)
+        else {
+            let cycle = members
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !emitted[*index])
+                .map(|(_, member)| member.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(workspace_error(
+                format!("workspace dependency cycle includes: {cycle}"),
+                1,
+            ));
+        };
+        emitted[next] = true;
+        ordered_indices.push(next);
+        for &dependent in &dependents[next] {
+            indegree[dependent] = indegree[dependent].saturating_sub(1);
+        }
+    }
+
+    let mut members = members.into_iter().map(Some).collect::<Vec<_>>();
+    Ok(ordered_indices
+        .into_iter()
+        .map(|index| members[index].take().expect("member is emitted once"))
+        .collect())
 }
 
 fn quoted(value: &str) -> Option<String> {
@@ -189,6 +249,69 @@ mod tests {
             )
             .is_err()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_orders_internal_dependencies_and_rejects_cycles_or_version_drift() {
+        let root = std::env::temp_dir().join(format!(
+            "nivren-workspace-graph-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        for (name, dependencies) in [
+            ("core", ""),
+            ("service", "\n[dependencies]\ncore = \"1.0.0\"\n"),
+            ("app", "\n[dependencies]\nservice = \"1.0.0\"\n"),
+        ] {
+            let member = root.join(name);
+            fs::create_dir_all(member.join("src")).unwrap();
+            fs::write(
+                member.join("niv.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n{dependencies}"
+                ),
+            )
+            .unwrap();
+            fs::write(member.join("src/main.niv"), "42").unwrap();
+        }
+        let parsed = Workspace::parse(
+            "[workspace]\nmembers = \"app, service, core\"\n",
+            root.canonicalize().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            ["core", "service", "app"]
+        );
+
+        fs::write(
+            root.join("core/niv.toml"),
+            "[package]\nname = \"core\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[dependencies]\napp = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let error = Workspace::parse(
+            "[workspace]\nmembers = \"app, service, core\"\n",
+            root.canonicalize().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("dependency cycle"));
+
+        fs::write(
+            root.join("core/niv.toml"),
+            "[package]\nname = \"core\"\nversion = \"2.0.0\"\nentry = \"src/main.niv\"\n",
+        )
+        .unwrap();
+        let error = Workspace::parse(
+            "[workspace]\nmembers = \"app, service, core\"\n",
+            root.canonicalize().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("member version is 2.0.0"));
         fs::remove_dir_all(root).unwrap();
     }
 }
