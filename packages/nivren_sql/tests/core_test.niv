@@ -1,12 +1,11 @@
 use "../src/main.niv"
 
-keep built = choose main.select("users", ["id", "name"]) {
-    Ok(base) => main.where_equal(base, "role", "admin"),
-    Err(problem) => err(problem),
+keep built set choose main.select with { table set "users" columns set ["id", "name"] } {
+    case Ok carries base => main.where_equal with { query set base column set "role" value set "admin" }
+    case Err carries problem => err(problem)
 }
-keep text = choose built { Ok(query) => query.text, Err(problem) => "" }
-keep parameters = choose built { Ok(query) => query.parameters, Err(problem) => [] }
-assert(text == "SELECT id, name FROM users WHERE role = ?", "parameterized SQL")
-assert(parameters == ["admin"], "parameter order")
-
-assert(main.identifier("users; DROP TABLE users") == err("SQL identifier contains an unsafe character"), "reject injection")
+keep text set choose built { case Ok carries query => query.text case Err carries problem => "" }
+keep parameters set choose built { case Ok carries query => query.parameters case Err carries problem => [] }
+assert with { condition set text == "SELECT id, name FROM users WHERE role = ?" message set "parameterized SQL" }
+assert with { condition set parameters == ["admin"] message set "parameter order" }
+assert with { condition set main.identifier with { value set "users; DROP TABLE users" } == err("SQL identifier contains an unsafe character") message set "reject injection" }

@@ -1,57 +1,71 @@
-shape IntColumn { name: String, values: [Int] }
-shape FloatColumn { name: String, values: [Float] }
-shape TextColumn { name: String, values: [String] }
+shape IntColumn holds { name is String values is [Int] }
+shape FloatColumn holds { name is String values is [Float] }
+shape TextColumn holds { name is String values is [String] }
 
-choice Column {
-    Ints(IntColumn),
-    Floats(FloatColumn),
-    Texts(TextColumn),
+choice Column holds {
+    case Ints carries IntColumn
+    case Floats carries FloatColumn
+    case Texts carries TextColumn
 }
 
-shape Table { rows: Int, columns: [Column] }
+shape Table holds { rows is Int columns is [Column] }
 
-define column_name(column: Column) gives String {
+define column_name
+takes { column is Column }
+gives String
+{
     give choose column {
-        Ints(value) => value.name,
-        Floats(value) => value.name,
-        Texts(value) => value.name,
+        case Ints carries value => value.name
+        case Floats carries value => value.name
+        case Texts carries value => value.name
     }
 }
 
-define column_length(column: Column) gives Int {
+define column_length
+takes { column is Column }
+gives Int
+{
     give choose column {
-        Ints(value) => len(value.values),
-        Floats(value) => len(value.values),
-        Texts(value) => len(value.values),
+        case Ints carries value => len(value.values)
+        case Floats carries value => len(value.values)
+        case Texts carries value => len(value.values)
     }
 }
 
-define table(columns: [Column]) gives Result<Table, String> {
+define table
+takes { columns is [Column] }
+gives Table or String
+{
     when len(columns) == 0 { give err("table requires at least one column") }
     when len(columns) > 4096 { give err("table exceeds 4096 columns") }
-    keep rows = column_length(columns[0])
+    keep rows set column_length with { column set columns[0] }
     when rows > 1000000 { give err("table exceeds one million rows") }
-    change names: [String] = []
+    change names is [String] set []
     each column within columns {
-        keep name = column_name(column)
+        keep name set column_name with { column set column }
         when name == "" { give err("column names must not be empty") }
         each existing within names { when existing == name { give err("column names must be unique") } }
-        when column_length(column) != rows { give err("all columns must have the same row count") }
-        names = append(names, name)
+        when column_length with { column set column } != rows { give err("all columns must have the same row count") }
+        change names to append with { values set names value set name }
     }
     give ok(Table(rows, columns))
 }
 
-define select(value: Table, names: [String]) gives Result<Table, String> {
+define select
+takes { value is Table names is [String] }
+gives Table or String
+{
     when len(names) == 0 { give err("selection requires at least one column") }
-    change selected: [Column] = []
+    change selected is [Column] set []
     each name within names {
-        change found: Column? = none
-        each column within value.columns { when column_name(column) == name { found = column } }
+        change found is maybe Column set none
+        each column within value.columns {
+            when column_name with { column set column } == name { change found to column }
+        }
         when found == none { give err("selected column does not exist") }
-        selected = append(selected, found ?? value.columns[0])
+        change selected to append with { values set selected value set found ?? value.columns[0] }
     }
-    give table(selected)
+    give table with { columns set selected }
 }
 
 expose { IntColumn, FloatColumn, TextColumn, Column, Table, column_name, column_length, table, select }

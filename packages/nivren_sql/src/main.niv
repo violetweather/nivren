@@ -1,67 +1,76 @@
-shape Query { text: String, parameters: [String], filtered: Bool }
+shape Query holds { text is String parameters is [String] filtered is Bool }
 
-define letter(character: String) gives Bool {
+define letter
+takes { character is String }
+gives Bool
+{
     each candidate within [
         "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
         "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
         "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
         "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"
-    ] {
-        when character == candidate { give yes }
-    }
+    ] { when character == candidate { give yes } }
     give no
 }
 
-define digit(character: String) gives Bool {
+define digit
+takes { character is String }
+gives Bool
+{
     each candidate within ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] {
         when character == candidate { give yes }
     }
     give no
 }
 
-define identifier(value: String) gives Result<String, String> {
+define identifier
+takes { value is String }
+gives String or String
+{
     when len(value) == 0 { give err("SQL identifier cannot be empty") }
-    change index = 0
+    change index set 0
     each character within value {
-        keep is_letter = letter(character)
-        keep is_digit = digit(character)
-        keep allowed = is_letter or is_digit or character == "_"
+        keep is_letter set letter with { character set character }
+        keep is_digit set digit with { character set character }
+        keep allowed set is_letter or is_digit or character == "_"
         when !allowed { give err("SQL identifier contains an unsafe character") }
         when index == 0 and is_digit { give err("SQL identifier cannot start with a digit") }
-        index = index + 1
+        change index to index + 1
     }
     give ok(value)
 }
 
-define select(table: String, columns: [String]) gives Result<Query, String> {
-    keep safe_table = identifier(table) or give
+define select
+takes { table is String columns is [String] }
+gives Query or String
+{
+    keep safe_table set identifier with { value set table } or give
     when len(columns) == 0 { give err("SELECT requires at least one column") }
-    change names = ""
-    change index = 0
+    change names set ""
+    change index set 0
     each column within columns {
-        keep safe_column = identifier(column) or give
-        when index > 0 { names = std.text.concat(names, ", ") or give }
-        names = std.text.concat(names, safe_column) or give
-        index = index + 1
+        keep safe_column set identifier with { value set column } or give
+        when index > 0 { change names to std.text.concat with { left set names right set ", " } or give }
+        change names to std.text.concat with { left set names right set safe_column } or give
+        change index to index + 1
     }
-    keep prefix = std.text.concat("SELECT ", names) or give
-    keep from = std.text.concat(prefix, " FROM ") or give
-    keep statement = std.text.concat(from, safe_table) or give
+    keep prefix set std.text.concat with { left set "SELECT " right set names } or give
+    keep from set std.text.concat with { left set prefix right set " FROM " } or give
+    keep statement set std.text.concat with { left set from right set safe_table } or give
     give ok(Query(statement, [], no))
 }
 
-define where_equal(query: Query, column: String, value: String) gives Result<Query, String> {
-    keep safe_column = identifier(column) or give
-    change joiner = " WHERE "
-    when query.filtered { joiner = " AND " }
-    keep prefix = std.text.concat(query.text, joiner) or give
-    keep field = std.text.concat(prefix, safe_column) or give
-    keep statement = std.text.concat(field, " = ?") or give
-    give ok(Query(
-        statement,
-        append(query.parameters, value),
-        yes
-    ))
+define where_equal
+takes { query is Query column is String value is String }
+gives Query or String
+{
+    keep safe_column set identifier with { value set column } or give
+    change joiner set " WHERE "
+    when query.filtered { change joiner to " AND " }
+    keep prefix set std.text.concat with { left set query.text right set joiner } or give
+    keep field set std.text.concat with { left set prefix right set safe_column } or give
+    keep statement set std.text.concat with { left set field right set " = ?" } or give
+    give ok(Query(statement, append with { values set query.parameters value set value }, yes))
 }
 
 expose { Query, identifier, select, where_equal }
