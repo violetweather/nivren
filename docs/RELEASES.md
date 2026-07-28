@@ -2,9 +2,17 @@
 
 Release tags are `vMAJOR.MINOR.PATCH` and must exactly match every workspace package version. CI builds each native executable twice on Linux, macOS, and Windows for x64 and ARM64 and rejects byte differences. It also reproducibly builds and executes the `wasm32-wasip1` compiler/runtime guest against a real Node WASI host and a zero-import `wasm32-unknown-unknown` guest through the public browser SDK. Each native platform artifact is a deterministic ZIP containing the executable, guided installers, project notices, changelog, user README, current Edition 4 and retained Edition 2/3 specifications, bytecode/package/WASM specifications, `Cargo.lock`, a compiled-dependency inventory, and available dependency license/notice files. CI also packages the first-party VS Code extension. It publishes SHA-256 checksums and signed build-provenance attestations for every archive, WASM module, browser SDK, and VSIX.
 
-The earlier Edition 2 freeze is no longer sufficient for 1.0 because Edition 3 intentionally changes the pre-user language surface. A new Edition 3 freeze date begins only after its syntax, standard library, bytecode, conformance corpus, and capability audit are complete. At least three independent production pilots must then each run for 30 days without a critical blocker. Pilot evidence belongs in `release/pilots/*.json`; synthetic records never count.
+Edition 4 Beta is checkpoint-gated. Language, Intent, Compiler, and Product Proof evidence must pass before a coordinated language/site release. The later 1.0 decision additionally requires independent production pilots and a compatibility freeze; pilot evidence belongs in `release/pilots/*.json`, and synthetic records never count.
 
-Run `niv release check [repository]` for the same local gate used by the release workflow. A passing result checks the freeze date, pilot evidence, normative files, conformance-corpus floor, all six explicit CI runner labels, and an exact `1.0.0` toolchain version.
+Run `niv release check [repository]` for the long-term 1.0 gate. Edition 4 Beta uses the stricter Product Proof ledger and release workflow until that policy replaces the retained 1.0 audit implementation.
+
+## Signed update channels
+
+Stable, beta, and nightly pointers use `ChannelManifest` format 1. Each manifest names one bounded HTTPS release base, an immutable version, a strictly increasing generation, a validity window, and the exact SHA-256 digest of every offered asset. The manifest is canonicalized and signed with a dedicated offline Ed25519 channel key, independently of GitHub transport provenance.
+
+Release automation signs an unsigned manifest with `niv release sign-channel <manifest.json> <secret-key-file> <signed.json>`. Verification uses `niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>`. Expired, future, malformed, tampered, or rollback-generation manifests fail closed. Channel signing keys are read only from explicit files and are never stored in the repository.
+
+Install receipts retain the highest trusted generation per channel. Switching channels is explicit; pinning a version disables automatic movement until the pin is removed. A signing-key incident freezes the affected channel, publishes a separately authorized recovery notice, rotates the channel key, and increments generation without reusing an earlier value.
 
 Release attestations can be verified with `gh attestation verify --repo OWNER/REPOSITORY <artifact>`. Verify `SHA256SUMS` as well and obtain registry root keys through a separate trusted channel.
 

@@ -138,6 +138,16 @@ fn main() -> ExitCode {
         }
         [command, action] if command == "release" && action == "check" => release_check("."),
         [command, action, path] if command == "release" && action == "check" => release_check(path),
+        [command, action, manifest, secret, output]
+            if command == "release" && action == "sign-channel" =>
+        {
+            release_sign_channel(manifest, secret, output)
+        }
+        [command, action, manifest, public, now, minimum]
+            if command == "release" && action == "verify-channel" =>
+        {
+            release_verify_channel(manifest, public, now, minimum)
+        }
         [command, path] if command == "fmt" => format_path(path, false),
         [command, flag, path] if command == "fmt" && flag == "--check" => format_path(path, true),
         [command, language, path, output] if command == "bindgen" && language == "c" => {
@@ -186,6 +196,70 @@ fn main() -> ExitCode {
             eprintln!("error: invalid command\n");
             help();
             ExitCode::from(64)
+        }
+    }
+}
+
+fn release_sign_channel(manifest: &str, secret: &str, output: &str) -> ExitCode {
+    let result = fs::read(manifest)
+        .map_err(|error| format!("cannot read channel manifest: {error}"))
+        .and_then(|bytes| {
+            nivren::channel::ChannelManifest::decode(&bytes).map_err(|error| error.message)
+        })
+        .and_then(|mut manifest| {
+            let secret = fs::read_to_string(secret)
+                .map_err(|error| format!("cannot read channel signing key: {error}"))?;
+            manifest
+                .sign(secret.trim())
+                .map_err(|error| error.message)?;
+            manifest.encode().map_err(|error| error.message)
+        })
+        .and_then(|bytes| {
+            write_atomic(Path::new(output), &bytes).map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(()) => {
+            println!("signed {output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn release_verify_channel(manifest: &str, public: &str, now: &str, minimum: &str) -> ExitCode {
+    let result = fs::read(manifest)
+        .map_err(|error| format!("cannot read channel manifest: {error}"))
+        .and_then(|bytes| {
+            nivren::channel::ChannelManifest::decode(&bytes).map_err(|error| error.message)
+        })
+        .and_then(|manifest| {
+            let public = fs::read_to_string(public)
+                .map_err(|error| format!("cannot read channel public key: {error}"))?;
+            let now = now
+                .parse::<u64>()
+                .map_err(|_| "invalid Unix time".to_string())?;
+            let minimum = minimum
+                .parse::<u64>()
+                .map_err(|_| "invalid minimum generation".to_string())?;
+            manifest
+                .verify(public.trim(), now, minimum)
+                .map_err(|error| error.message)?;
+            Ok(manifest)
+        });
+    match result {
+        Ok(manifest) => {
+            println!(
+                "verified {} {} generation {}",
+                manifest.channel, manifest.version, manifest.generation
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
         }
     }
 }
@@ -2358,6 +2432,9 @@ fn help() {
     println!(
         "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
+    );
+    println!(
+        "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>"
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");
 }

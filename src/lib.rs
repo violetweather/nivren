@@ -3,6 +3,8 @@ pub mod bindgen;
 pub mod bundle;
 pub mod bytecode;
 mod call_labels;
+#[cfg(feature = "host-runtime")]
+pub mod channel;
 pub mod compiler;
 #[cfg(feature = "host-runtime")]
 pub mod dap;
