@@ -11,7 +11,7 @@ Official packages extend the standard library without compiler privilege, lifecy
 | `nivren_columnar` | Typed immutable columnar tables | `Column`, `Table`, `table`, `select` |
 | `nivren_compression` | Deterministic bounded gzip/zlib compression | `gzip`, `gunzip`, `zlib`, `unzlib`, `gzip_text`, `gunzip_text` |
 | `nivren_csv` | Bounded explicit-schema CSV tables and file helpers | `decode`, `encode`, `decode_with`, `encode_with`, `read`, `write` |
-| `nivren_database` | Bounded driver/pool/migration/result contracts and a capability-scoped host adapter | `PoolConfig`, `DriverRequest`, `Migration`, `QueryPage`, `validate_pool`, `validate_request`, `validate_migrations`, `encode_request`, `decode_page`, `open_driver`, `query_driver`, `execute_driver` |
+| `nivren_database` | Bounded driver/pool/migration/result contracts, a capability-scoped host adapter, and a bundled rooted SQLite implementation | `PoolConfig`, `DriverRequest`, `Migration`, `QueryPage`, `validate_pool`, `validate_request`, `validate_migrations`, `encode_request`, `decode_page`, `open_driver`, `query_driver`, `execute_driver` |
 | `nivren_desktop` | System-webview window, typed bridge, signed update contracts, and a scoped host adapter | `Window`, `BridgeMessage`, `UpdateManifest`, `validate_window`, `encode_message`, `validate_update`, `open_host`, `send_bridge`, `stage_update` |
 | `nivren_testing` | Typed assertions and deterministic concurrency gates | `Gate`, `expect_equal`, `expect_yes`, `expect_no`, `gate`, `open`, `pass`, `checkpoint` |
 | `nivren_crypto` | Bounded SHA-256 fingerprints and HMAC authentication | `fingerprint`, `sign`, `verify` |

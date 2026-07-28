@@ -394,6 +394,19 @@ fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
     let interpreter = Interpreter::new()
         .with_capabilities(manifest.capabilities.iter().cloned())
         .with_capability_scopes(manifest.capability_scopes.clone());
+    let interpreter = if manifest.capabilities.contains("Native") {
+        let database_root = manifest.root.join(".nivren").join("database");
+        match nivren_database_host::SqliteHost::new(database_root) {
+            Ok(host) => interpreter.with_host_callback(host.callback()),
+            Err(error) => interpreter.with_host_callback(move |operation, _| {
+                Err(format!(
+                    "cannot initialize the built-in SQLite host for {operation}: {error}"
+                ))
+            }),
+        }
+    } else {
+        interpreter
+    };
     let interpreter = if let Some(limit) = manifest.instruction_limit {
         interpreter.with_instruction_limit(limit)
     } else {

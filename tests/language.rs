@@ -2331,6 +2331,49 @@ fn workspace_commands_build_test_and_reuse_incremental_members() {
 }
 
 #[test]
+fn cli_projects_receive_the_bounded_builtin_sqlite_host() {
+    let root = module_fixture("sqlite-cli-host");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("niv.toml"),
+        "[package]\nname = \"sqlite-app\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nNative = \"kind:database\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.niv"),
+        r#"define run
+gives String or String
+needs Native within "database"
+{
+    keep opened set perform std.host.open with { kind set "database" request set "memory://cli-proof" } or give
+    using handle = opened {
+        keep created set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"CREATE TABLE users (name TEXT NOT NULL)\",\"parameters\":[],\"maximum_rows\":0,\"timeout\":5.0}" } or give
+        keep inserted set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"INSERT INTO users (name) VALUES (?)\",\"parameters\":[\"Ada\"],\"maximum_rows\":0,\"timeout\":5.0}" } or give
+        give perform std.host.call with { handle set handle name set "query" request set "{\"operation\":\"query\",\"statement\":\"SELECT name FROM users\",\"parameters\":[],\"maximum_rows\":10,\"timeout\":5.0}" }
+    }
+}
+
+show(choose perform run with {} {
+    case Ok carries response => response
+    case Err carries problem => problem
+})
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["run", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Ada"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn registry_dependencies_install_lock_import_and_detect_tampering() {
     let directory = module_fixture("dependencies");
     let dependency_root = directory.join("answerlib");

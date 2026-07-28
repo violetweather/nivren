@@ -28,6 +28,7 @@ DOCUMENTS = (
     "docs/BYTECODE.md",
     "docs/CAPABILITY_AUDIT.md",
     "docs/WASM.md",
+    "crates/nivren-database-host/README.md",
     "install/install.sh",
     "install/install.ps1",
     "install/README.md",

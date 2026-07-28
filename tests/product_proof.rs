@@ -151,3 +151,28 @@ fn gpu_host_matches_checked_cpu_fallback_in_vm_and_native_control() {
         );
     }
 }
+
+#[test]
+fn bundled_sqlite_host_executes_real_edition_four_driver_workflow() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/sqlite_driver.niv");
+    let program = nivren::modules::load(&path).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    for native in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "nivren-sqlite-host-{}-{native}",
+            std::process::id()
+        ));
+        let host = nivren_database_host::SqliteHost::new(&root).unwrap();
+        let mut interpreter = Interpreter::new()
+            .with_capabilities(["Native".to_string()])
+            .with_host_callback(host.callback());
+        let result = if native {
+            interpreter.run_native(&chunk)
+        } else {
+            interpreter.run_bytecode(&chunk)
+        };
+        assert_eq!(result.unwrap(), Value::Ok(Arc::new(Value::Int(2))));
+        let _ = std::fs::remove_dir(&root);
+    }
+}
