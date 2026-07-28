@@ -40,6 +40,42 @@ use crate::error::NivError;
 use crate::fixed::{FixedInt, FixedKind};
 use crate::lexer::TokenKind;
 
+const LIVE_CLOCK: u64 = u64::MAX;
+static TEST_CLOCK_BITS: AtomicU64 = AtomicU64::new(LIVE_CLOCK);
+
+pub struct DeterministicClockGuard {
+    previous: u64,
+}
+
+impl Drop for DeterministicClockGuard {
+    fn drop(&mut self) {
+        TEST_CLOCK_BITS.store(self.previous, Ordering::SeqCst);
+    }
+}
+
+pub fn deterministic_clock(seconds: f64) -> Result<DeterministicClockGuard, NivError> {
+    if !seconds.is_finite() || seconds < 0.0 || seconds.to_bits() == LIVE_CLOCK {
+        return Err(NivError::new(
+            "deterministic test time must be a finite nonnegative number",
+            1,
+            1,
+        ));
+    }
+    let previous = TEST_CLOCK_BITS.swap(seconds.to_bits(), Ordering::SeqCst);
+    Ok(DeterministicClockGuard { previous })
+}
+
+fn unix_seconds(span: Span) -> Result<f64, NivError> {
+    let fixed = TEST_CLOCK_BITS.load(Ordering::SeqCst);
+    if fixed != LIVE_CLOCK {
+        return Ok(f64::from_bits(fixed));
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .map_err(|_| NivError::new("system clock is before Unix epoch", span.line, span.column))
+}
+
 #[cfg(feature = "host-runtime")]
 type NetInterest = mio::Interest;
 
@@ -4672,10 +4708,7 @@ fn check_arity(name: &str, expected: usize, actual: usize, span: Span) -> Result
     }
 }
 fn native_clock(_: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| Value::Float(duration.as_secs_f64()))
-        .map_err(|_| NivError::new("system clock is before Unix epoch", span.line, span.column))
+    unix_seconds(span).map(Value::Float)
 }
 fn native_len(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     match &arguments[0] {
@@ -5783,11 +5816,15 @@ fn native_time_add_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, N
 
 fn native_time_now_zoned(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let zone = expect_string(&arguments[0], "std.time.now_zoned", span)?;
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| NivError::new(error.to_string(), span.line, span.column))?
-        .as_secs();
-    let seconds = i64::try_from(seconds)
+    let seconds = unix_seconds(span)?.floor();
+    if seconds > u64::MAX as f64 {
+        return Err(NivError::new(
+            "system time exceeds Int range",
+            span.line,
+            span.column,
+        ));
+    }
+    let seconds = i64::try_from(seconds as u64)
         .map_err(|_| NivError::new("system time exceeds Int range", span.line, span.column))?;
     native_time_from_unix(
         vec![Value::Int(seconds), Value::String(zone.to_string())],
@@ -11606,9 +11643,21 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex, mpsc};
 
     use super::{
-        BlockingExecutor, Value, decode_chunks, parse_http_response, parse_http_url,
-        tls_client_stream, tls_server_config,
+        BlockingExecutor, Value, decode_chunks, deterministic_clock, native_clock,
+        parse_http_response, parse_http_url, tls_client_stream, tls_server_config,
     };
+
+    #[test]
+    fn deterministic_clock_is_scoped_and_validated() {
+        let span = crate::ast::Span { line: 1, column: 1 };
+        let guard = deterministic_clock(1_700_000_000.25).unwrap();
+        assert_eq!(
+            native_clock(Vec::new(), span).unwrap(),
+            Value::Float(1_700_000_000.25)
+        );
+        assert!(deterministic_clock(f64::NAN).is_err());
+        drop(guard);
+    }
 
     #[test]
     fn http_parser_enforces_framing_and_status() {

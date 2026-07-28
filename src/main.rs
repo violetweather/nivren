@@ -176,20 +176,44 @@ fn main() -> ExitCode {
         [command, flag, output, path] if command == "bench" && flag == "--json" => {
             benchmark_path(path, Some(output))
         }
-        [command] if command == "test" => test_path("tests/niv", None),
+        [command] if command == "test" => test_path("tests/niv", None, None),
+        [command, flag] if command == "test" && flag == "--property" => {
+            test_path("tests/property", None, None)
+        }
+        [command, flag, path] if command == "test" && flag == "--property" => {
+            test_path(path, None, None)
+        }
+        [command, flag] if command == "test" && flag == "--compat" => {
+            test_path("tests/compat", None, None)
+        }
+        [command, flag, path] if command == "test" && flag == "--compat" => {
+            test_path(path, None, None)
+        }
+        [command, flag] if command == "test" && flag == "--fuzz-smoke" => {
+            test_path("tests/fuzz", None, None)
+        }
+        [command, flag, path] if command == "test" && flag == "--fuzz-smoke" => {
+            test_path(path, None, None)
+        }
+        [command, flag, seconds] if command == "test" && flag == "--time" => {
+            test_path_with_time("tests/niv", seconds)
+        }
+        [command, flag, seconds, path] if command == "test" && flag == "--time" => {
+            test_path_with_time(path, seconds)
+        }
         [command, flag] if command == "test" && flag == "--snapshots" => {
-            test_path("tests/niv", Some(false))
+            test_path("tests/niv", Some(false), None)
         }
         [command, flag, path] if command == "test" && flag == "--snapshots" => {
-            test_path(path, Some(false))
+            test_path(path, Some(false), None)
         }
         [command, flag] if command == "test" && flag == "--accept-snapshots" => {
-            test_path("tests/niv", Some(true))
+            test_path("tests/niv", Some(true), None)
         }
         [command, flag, path] if command == "test" && flag == "--accept-snapshots" => {
-            test_path(path, Some(true))
+            test_path(path, Some(true), None)
         }
-        [command, path] if command == "test" => test_path(path, None),
+        [command, path] if command == "test" => test_path(path, None, None),
         [path] if path.ends_with(".niv") => run_file(path),
         [path] if path.ends_with(".nivb") => run_file(path),
         _ => {
@@ -924,7 +948,7 @@ fn ship_project(path: &str) -> ExitCode {
     };
     let tests = manifest.root.join("tests/niv");
     if tests.exists() {
-        let tested = test_path(&tests.display().to_string(), None);
+        let tested = test_path(&tests.display().to_string(), None, None);
         if tested != ExitCode::SUCCESS {
             return tested;
         }
@@ -961,7 +985,7 @@ fn workspace_action(action: &str, path: &str) -> ExitCode {
             "test" => {
                 let tests = member.root.join("tests/niv");
                 if tests.exists() {
-                    test_path(&tests.display().to_string(), None)
+                    test_path(&tests.display().to_string(), None, None)
                 } else {
                     check_project(&member_path, false)
                 }
@@ -2165,7 +2189,25 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-fn test_path(path: &str, snapshots: Option<bool>) -> ExitCode {
+fn test_path_with_time(path: &str, seconds: &str) -> ExitCode {
+    match seconds.parse::<f64>() {
+        Ok(seconds) => test_path(path, None, Some(seconds)),
+        Err(_) => {
+            eprintln!("error: deterministic test time must be a finite nonnegative number");
+            ExitCode::from(64)
+        }
+    }
+}
+
+fn test_path(path: &str, snapshots: Option<bool>, deterministic_time: Option<f64>) -> ExitCode {
+    let _clock = match deterministic_time.map(nivren::runtime::deterministic_clock) {
+        Some(Ok(clock)) => Some(clock),
+        Some(Err(error)) => {
+            report(path, "", &[error]);
+            return ExitCode::from(64);
+        }
+        None => None,
+    };
     let manifest = match enclosing_manifest(Path::new(path)) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -2435,6 +2477,9 @@ fn help() {
     );
     println!(
         "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>"
+    );
+    println!(
+        "\nTest profiles:\n  niv test --property [path]\n  niv test --compat [path]\n  niv test --fuzz-smoke [path]\n  niv test --time <unix-seconds> [path]"
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");
 }

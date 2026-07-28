@@ -2279,6 +2279,51 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
 }
 
 #[test]
+fn cli_test_profiles_and_deterministic_time_are_explicit() {
+    let project = module_fixture("test-profiles");
+    let tests = project.join("tests/niv");
+    fs::create_dir_all(&tests).unwrap();
+    fs::write(
+        project.join("niv.toml"),
+        "[package]\nname = \"test-profiles\"\nversion = \"1.0.0\"\nentry = \"main.niv\"\n\n[capabilities]\nTime = \"allow\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("main.niv"), "42").unwrap();
+    fs::write(
+        tests.join("clock_test.niv"),
+        "assert with { condition set perform clock with { } == 1700000000.25 message set \"fixed test time\" }",
+    )
+    .unwrap();
+    let niv = env!("CARGO_BIN_EXE_niv");
+    let timed = Command::new(niv)
+        .args(["test", "--time", "1700000000.25", tests.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        timed.status.success(),
+        "deterministic test failed: {}",
+        String::from_utf8_lossy(&timed.stderr)
+    );
+    fs::write(
+        tests.join("clock_test.niv"),
+        "assert with { condition set yes message set \"profile dispatch\" }",
+    )
+    .unwrap();
+    for profile in ["--property", "--compat", "--fuzz-smoke"] {
+        let output = Command::new(niv)
+            .args(["test", profile, tests.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{profile} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
 fn workspace_commands_build_test_and_reuse_incremental_members() {
     let root = module_fixture("workspace-commands");
     for name in ["core", "app"] {
