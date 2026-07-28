@@ -281,6 +281,21 @@ fn edition_four_labeled_calls_preserve_names_and_validate_module_exports() {
 }
 
 #[test]
+fn edition_four_json_schema_labels_are_parseable_and_checked() {
+    let source = r#"
+shape Event holds {
+    id is Int
+} with Json
+
+std.json.decode with {
+    schema set Event
+    source set "{\"id\":42}"
+}
+"#;
+    assert!(nivren::check(source).is_ok());
+}
+
+#[test]
 fn edition_four_derives_are_checked_and_gate_generated_operations() {
     let complete = r#"
 shape Release holds {

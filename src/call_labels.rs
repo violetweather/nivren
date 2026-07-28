@@ -96,7 +96,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.json",
-        "valid:source;compact:source;pretty:source;parse:source;stringify:value;decode:shape,source;read_next:file,maximum;read_next_as:shape,file,maximum",
+        "valid:source;compact:source;pretty:source;parse:source;stringify:value;decode:schema,source;read_next:file,maximum;read_next_as:schema,file,maximum",
     );
     add(
         &mut labels,
@@ -169,7 +169,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.web",
-        "encode_component:value;decode_component:value;get:url,timeout;headers:;request:method,url,headers,body,timeout,maximum;read_request:stream,maximum;respond:stream,status,headers,body;websocket_connect:url,headers,timeout,maximum;websocket_secure_connect:url,headers,timeout,maximum,options;websocket_accept:stream,timeout;websocket_send:websocket,message;websocket_receive:websocket,maximum;websocket_close:websocket;websocket_secure_listen:host,port,certificate_pem,private_key_pem,options;websocket_secure_accept:listener,timeout;tls_options:;tls_close:listener",
+        "encode_component:value;decode_component:value;get:url,timeout;headers:;request:method,url,headers,body,timeout,maximum;read_request:stream,maximum;respond:stream,status,headers,body;websocket_connect:host,port,path,timeout;websocket_secure_connect:host,port,path,timeout,options;websocket_accept:stream,request;websocket_send:websocket,message;websocket_receive:websocket,maximum;websocket_close:websocket;websocket_secure_listen:host,port,certificate_pem,private_key_pem,options;websocket_secure_accept:listener,timeout;tls_options:;tls_close:listener",
     );
     labels
 });
