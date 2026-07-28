@@ -17,6 +17,10 @@ shape ComputeArtifact holds {
     cpu_fallback is [Int]
 } with Json, Display, Validate
 
+shape VectorResult holds {
+    values is [Int]
+} with Json, Compare, Display, Validate
+
 define validate_plan
 takes {
     plan is AddPlan
@@ -119,4 +123,24 @@ gives ComputeArtifact or String
     })
 }
 
-expose { ComputeLimits, AddPlan, ComputeArtifact, validate_plan, add_cpu, add_wgsl, compile_add }
+define execute_gpu
+takes {
+    plan is AddPlan
+}
+gives [Int] or String
+needs Native within "gpu"
+{
+    keep artifact set compile_add with { plan set plan } or give
+    keep request set ComputeArtifact.to_json with { value set artifact } or give
+    keep opened set perform std.host.open with { kind set "gpu" request set "webgpu-wgsl" } or give
+    using device = opened {
+        keep response set perform std.host.call with { handle set device name set "compute" request set request } or give
+        keep result set VectorResult.from_json with { source set response } or give
+        when len(result.values) != len(artifact.cpu_fallback) {
+            give err("GPU result length differs from the checked CPU fallback")
+        }
+        give ok(result.values)
+    }
+}
+
+expose { ComputeLimits, AddPlan, ComputeArtifact, VectorResult, validate_plan, add_cpu, add_wgsl, compile_add, execute_gpu }

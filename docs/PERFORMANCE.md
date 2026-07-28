@@ -51,7 +51,7 @@ The checker row is explicitly unlike work: Nivren performs semantic, type, and c
 
 ## Edition 4 Intent Proof gate
 
-`NIVREN_INTENT_BENCH_GATE=1 cargo bench --bench intent_proof` compares direct and optimized intent-oriented forms over seven measured runs after warmup. It fails when latency/throughput or conservative runtime allocation work regresses by more than 10% for files, loopback HTTP, managed database transactions, or bounded channels. The benchmark validates identical results and uses the same runtime implementation on both sides; `perform` calls use Bytecode 7's fused `PerformCall` so inspection does not add a second dispatch.
+`NIVREN_INTENT_BENCH_GATE=1 cargo bench --bench intent_proof` compares direct and optimized intent-oriented forms using three paired warmups and fifteen alternating paired samples. The median paired ratio controls for cache and scheduler drift without weakening the 10% ceiling. The gate fails when latency/throughput or conservative runtime allocation work regresses by more than 10% for files, loopback HTTP, managed database transactions, or bounded channels. The benchmark validates identical results and uses the same runtime implementation on both sides; `perform` calls use Bytecode 7's fused `PerformCall` so inspection does not add a second dispatch.
 
 The passing Apple M4 gate on July 28, 2026 was:
 

@@ -38,6 +38,8 @@ pub mod trust;
 pub mod typecheck;
 #[cfg(feature = "host-runtime")]
 pub mod websocket;
+#[cfg(feature = "host-runtime")]
+pub mod workspace;
 
 use error::NivError;
 #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]

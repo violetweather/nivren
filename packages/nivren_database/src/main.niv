@@ -98,4 +98,46 @@ gives QueryPage or String
     give QueryPage.from_json with { source set source }
 }
 
-expose { PoolConfig, DriverRequest, Migration, QueryPage, validate_pool, validate_request, validate_migrations, encode_request, decode_page }
+define open_driver
+takes {
+    configuration is String
+}
+gives NativeHandle or String
+needs Native within "database"
+{
+    when len(configuration) < 1 or len(configuration) > 1048576 {
+        give err("database driver configuration must contain 1 through 1048576 characters")
+    }
+    give perform std.host.open with { kind set "database" request set configuration }
+}
+
+define query_driver
+takes {
+    handle is NativeHandle
+    request is DriverRequest
+}
+gives QueryPage or String
+needs Native within "database"
+{
+    keep encoded set encode_request with { request set request } or give
+    keep response set perform std.host.call with { handle set handle name set "query" request set encoded } or give
+    give decode_page with { source set response }
+}
+
+define execute_driver
+takes {
+    handle is NativeHandle
+    request is DriverRequest
+}
+gives String or String
+needs Native within "database"
+{
+    keep checked set validate_request with { request set request } or give
+    when checked.operation != "execute" and checked.operation != "begin" and checked.operation != "commit" and checked.operation != "rollback" {
+        give err("database execute_driver requires an execute or transaction operation")
+    }
+    keep encoded set DriverRequest.to_json with { value set checked } or give
+    give perform std.host.call with { handle set handle name set checked.operation request set encoded }
+}
+
+expose { PoolConfig, DriverRequest, Migration, QueryPage, validate_pool, validate_request, validate_migrations, encode_request, decode_page, open_driver, query_driver, execute_driver }

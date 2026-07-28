@@ -29,6 +29,18 @@ Unattended Windows install with recommended choices:
 .\install.ps1 -Yes
 ```
 
+Every successful install writes `install-receipt.json`, retains the previous verified version, and keeps the stable command pointed at the active version. Roll back without downloading or deleting either version:
+
+```sh
+sh install.sh --rollback
+```
+
+```powershell
+.\install.ps1 -Rollback
+```
+
+Rollback swaps the current and previous receipts, so repeating it restores the version that was replaced. It refuses missing ownership markers, malformed receipts, and absent binaries. Installing an explicit version remains available through `--version VERSION` or `-Version VERSION`.
+
 Remove an installer-managed copy safely:
 
 ```sh
@@ -39,6 +51,6 @@ sh install.sh --uninstall
 .\install.ps1 -Uninstall
 ```
 
-Uninstall only removes a directory carrying Nivren's ownership marker. It also removes the stable command and the exact PATH entry created by the installer, while refusing home directories, filesystem roots, symbolic links, and Windows reparse points.
+Uninstall only removes a directory carrying Nivren's ownership marker. It also removes the stable command and the exact PATH entry created by the installer, while refusing home directories, filesystem roots, symbolic links, and Windows reparse points. Uninstall removes all locally retained versions and receipts; copy anything needed for incident analysis first.
 
 Use `--help` on macOS/Linux or `Get-Help .\install.ps1 -Detailed` on Windows for automation controls. The manual archives remain available for users who do not want an installer to update their profile or user PATH.

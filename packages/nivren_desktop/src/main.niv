@@ -76,4 +76,41 @@ gives UpdateManifest or String
     give ok(update)
 }
 
-expose { Window, BridgeMessage, UpdateManifest, validate_window, encode_message, validate_update }
+define open_host
+takes {
+    window is Window
+}
+gives NativeHandle or String
+needs Native within "desktop"
+{
+    keep checked set validate_window with { window set window } or give
+    keep request set Window.to_json with { value set checked } or give
+    give perform std.host.open with { kind set "desktop" request set request }
+}
+
+define send_bridge
+takes {
+    handle is NativeHandle
+    message is BridgeMessage
+}
+gives String or String
+needs Native within "desktop"
+{
+    keep request set encode_message with { message set message } or give
+    give perform std.host.call with { handle set handle name set "bridge" request set request }
+}
+
+define stage_update
+takes {
+    handle is NativeHandle
+    update is UpdateManifest
+}
+gives String or String
+needs Native within "desktop"
+{
+    keep checked set validate_update with { update set update } or give
+    keep request set UpdateManifest.to_json with { value set checked } or give
+    give perform std.host.call with { handle set handle name set "stage_update" request set request }
+}
+
+expose { Window, BridgeMessage, UpdateManifest, validate_window, encode_message, validate_update, open_host, send_bridge, stage_update }

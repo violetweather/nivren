@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use nivren::runtime::Interpreter;
 
@@ -15,28 +15,47 @@ fn compile(source: &str) -> nivren::bytecode::Chunk {
     nivren::bytecode::compile(&program).unwrap()
 }
 
-fn median(mut run: impl FnMut()) -> Duration {
-    run();
-    let mut measurements = Vec::with_capacity(7);
-    for _ in 0..7 {
-        let started = Instant::now();
-        run();
-        measurements.push(started.elapsed());
-    }
-    measurements.sort();
-    measurements[measurements.len() / 2]
-}
-
 fn compare(name: &str, direct: &str, intent: &str) -> f64 {
+    const WARMUP_PAIRS: usize = 3;
+    const MEASURED_PAIRS: usize = 15;
     let direct = compile(direct);
     let intent = compile(intent);
-    let direct_time = median(|| {
-        Interpreter::new().run_bytecode(&direct).unwrap();
-    });
-    let intent_time = median(|| {
-        Interpreter::new().run_bytecode(&intent).unwrap();
-    });
-    let ratio = intent_time.as_secs_f64() / direct_time.as_secs_f64();
+    let run = |chunk: &nivren::bytecode::Chunk| {
+        let started = Instant::now();
+        Interpreter::new().run_bytecode(chunk).unwrap();
+        started.elapsed()
+    };
+    for index in 0..WARMUP_PAIRS {
+        if index % 2 == 0 {
+            run(&direct);
+            run(&intent);
+        } else {
+            run(&intent);
+            run(&direct);
+        }
+    }
+    let mut direct_measurements = Vec::with_capacity(MEASURED_PAIRS);
+    let mut intent_measurements = Vec::with_capacity(MEASURED_PAIRS);
+    for index in 0..MEASURED_PAIRS {
+        if index % 2 == 0 {
+            direct_measurements.push(run(&direct));
+            intent_measurements.push(run(&intent));
+        } else {
+            intent_measurements.push(run(&intent));
+            direct_measurements.push(run(&direct));
+        }
+    }
+    let mut paired_ratios = direct_measurements
+        .iter()
+        .zip(&intent_measurements)
+        .map(|(direct, intent)| intent.as_secs_f64() / direct.as_secs_f64())
+        .collect::<Vec<_>>();
+    direct_measurements.sort_unstable();
+    intent_measurements.sort_unstable();
+    paired_ratios.sort_by(f64::total_cmp);
+    let direct_time = direct_measurements[MEASURED_PAIRS / 2];
+    let intent_time = intent_measurements[MEASURED_PAIRS / 2];
+    let ratio = paired_ratios[MEASURED_PAIRS / 2];
     let allocation_work = |chunk: &nivren::bytecode::Chunk| {
         let mut interpreter = Interpreter::new();
         interpreter.enable_metrics();
@@ -106,14 +125,16 @@ fn main() {
     let file_ratio = compare("files", &direct_file, &intent_file);
     fs::remove_file(&file).unwrap();
 
-    let http_runs = 8 * 7;
+    const HTTP_REQUESTS_PER_RUN: usize = 24;
+    const HTTP_RUNS: usize = (3 + 15) * HTTP_REQUESTS_PER_RUN;
+    let http_runs = HTTP_RUNS;
     let (direct_url, direct_server) = local_http_server(http_runs);
     let direct_http = format!(
-        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < 7 {{ keep body set std.http.get with {{ url set \"{direct_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nwork with {{}}"
+        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set std.http.get with {{ url set \"{direct_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nwork with {{}}"
     );
     let (intent_url, intent_server) = local_http_server(http_runs);
     let intent_http = format!(
-        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < 7 {{ keep body set perform std.http.get with {{ url set \"{intent_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nperform work with {{}}"
+        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set perform std.http.get with {{ url set \"{intent_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nperform work with {{}}"
     );
     let http_ratio = compare("http", &direct_http, &intent_http);
     direct_server.join().unwrap();

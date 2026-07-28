@@ -43,6 +43,8 @@ fn main() -> ExitCode {
         [command, path] if command == "dev" => run_project(path),
         [command] if command == "ship" => ship_project("."),
         [command, path] if command == "ship" => ship_project(path),
+        [command, action] if command == "workspace" => workspace_action(action, "."),
+        [command, action, path] if command == "workspace" => workspace_action(action, path),
         [command, path] if command == "check" => check_file(path),
         [command] if command == "build" => build_project("."),
         [command, flag] if command == "build" && flag == "--standalone" => build_standalone("."),
@@ -849,6 +851,47 @@ fn ship_project(path: &str) -> ExitCode {
         return packaged;
     }
     build_standalone(path)
+}
+
+fn workspace_action(action: &str, path: &str) -> ExitCode {
+    let workspace = match nivren::workspace::Workspace::load(Path::new(path)) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    if !matches!(action, "check" | "build" | "test" | "bench" | "ship") {
+        eprintln!("error: workspace action must be check, build, test, bench, or ship");
+        return ExitCode::from(64);
+    }
+    for member in &workspace.members {
+        let member_path = member.root.display().to_string();
+        println!("workspace {action}: {}", member.name);
+        let result = match action {
+            "check" => check_project(&member_path, false),
+            "build" => build_project(&member_path),
+            "test" => {
+                let tests = member.root.join("tests/niv");
+                if tests.exists() {
+                    test_path(&tests.display().to_string(), None)
+                } else {
+                    check_project(&member_path, false)
+                }
+            }
+            "bench" => benchmark_path(&member_path, None),
+            "ship" => ship_project(&member_path),
+            _ => unreachable!(),
+        };
+        if result != ExitCode::SUCCESS {
+            return result;
+        }
+    }
+    println!(
+        "workspace {action}: {} member(s) passed",
+        workspace.members.len()
+    );
+    ExitCode::SUCCESS
 }
 
 fn package_project(path: &str) -> ExitCode {
@@ -2300,7 +2343,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");

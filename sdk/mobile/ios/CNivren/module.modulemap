@@ -1,0 +1,4 @@
+module CNivren [system] {
+    header "../../../../crates/nivren-ffi/include/nivren.h"
+    export *
+}

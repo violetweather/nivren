@@ -8,6 +8,7 @@ ADD_PATH=ask
 VSCODE=ask
 ASSUME_YES=0
 UNINSTALL=0
+ROLLBACK=0
 
 usage() {
   cat <<'EOF'
@@ -16,6 +17,7 @@ Nivren installer
 Usage: install.sh [options]
   --version VERSION       Install a specific release (default: 0.10.0-beta.6)
   --uninstall             Remove a Nivren installation owned by this installer
+  --rollback              Switch back to the previously verified installed version
   --install-root PATH     Keep versions and documentation here
   --bin-dir PATH          Put the stable niv command here
   --yes                   Accept recommended choices without prompting
@@ -30,6 +32,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) [ "$#" -ge 2 ] || { echo "missing value for --version" >&2; exit 64; }; VERSION=$2; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
+    --rollback) ROLLBACK=1; shift ;;
     --install-root) [ "$#" -ge 2 ] || { echo "missing value for --install-root" >&2; exit 64; }; INSTALL_ROOT=$2; shift 2 ;;
     --bin-dir) [ "$#" -ge 2 ] || { echo "missing value for --bin-dir" >&2; exit 64; }; BIN_DIR=$2; shift 2 ;;
     --yes) ASSUME_YES=1; shift ;;
@@ -45,7 +48,9 @@ case "$VERSION" in
   ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) echo "invalid version: $VERSION" >&2; exit 64 ;;
 esac
 case "$INSTALL_ROOT$BIN_DIR" in *"
-"*|*"'"*) echo "install paths cannot contain newlines or single quotes" >&2; exit 64 ;; esac
+"*|*"'"*|*'"'*) echo "install paths cannot contain newlines or quotes" >&2; exit 64 ;; esac
+
+[ "$UNINSTALL" -eq 0 ] || [ "$ROLLBACK" -eq 0 ] || { echo "--uninstall and --rollback cannot be combined" >&2; exit 64; }
 
 if [ "$UNINSTALL" -eq 1 ]; then
   [ -n "$INSTALL_ROOT" ] || { echo "refusing an empty install root" >&2; exit 65; }
@@ -71,6 +76,28 @@ if [ "$UNINSTALL" -eq 1 ]; then
   fi
   rm -rf "$resolved_root"
   echo "Nivren was uninstalled."
+  exit 0
+fi
+
+if [ "$ROLLBACK" -eq 1 ]; then
+  marker="$INSTALL_ROOT/.nivren-install-root"
+  [ -f "$marker" ] || { echo "installation ownership marker is missing" >&2; exit 65; }
+  [ "$(cat "$marker")" = "nivren-managed-root-v1" ] || { echo "installation ownership marker is invalid" >&2; exit 65; }
+  [ -f "$INSTALL_ROOT/current-version" ] || { echo "current version receipt is missing" >&2; exit 65; }
+  [ -f "$INSTALL_ROOT/previous-version" ] || { echo "no previous Nivren version is available" >&2; exit 65; }
+  current=$(cat "$INSTALL_ROOT/current-version")
+  previous=$(cat "$INSTALL_ROOT/previous-version")
+  case "$current" in ""|*[!A-Za-z0-9._-]*) echo "current version receipt is invalid" >&2; exit 65 ;; esac
+  case "$previous" in ""|*[!A-Za-z0-9._-]*) echo "previous version receipt is invalid" >&2; exit 65 ;; esac
+  previous_binary="$INSTALL_ROOT/versions/$previous/bin/niv"
+  [ -x "$previous_binary" ] || { echo "previous Nivren binary is missing: $previous_binary" >&2; exit 65; }
+  mkdir -p "$BIN_DIR"
+  ln -sfn "$previous_binary" "$BIN_DIR/niv"
+  printf '%s\n' "$previous" > "$INSTALL_ROOT/current-version"
+  printf '%s\n' "$current" > "$INSTALL_ROOT/previous-version"
+  printf '{"format":1,"version":"%s","previous":"%s","platform":"local-rollback"}\n' "$previous" "$current" > "$INSTALL_ROOT/install-receipt.json"
+  "$BIN_DIR/niv" version
+  echo "Rolled back Nivren from $current to $previous."
   exit 0
 fi
 
@@ -133,6 +160,11 @@ source_root="$temporary/unpacked/nivren-v${VERSION}-${platform}-${machine}"
 
 version_root="$INSTALL_ROOT/versions/$VERSION"
 mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR"
+previous_version=""
+if [ -f "$INSTALL_ROOT/current-version" ]; then
+  previous_version=$(cat "$INSTALL_ROOT/current-version")
+  case "$previous_version" in ""|*[!A-Za-z0-9._-]*) echo "current version receipt is invalid" >&2; exit 65 ;; esac
+fi
 staging="$INSTALL_ROOT/versions/.${VERSION}.new.$$"
 rm -rf "$staging"
 cp -R "$source_root" "$staging"
@@ -140,7 +172,11 @@ rm -rf "$version_root"
 mv "$staging" "$version_root"
 ln -sfn "$version_root/bin/niv" "$BIN_DIR/niv"
 printf '%s\n' "$VERSION" > "$INSTALL_ROOT/current-version"
+if [ -n "$previous_version" ] && [ "$previous_version" != "$VERSION" ]; then
+  printf '%s\n' "$previous_version" > "$INSTALL_ROOT/previous-version"
+fi
 printf '%s\n' "nivren-managed-root-v1" > "$INSTALL_ROOT/.nivren-install-root"
+printf '{"format":1,"version":"%s","previous":"%s","platform":"%s-%s","bin_dir":"%s"}\n' "$VERSION" "$previous_version" "$platform" "$machine" "$BIN_DIR" > "$INSTALL_ROOT/install-receipt.json"
 
 if [ "$ADD_PATH" = ask ]; then
   case ":$PATH:" in *":$BIN_DIR:"*) ADD_PATH=no ;; *) ADD_PATH=$(ask_yes_no "Add $BIN_DIR to your PATH? [Y/n]" yes) ;; esac

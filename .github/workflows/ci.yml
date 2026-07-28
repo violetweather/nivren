@@ -40,6 +40,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
       - run: cargo build --workspace --release --locked
+      - run: python tools/test_mobile_sdk.py
       - run: python tools/test_release_packager.py
       - run: cargo run --locked -- test
       - run: cargo run --locked -- check examples/getting_started.niv

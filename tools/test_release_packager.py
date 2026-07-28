@@ -54,6 +54,14 @@ class ReleasePackagerTests(unittest.TestCase):
                     "nivren-0.10.0-beta.6-linux-x64/crates/nivren-ffi/include/nivren.h",
                     names,
                 )
+                self.assertIn(
+                    "nivren-0.10.0-beta.6-linux-x64/sdk/mobile/ios/NivrenMobile.swift",
+                    names,
+                )
+                self.assertIn(
+                    "nivren-0.10.0-beta.6-linux-x64/sdk/mobile/android/nivren_mobile_jni.c",
+                    names,
+                )
                 self.assertTrue(
                     any("/licenses/rustls-0.23.42/" in name for name in names)
                 )

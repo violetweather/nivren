@@ -1,25 +1,204 @@
-shape Message { content: String }
+shape Message holds {
+    content is String
+} with Json, Compare, Display, Validate
 
-define message_body(content: String) gives Result<String, String> {
-    give std.json.stringify(Message(content))
+shape Command holds {
+    name is String
+    description is String
+} with Json, Compare, Display, Validate
+
+shape RetryPolicy holds {
+    maximum_attempts is Int
+    base_delay is Float
+    maximum_delay is Float
+} with Json, Compare, Display, Validate
+
+shape RetryDecision holds {
+    retry is Bool
+    delay is Float
+    reason is String
+} with Json, Compare, Display, Validate
+
+shape GatewayPlan holds {
+    endpoint is String
+    intents is Int
+    timeout is Float
+    maximum_message is Int
+} with Json, Compare, Display, Validate
+
+shape Identify holds {
+    token is String
+    intents is Int
+} with Json, Display, Validate
+
+shape GatewayEvent holds {
+    operation is Int
+    sequence is maybe Int
+    event is maybe String
+    data is String
+} with Json, Compare, Display, Validate
+
+define message_body
+takes {
+    content is String
+}
+gives String or String
+{
+    when len(content) < 1 or len(content) > 2000 {
+        give err("Discord message content must contain 1 through 2000 characters")
+    }
+    give Message.to_json with { value set Message with { content set content } }
 }
 
-define bot_headers(token: String) gives Map<String, String> {
-    keep authorization = std.map.single("Authorization", "Bot " + token)
-    give std.map.set(authorization, "Content-Type", "application/json")
+define bot_headers
+takes {
+    token is String
+}
+gives Map<String, String>
+{
+    keep authorization set std.map.single with { key set "Authorization" value set "Bot " + token }
+    give std.map.set with { map set authorization key set "Content-Type" value set "application/json" }
 }
 
-define send_message(token: String, channel_id: String, content: String) gives Result<String, String> needs Network {
-    keep body = message_body(content) or give
-    keep response = std.web.request(
-        "POST",
-        "https://discord.com/api/v10/channels/" + channel_id + "/messages",
-        bot_headers(token),
-        body,
-        10.0,
-        1048576
-    ) or give
-    give ok(std.map.get(response, "status") ?? "missing status")
+define validate_command
+takes {
+    command is Command
+}
+gives Command or String
+{
+    when len(command.name) < 1 or len(command.name) > 32 {
+        give err("Discord command name must contain 1 through 32 characters")
+    }
+    when len(command.description) < 1 or len(command.description) > 100 {
+        give err("Discord command description must contain 1 through 100 characters")
+    }
+    give ok(command)
 }
 
-expose { Message, message_body, bot_headers, send_message }
+define command_body
+takes {
+    command is Command
+}
+gives String or String
+{
+    keep checked set validate_command with { command set command } or give
+    give Command.to_json with { value set checked }
+}
+
+define validate_retry_policy
+takes {
+    policy is RetryPolicy
+}
+gives RetryPolicy or String
+{
+    when policy.maximum_attempts < 0 or policy.maximum_attempts > 16 {
+        give err("Discord retry maximum_attempts must be from 0 through 16")
+    }
+    when policy.base_delay < 0.0 or policy.base_delay > 60.0 or policy.maximum_delay < policy.base_delay or policy.maximum_delay > 300.0 {
+        give err("Discord retry delays are outside the supported bounds")
+    }
+    give ok(policy)
+}
+
+define retry_decision
+takes {
+    status is Int
+    attempt is Int
+    retry_after is Float
+    policy is RetryPolicy
+}
+gives RetryDecision or String
+{
+    keep checked set validate_retry_policy with { policy set policy } or give
+    when attempt < 0 {
+        give err("Discord retry attempt must not be negative")
+    }
+    when attempt >= checked.maximum_attempts {
+        give ok(RetryDecision with { retry set no delay set 0.0 reason set "attempt limit" })
+    }
+    when status == 429 {
+        when retry_after < 0.0 or retry_after > checked.maximum_delay {
+            give err("Discord retry_after is outside the policy ceiling")
+        }
+        give ok(RetryDecision with { retry set yes delay set retry_after reason set "rate limited" })
+    }
+    when status >= 500 and status <= 599 {
+        change delay set checked.base_delay
+        change index set 0
+        repeat while index < attempt {
+            change delay to delay * 2.0
+            change index to index + 1
+        }
+        when delay > checked.maximum_delay {
+            change delay to checked.maximum_delay
+        }
+        give ok(RetryDecision with { retry set yes delay set delay reason set "server failure" })
+    }
+    give ok(RetryDecision with { retry set no delay set 0.0 reason set "not retryable" })
+}
+
+define validate_gateway
+takes {
+    plan is GatewayPlan
+}
+gives GatewayPlan or String
+{
+    when !std.text.starts_with with { value set plan.endpoint prefix set "wss://" } {
+        give err("Discord Gateway endpoint must use wss://")
+    }
+    when plan.intents < 0 or plan.intents > 2147483647 {
+        give err("Discord Gateway intents are outside the supported bit range")
+    }
+    when plan.timeout <= 0.0 or plan.timeout > 300.0 or plan.maximum_message < 1 or plan.maximum_message > 16777216 {
+        give err("Discord Gateway timeout or message ceiling is invalid")
+    }
+    give ok(plan)
+}
+
+define identify_body
+takes {
+    token is String
+    intents is Int
+}
+gives String or String
+{
+    when len(token) < 1 or len(token) > 4096 or intents < 0 or intents > 2147483647 {
+        give err("Discord identify token or intents are invalid")
+    }
+    give Identify.to_json with { value set Identify with { token set token intents set intents } }
+}
+
+define decode_event
+takes {
+    source is String
+}
+gives GatewayEvent or String
+{
+    when len(source) > 16777216 {
+        give err("Discord Gateway event exceeds 16 MiB")
+    }
+    give GatewayEvent.from_json with { source set source }
+}
+
+define send_message
+takes {
+    token is String
+    channel_id is String
+    content is String
+}
+gives String or String
+needs Network within "discord.com"
+{
+    keep body set message_body with { content set content } or give
+    keep response set perform std.web.request with {
+        method set "POST"
+        url set "https://discord.com/api/v10/channels/" + channel_id + "/messages"
+        headers set bot_headers with { token set token }
+        body set body
+        timeout set 10.0
+        maximum set 1048576
+    } or give
+    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+}
+
+expose { Message, Command, RetryPolicy, RetryDecision, GatewayPlan, GatewayEvent, message_body, bot_headers, validate_command, command_body, validate_retry_policy, retry_decision, validate_gateway, identify_body, decode_event, send_message }

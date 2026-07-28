@@ -1,8 +1,30 @@
 use "../src/main.niv"
 
-keep body = main.message_body("hello \"Nivren\"")
-assert(body == ok("{\"content\":\"hello \\\"Nivren\\\"\"}"), "message JSON should escape content")
+define verify
+gives Bool or String
+{
+    keep body set main.message_body with { content set "hello \"Nivren\"" }
+    assert(body == ok("{\"content\":\"hello \\\"Nivren\\\"\"}"), "message JSON should escape content")
 
-keep headers = main.bot_headers("secret")
-assert(std.map.get(headers, "Authorization") == "Bot secret", "authorization header")
-assert(std.map.get(headers, "Content-Type") == "application/json", "content type")
+    keep headers set main.bot_headers with { token set "secret" }
+    assert(std.map.get with { map set headers key set "Authorization" } == "Bot secret", "authorization header")
+    assert(std.map.get with { map set headers key set "Content-Type" } == "application/json", "content type")
+
+    keep command set main.Command with { name set "status" description set "Show service status" }
+    keep encoded_command set main.command_body with { command set command } or give
+    assert(std.text.starts_with with { value set encoded_command prefix set "{" }, "command JSON")
+
+    keep policy set main.RetryPolicy with { maximum_attempts set 4 base_delay set 0.5 maximum_delay set 8.0 }
+    keep limited set main.retry_decision with { status set 429 attempt set 1 retry_after set 2.0 policy set policy } or give
+    assert(limited.retry and limited.delay == 2.0, "rate limit retry")
+    keep server set main.retry_decision with { status set 503 attempt set 2 retry_after set 0.0 policy set policy } or give
+    assert(server.retry and server.delay == 2.0, "bounded exponential retry")
+
+    keep gateway set main.GatewayPlan with { endpoint set "wss://gateway.discord.gg" intents set 513 timeout set 30.0 maximum_message set 1048576 }
+    assert(main.validate_gateway with { plan set gateway } == ok(gateway), "secure bounded Gateway")
+    keep event set main.decode_event with { source set "{\"operation\":0,\"sequence\":42,\"event\":\"READY\",\"data\":\"{}\"}" } or give
+    assert(event.event == "READY" and event.sequence == 42, "typed Gateway event")
+    give ok(yes)
+}
+
+verify with {}

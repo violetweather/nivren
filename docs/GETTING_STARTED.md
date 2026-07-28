@@ -23,7 +23,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 Use `--yes` on macOS/Linux or `-Yes` on Windows for recommended unattended choices. Until the next release is published, these URLs install the last public build rather than the local Edition 3 work described here.
 
-The installer writes a private ownership marker before it will remove anything. Uninstall with `sh install.sh --uninstall` on macOS/Linux or `.\install.ps1 -Uninstall` on Windows. The Unix flow removes only its verified managed command link and the exact PATH block it recorded; both installers refuse an unmarked or unsafe root.
+The installer writes a private ownership marker and `install-receipt.json`, retains the previously verified version, and updates one stable command. Roll back locally with `sh install.sh --rollback` on macOS/Linux or `.\install.ps1 -Rollback` on Windows. Uninstall with `--uninstall` or `-Uninstall`; the Unix flow removes only its verified managed command link and exact recorded PATH block, and both installers refuse an unmarked or unsafe root.
 
 ## Create a project
 
@@ -118,6 +118,17 @@ niv install /path/to/registry
 Dependencies use exact versions and checksum-pinned lockfiles. Import the installed entry module with `use "@text_utils"`.
 
 Once those dependencies are cached, `niv install --offline .` verifies and relocks them without network access. `niv bench .` runs two warmups and fifteen isolated VM samples and reports minimum, median, and p95; add `--json report.json` for the stable `org.nivren.benchmark.v1` schema.
+
+## Work across packages
+
+Put a strict `niv-workspace.toml` at the shared root. Members are normalized relative paths, limited to 256, and processed in the explicit listed order:
+
+```toml
+[workspace]
+members = "packages/core, services/api, apps/desktop"
+```
+
+Run `niv workspace check`, `build`, `test`, `bench`, or `ship`. Each member retains its own exact manifest, authority policy, dependency lock, artifacts, and incremental fingerprint. A repeated build reports members as fresh when neither their sources nor compiler/package inputs changed; the workspace never merges permissions or silently creates package dependencies.
 
 ## Editor and help
 

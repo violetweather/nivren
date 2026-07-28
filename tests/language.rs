@@ -2264,6 +2264,58 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
 }
 
 #[test]
+fn workspace_commands_build_test_and_reuse_incremental_members() {
+    let root = module_fixture("workspace-commands");
+    for name in ["core", "app"] {
+        let member = root.join(name);
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::create_dir_all(member.join("tests/niv")).unwrap();
+        fs::write(
+            member.join("niv.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(member.join("src/main.niv"), "42").unwrap();
+        fs::write(
+            member.join("tests/niv/value_test.niv"),
+            "assert(6 * 7 == 42, \"workspace member\")",
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.join("niv-workspace.toml"),
+        "[workspace]\nmembers = \"core, app\"\n",
+    )
+    .unwrap();
+    let niv = env!("CARGO_BIN_EXE_niv");
+    for action in ["build", "build", "test"] {
+        let output = Command::new(niv)
+            .args(["workspace", action, root.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "workspace {action} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if action == "build" {
+            assert!(String::from_utf8_lossy(&output.stdout).contains(
+                if root.join("core/target/.nivren-fingerprint").exists() {
+                    "core"
+                } else {
+                    "built"
+                }
+            ));
+        }
+    }
+    assert!(root.join("core/target/core.nivb").is_file());
+    assert!(root.join("app/target/app.nivb").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn registry_dependencies_install_lock_import_and_detect_tampering() {
     let directory = module_fixture("dependencies");
     let dependency_root = directory.join("answerlib");
