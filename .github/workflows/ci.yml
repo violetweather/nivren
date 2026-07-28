@@ -111,7 +111,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes valgrind
           cargo build --bin niv --locked
-          valgrind --error-exitcode=1 --leak-check=full target/debug/niv run --native proofs/edition4/intent_snapshot.niv
+          valgrind \
+            --error-exitcode=1 \
+            --leak-check=full \
+            --show-leak-kinds=definite,indirect \
+            --errors-for-leak-kinds=definite,indirect \
+            target/debug/niv run --native proofs/edition4/intent_snapshot.niv
 
   wasm:
     name: WebAssembly host and guest
