@@ -3,9 +3,13 @@ use std::fmt::{Debug, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(feature = "host-runtime")]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+#[cfg(feature = "host-runtime")]
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
@@ -26,7 +30,7 @@ use csv::{
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use flate2::Compression;
 #[cfg(feature = "host-runtime")]
-use nivren_jit::{CallError as JitCallError, CompiledFunction};
+use nivren_jit::{CallError as JitCallError, CompiledFunction, CompiledTrace};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -903,6 +907,12 @@ pub struct Interpreter {
     event_loop: Arc<RuntimeEventLoop>,
     protocol_dispatch: HashMap<(String, String, String), Value>,
     fast_frames: Vec<FastFrame>,
+    native_execution_depth: usize,
+    native_compilations: usize,
+    native_executions: usize,
+    native_fallbacks: usize,
+    #[cfg(feature = "host-runtime")]
+    native_traces: HashMap<usize, Arc<CompiledTrace>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -950,6 +960,13 @@ pub struct JitStats {
     pub executions: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeStats {
+    pub compilations: usize,
+    pub executions: usize,
+    pub fallbacks: usize,
+}
+
 enum Flow {
     Continue(Value),
     Return(Value),
@@ -957,6 +974,11 @@ enum Flow {
 
 enum VmFlow {
     Continue(Value),
+    Return(Value),
+}
+
+enum BytecodeStep {
+    Next(usize),
     Return(Value),
 }
 
@@ -1052,6 +1074,12 @@ impl Interpreter {
             event_loop: Arc::new(RuntimeEventLoop::default()),
             protocol_dispatch: HashMap::new(),
             fast_frames: Vec::new(),
+            native_execution_depth: 0,
+            native_compilations: 0,
+            native_executions: 0,
+            native_fallbacks: 0,
+            #[cfg(feature = "host-runtime")]
+            native_traces: HashMap::new(),
         }
     }
 
@@ -1172,6 +1200,34 @@ impl Interpreter {
         result
     }
 
+    /// Executes every verified chunk through Cranelift native control traces.
+    /// Unsupported native compilation is a checked error; this entry point
+    /// never redirects execution to the bytecode loop.
+    #[cfg(feature = "host-runtime")]
+    pub fn run_native(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
+        crate::bytecode::verify(chunk)?;
+        if self.native_execution_depth != 0 {
+            return Err(NivError::new(
+                "native execution cannot be re-entered through the public entry point",
+                1,
+                1,
+            ));
+        }
+        self.native_execution_depth = 1;
+        let execution = self.execute_chunk_native(chunk);
+        self.native_execution_depth = 0;
+        let result = match execution? {
+            VmFlow::Continue(value) => Ok(value),
+            VmFlow::Return(_) => Err(NivError::new(
+                "give may only appear inside a function",
+                1,
+                1,
+            )),
+        };
+        self.collect(&[]);
+        result
+    }
+
     pub fn reset_to_globals(&mut self) {
         self.environment = self.globals.clone();
         self.collect(&[]);
@@ -1228,6 +1284,14 @@ impl Interpreter {
         JitStats {
             compilations: self.jit_compilations,
             executions: self.jit_executions,
+        }
+    }
+
+    pub fn native_stats(&self) -> NativeStats {
+        NativeStats {
+            compilations: self.native_compilations,
+            executions: self.native_executions,
+            fallbacks: self.native_fallbacks,
         }
     }
 
@@ -2532,6 +2596,7 @@ impl Interpreter {
         let worker_host = self.host_callback.clone();
         let worker_call_depth_limit = self.max_call_depth;
         let worker_event_loop = self.event_loop.clone();
+        let worker_native = self.native_execution_depth > 0;
         let mut inherited_cancellations = self.inherited_cancellations.clone();
         if let Some(cancellation) = &self.cancellation {
             inherited_cancellations.push(cancellation.clone());
@@ -2548,6 +2613,7 @@ impl Interpreter {
             worker.event_loop = worker_event_loop;
             worker.cancellation = Some(worker_cancelled);
             worker.inherited_cancellations = inherited_cancellations;
+            worker.native_execution_depth = usize::from(worker_native);
             let value = worker.call(function, vec![], span)?;
             if transferable(&value) {
                 Ok(value)
@@ -3116,379 +3182,490 @@ impl Interpreter {
         )
     }
 
+    #[cfg(feature = "host-runtime")]
+    fn execute_chunk_native(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
+        let instruction_count = chunk.code.len();
+        let trace = if let Some(trace) = self.native_traces.get(&instruction_count) {
+            trace.clone()
+        } else {
+            let trace = Arc::new(
+                CompiledTrace::compile(instruction_count).map_err(|message| {
+                    NivError::new(format!("native trace compilation failed: {message}"), 1, 1)
+                })?,
+            );
+            self.native_traces.insert(instruction_count, trace.clone());
+            self.native_compilations = self.native_compilations.saturating_add(1);
+            trace
+        };
+        self.native_executions = self.native_executions.saturating_add(1);
+        let mut stack = Vec::new();
+        let mut outcome = None;
+        let status = trace.run_with(&mut |program_counter| {
+            if outcome.is_some() {
+                return -3;
+            }
+            let step = catch_unwind(AssertUnwindSafe(
+                || -> Result<(i64, Option<VmFlow>), NivError> {
+                    let mut instruction = usize::try_from(program_counter)
+                        .map_err(|_| NivError::new("native program counter overflow", 1, 1))?;
+                    // Keep value operations in a bounded helper region so hot
+                    // loops do not cross the native ABI once per instruction.
+                    // Each operation still passes through the ordinary checked
+                    // step, preserving cancellation, budgets, diagnostics,
+                    // effects, cleanup, and debug/metric ordering.
+                    for _ in 0..256 {
+                        let item = chunk.code.get(instruction).ok_or_else(|| {
+                            NivError::new(
+                                format!("native trace selected invalid instruction {instruction}"),
+                                1,
+                                1,
+                            )
+                        })?;
+                        match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
+                            BytecodeStep::Next(next) if next < chunk.code.len() => {
+                                instruction = next;
+                            }
+                            BytecodeStep::Next(next) if next == chunk.code.len() => {
+                                return Ok((
+                                    -1,
+                                    Some(VmFlow::Continue(stack.pop().unwrap_or(Value::Null))),
+                                ));
+                            }
+                            BytecodeStep::Next(next) => {
+                                return Err(NivError::new(
+                                    format!(
+                                        "native trace jumped beyond bytecode to instruction {next}"
+                                    ),
+                                    item.span.line,
+                                    item.span.column,
+                                ));
+                            }
+                            BytecodeStep::Return(value) => {
+                                return Ok((-2, Some(VmFlow::Return(value))));
+                            }
+                        }
+                    }
+                    let next = i64::try_from(instruction)
+                        .map_err(|_| NivError::new("native next-instruction overflow", 1, 1))?;
+                    Ok((next, None))
+                },
+            ));
+            match step {
+                Ok(Ok((status, result))) => {
+                    if let Some(result) = result {
+                        outcome = Some(Ok(result));
+                    }
+                    status
+                }
+                Ok(Err(error)) => {
+                    outcome = Some(Err(error));
+                    -3
+                }
+                Err(_) => {
+                    outcome = Some(Err(NivError::new("native runtime helper panicked", 1, 1)));
+                    -3
+                }
+            }
+        });
+        match outcome.take() {
+            Some(outcome) => outcome,
+            None => Err(NivError::new(
+                format!("native trace stopped with status {status} without a runtime outcome"),
+                1,
+                1,
+            )),
+        }
+    }
+
     fn execute_chunk(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
+        #[cfg(feature = "host-runtime")]
+        if self.native_execution_depth > 0 {
+            return self.execute_chunk_native(chunk);
+        }
+        self.execute_chunk_vm(chunk)
+    }
+
+    fn execute_chunk_vm(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
         let mut stack = Vec::new();
         let mut instruction = 0usize;
         while instruction < chunk.code.len() {
-            if self.is_cancelled() {
-                return Err(NivError::new("task cancelled", 1, 1));
+            match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
+                BytecodeStep::Next(next) => instruction = next,
+                BytecodeStep::Return(value) => return Ok(VmFlow::Return(value)),
             }
-            let item = &chunk.code[instruction];
-            self.charge(item.span)?;
-            if self.debug_hook.is_some() {
-                let event = DebugEvent {
-                    instruction,
-                    line: item.span.line,
-                    column: item.span.column,
-                    operation: operation_name(&item.op).into(),
-                    stack_depth: stack.len(),
-                    variables: self.debug_variables(),
-                };
-                if self
-                    .debug_hook
-                    .as_mut()
-                    .is_some_and(|hook| hook(&event) == DebugControl::Terminate)
-                {
-                    return Err(NivError::new(
-                        DEBUGGER_TERMINATED,
-                        item.span.line,
-                        item.span.column,
-                    ));
-                }
-            }
-            if let Some(metrics) = &self.metrics {
-                let mut metrics = metrics.lock().unwrap();
-                metrics.instructions = metrics.instructions.saturating_add(1);
-                let line_hits = metrics.line_hits.entry(item.span.line).or_default();
-                *line_hits = line_hits.saturating_add(1);
-                let operation_hits = metrics
-                    .operation_hits
-                    .entry(operation_name(&item.op).into())
-                    .or_default();
-                *operation_hits = operation_hits.saturating_add(1);
-            }
-            match &item.op {
-                Op::Constant(literal) => stack.push(match literal {
-                    Literal::Int(value) => Value::Int(*value),
-                    Literal::Float(value) => Value::Float(*value),
-                    Literal::String(value) => Value::String(value.clone()),
-                    Literal::Bool(value) => Value::Bool(*value),
-                    Literal::Null => Value::Null,
-                }),
-                Op::Load(name) => stack.push(
-                    self.load_fast(instruction)
-                        .or_else(|| self.lookup(name))
-                        .ok_or_else(|| {
-                            NivError::new(
-                                format!("undefined name '{name}'"),
-                                item.span.line,
-                                item.span.column,
-                            )
-                        })?,
-                ),
-                Op::Store(name) => {
-                    let value = stack.last().cloned().unwrap();
-                    if !self.assign_fast(instruction, name, value.clone(), item.span)? {
-                        assign(&self.environment, name, value, item.span)?;
-                    }
-                }
-                Op::Define { name, mutable } => {
-                    let value = stack.last().cloned().unwrap();
-                    if self.define_fast(instruction, value.clone(), *mutable) {
-                        instruction += 1;
-                        continue;
-                    }
-                    let replaced = self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: *mutable,
-                        },
-                    );
-                    if replaced.is_some() {
-                        return Err(NivError::new(
-                            format!("'{name}' is already declared in this scope"),
-                            item.span.line,
-                            item.span.column,
-                        ));
-                    }
-                }
-                Op::Pop => {
-                    stack.pop();
-                }
-                Op::Unary(operator) => {
-                    let value = stack.pop().unwrap();
-                    stack.push(match operator {
-                        TokenKind::Minus => negate(value, item.span)?,
-                        TokenKind::Bang => Value::Bool(!expect_bool(value, item.span)?),
-                        _ => unreachable!(),
-                    });
-                }
-                Op::Binary(operator) => {
-                    let right = stack.pop().unwrap();
-                    let left = stack.pop().unwrap();
-                    stack.push(match (left, right) {
-                        (Value::Int(a), Value::Int(b)) => vm_int_binary(a, operator, b, item.span)?,
-                        (left, right) => self.binary(left, operator, right, item.span)?,
-                    });
-                }
-                Op::Jump(target) => {
-                    self.maybe_collect(&stack);
-                    instruction = *target;
-                    continue;
-                }
-                Op::JumpIfFalse(target) => {
-                    if !expect_bool(stack.last().cloned().unwrap(), item.span)? {
-                        self.maybe_collect(&stack);
-                        instruction = *target;
-                        continue;
-                    }
-                }
-                Op::Call(arity) => {
-                    let argument_start = stack.len() - arity;
-                    let callee_index = argument_start - 1;
-                    if let Value::Function(function) = &stack[callee_index] {
-                        let value =
-                            self.call_function(function, &stack[argument_start..], item.span)?;
-                        stack.truncate(callee_index);
-                        stack.push(value);
-                        instruction += 1;
-                        continue;
-                    }
-                    let arguments = stack.split_off(stack.len() - arity);
-                    let callee = stack.pop().unwrap();
-                    stack.push(self.call(callee, arguments, item.span)?);
-                }
-                Op::PerformCall(arity) => {
-                    if let Some(metrics) = &self.metrics {
-                        let mut metrics = metrics.lock().unwrap();
-                        metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
-                    }
-                    let argument_start = stack.len() - arity;
-                    let callee_index = argument_start - 1;
-                    if let Value::Function(function) = &stack[callee_index] {
-                        let value =
-                            self.call_function(function, &stack[argument_start..], item.span)?;
-                        stack.truncate(callee_index);
-                        stack.push(value);
-                        instruction += 1;
-                        continue;
-                    }
-                    let arguments = stack.split_off(stack.len() - arity);
-                    let callee = stack.pop().unwrap();
-                    stack.push(self.call(callee, arguments, item.span)?);
-                }
-                Op::MakeArray(length) => {
-                    let values = stack.split_off(stack.len() - length);
-                    stack.push(Value::Array(Arc::new(values)));
-                }
-                Op::Index => {
-                    let index = expect_index(stack.pop().unwrap(), item.span)?;
-                    let collection = stack.pop().unwrap();
-                    stack.push(index_value(collection, index, item.span)?);
-                }
-                Op::Coalesce(target) => {
-                    if stack.last().is_some_and(|value| value != &Value::Null) {
-                        self.maybe_collect(&stack);
-                        instruction = *target;
-                        continue;
-                    }
-                }
-                Op::Propagate => match stack.pop().unwrap() {
-                    Value::Ok(value) => stack.push(value.as_ref().clone()),
-                    Value::Err(value) => return Ok(VmFlow::Return(Value::Err(value))),
-                    other => {
-                        return Err(NivError::new(
-                            format!("or give needs a Result, found {}", other.type_name()),
-                            item.span.line,
-                            item.span.column,
-                        ));
-                    }
-                },
-                Op::Get(name) => {
-                    let object = stack.pop().unwrap();
-                    stack.push(get_value(object, name, item.span)?);
-                }
-                Op::Print => {
-                    println!("{}", stack.pop().unwrap());
-                    stack.push(Value::Null);
-                }
-                Op::EnterScope => {
-                    if self
-                        .fast_frames
-                        .last()
-                        .is_none_or(|frame| frame.plan.is_none())
-                    {
-                        self.environment = self.child_scope(self.environment.clone());
-                    }
-                }
-                Op::ExitScope => {
-                    if self
-                        .fast_frames
-                        .last()
-                        .is_none_or(|frame| frame.plan.is_none())
-                    {
-                        let parent = self.environment.lock().unwrap().parent.clone().unwrap();
-                        self.environment = parent;
-                    }
-                }
-                Op::MakeFunction { name, params, body } => {
-                    stack.push(Value::Function(Arc::new(Function {
-                        name: name.clone(),
-                        params: params.clone(),
-                        body: FunctionBody::Bytecode(body.clone()),
-                        closure: self.environment.clone(),
-                        fast_slots: fast_local_slots(params, body),
-                        #[cfg(feature = "host-runtime")]
-                        jit: JitState::default(),
-                    })));
-                }
-                Op::Return => return Ok(VmFlow::Return(stack.pop().unwrap())),
-                Op::DefineRecord {
-                    name,
-                    fields,
-                    derives,
-                } => {
-                    let type_name = self.qualified(name);
-                    let mut catalog = record_catalog(&self.environment);
-                    catalog.insert(type_name.clone(), fields.clone());
-                    let choices = choice_catalog(&self.environment);
-                    let value = Value::RecordType(Arc::new(RecordType {
-                        name: type_name,
-                        field_indices: record_field_indices(fields),
-                        fields: fields.clone(),
-                        derives: derives.clone(),
-                        catalog,
-                        choices,
-                    }));
-                    self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value: value.clone(),
-                            mutable: false,
-                        },
-                    );
-                    stack.push(value);
-                }
-                Op::DefineEnum {
-                    name,
-                    variants,
-                    payload_variants,
-                } => {
-                    let value = Value::EnumType(Arc::new(EnumType {
-                        name: self.qualified(name),
-                        variants: variants.clone(),
-                        payload_variants: payload_variants.iter().cloned().collect(),
-                    }));
-                    self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value: value.clone(),
-                            mutable: false,
-                        },
-                    );
-                    stack.push(value);
-                }
-                Op::DefineProtocol { name, members } => {
-                    let value = Value::ProtocolType(Arc::new(ProtocolType {
-                        name: self.qualified(name),
-                        members: members.clone(),
-                    }));
-                    self.environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value: value.clone(),
-                            mutable: false,
-                        },
-                    );
-                    stack.push(value);
-                }
-                Op::AdoptProtocol {
-                    protocol,
-                    type_name,
-                    mappings,
-                } => {
-                    let protocol_name = match self.lookup(protocol) {
-                        Some(Value::ProtocolType(protocol)) => protocol.name.clone(),
-                        _ => self.qualified(protocol),
-                    };
-                    let base = type_name.split('<').next().unwrap_or(type_name).to_string();
-                    let qualified = self.qualified(&base);
-                    for (member, implementation_name) in mappings {
-                        let implementation = self.lookup(implementation_name).ok_or_else(|| {
-                            NivError::new(
-                                format!("unknown protocol implementation '{implementation_name}'"),
-                                item.span.line,
-                                item.span.column,
-                            )
-                        })?;
-                        for adopted_name in [&base, &qualified] {
-                            self.protocol_dispatch.insert(
-                                (protocol_name.clone(), member.clone(), adopted_name.clone()),
-                                implementation.clone(),
-                            );
-                        }
-                    }
-                    stack.push(if mappings.is_empty() {
-                        Value::Null
-                    } else {
-                        Value::Bool(true)
-                    });
-                }
-                Op::Prepare(_) => {
-                    if let Some(metrics) = &self.metrics {
-                        let mut metrics = metrics.lock().unwrap();
-                        metrics.plan_allocations = metrics.plan_allocations.saturating_add(1);
-                    }
-                }
-                Op::Perform => {
-                    if let Some(metrics) = &self.metrics {
-                        let mut metrics = metrics.lock().unwrap();
-                        metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
-                    }
-                }
-                Op::Match(arms) => {
-                    let subject = stack.pop().unwrap();
-                    match self.execute_bytecode_match(subject, arms, item.span)? {
-                        VmFlow::Continue(value) => stack.push(value),
-                        returned @ VmFlow::Return(_) => return Ok(returned),
-                    }
-                }
-                Op::DefineModule {
-                    name,
-                    body,
-                    exports,
-                } => {
-                    stack.push(self.execute_bytecode_module(name, body, exports, item.span)?);
-                }
-                Op::Iterate { name, body } => {
-                    let iterable = stack.pop().unwrap();
-                    match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
-                        VmFlow::Continue(value) => stack.push(value),
-                        returned @ VmFlow::Return(_) => return Ok(returned),
-                    }
-                }
-                Op::Using { name, body } => {
-                    let resource = stack.pop().unwrap();
-                    match self.execute_bytecode_using(name, resource, body, item.span)? {
-                        VmFlow::Continue(value) => stack.push(value),
-                        returned @ VmFlow::Return(_) => return Ok(returned),
-                    }
-                }
-            }
-            self.maybe_collect(&stack);
-            if matches!(
-                item.op,
-                Op::Constant(_)
-                    | Op::Binary(_)
-                    | Op::Call(_)
-                    | Op::PerformCall(_)
-                    | Op::MakeArray(_)
-                    | Op::Index
-                    | Op::Get(_)
-                    | Op::MakeFunction { .. }
-                    | Op::DefineRecord { .. }
-                    | Op::DefineEnum { .. }
-            ) && let Some(value) = stack.last()
-            {
-                self.charge_memory(value, item.span)?;
-            }
-            instruction += 1;
         }
         if self.is_cancelled() {
             return Err(NivError::new("task cancelled", 1, 1));
         }
         Ok(VmFlow::Continue(stack.pop().unwrap_or(Value::Null)))
+    }
+
+    fn execute_bytecode_step(
+        &mut self,
+        chunk: &Chunk,
+        stack: &mut Vec<Value>,
+        instruction: usize,
+    ) -> Result<BytecodeStep, NivError> {
+        if self.is_cancelled() {
+            return Err(NivError::new("task cancelled", 1, 1));
+        }
+        let item = &chunk.code[instruction];
+        self.charge(item.span)?;
+        if self.debug_hook.is_some() {
+            let event = DebugEvent {
+                instruction,
+                line: item.span.line,
+                column: item.span.column,
+                operation: operation_name(&item.op).into(),
+                stack_depth: stack.len(),
+                variables: self.debug_variables(),
+            };
+            if self
+                .debug_hook
+                .as_mut()
+                .is_some_and(|hook| hook(&event) == DebugControl::Terminate)
+            {
+                return Err(NivError::new(
+                    DEBUGGER_TERMINATED,
+                    item.span.line,
+                    item.span.column,
+                ));
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            let mut metrics = metrics.lock().unwrap();
+            metrics.instructions = metrics.instructions.saturating_add(1);
+            let line_hits = metrics.line_hits.entry(item.span.line).or_default();
+            *line_hits = line_hits.saturating_add(1);
+            let operation_hits = metrics
+                .operation_hits
+                .entry(operation_name(&item.op).into())
+                .or_default();
+            *operation_hits = operation_hits.saturating_add(1);
+        }
+        match &item.op {
+            Op::Constant(literal) => stack.push(match literal {
+                Literal::Int(value) => Value::Int(*value),
+                Literal::Float(value) => Value::Float(*value),
+                Literal::String(value) => Value::String(value.clone()),
+                Literal::Bool(value) => Value::Bool(*value),
+                Literal::Null => Value::Null,
+            }),
+            Op::Load(name) => stack.push(
+                self.load_fast(instruction)
+                    .or_else(|| self.lookup(name))
+                    .ok_or_else(|| {
+                        NivError::new(
+                            format!("undefined name '{name}'"),
+                            item.span.line,
+                            item.span.column,
+                        )
+                    })?,
+            ),
+            Op::Store(name) => {
+                let value = stack.last().cloned().unwrap();
+                if !self.assign_fast(instruction, name, value.clone(), item.span)? {
+                    assign(&self.environment, name, value, item.span)?;
+                }
+            }
+            Op::Define { name, mutable } => {
+                let value = stack.last().cloned().unwrap();
+                if self.define_fast(instruction, value.clone(), *mutable) {
+                    return Ok(BytecodeStep::Next(instruction + 1));
+                }
+                let replaced = self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value,
+                        mutable: *mutable,
+                    },
+                );
+                if replaced.is_some() {
+                    return Err(NivError::new(
+                        format!("'{name}' is already declared in this scope"),
+                        item.span.line,
+                        item.span.column,
+                    ));
+                }
+            }
+            Op::Pop => {
+                stack.pop();
+            }
+            Op::Unary(operator) => {
+                let value = stack.pop().unwrap();
+                stack.push(match operator {
+                    TokenKind::Minus => negate(value, item.span)?,
+                    TokenKind::Bang => Value::Bool(!expect_bool(value, item.span)?),
+                    _ => unreachable!(),
+                });
+            }
+            Op::Binary(operator) => {
+                let right = stack.pop().unwrap();
+                let left = stack.pop().unwrap();
+                stack.push(match (left, right) {
+                    (Value::Int(a), Value::Int(b)) => vm_int_binary(a, operator, b, item.span)?,
+                    (left, right) => self.binary(left, operator, right, item.span)?,
+                });
+            }
+            Op::Jump(target) => {
+                self.maybe_collect(stack);
+                return Ok(BytecodeStep::Next(*target));
+            }
+            Op::JumpIfFalse(target) => {
+                if !expect_bool(stack.last().cloned().unwrap(), item.span)? {
+                    self.maybe_collect(stack);
+                    return Ok(BytecodeStep::Next(*target));
+                }
+            }
+            Op::Call(arity) => {
+                let argument_start = stack.len() - arity;
+                let callee_index = argument_start - 1;
+                if let Value::Function(function) = &stack[callee_index] {
+                    let value =
+                        self.call_function(function, &stack[argument_start..], item.span)?;
+                    stack.truncate(callee_index);
+                    stack.push(value);
+                    return Ok(BytecodeStep::Next(instruction + 1));
+                }
+                let arguments = stack.split_off(stack.len() - arity);
+                let callee = stack.pop().unwrap();
+                stack.push(self.call(callee, arguments, item.span)?);
+            }
+            Op::PerformCall(arity) => {
+                if let Some(metrics) = &self.metrics {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
+                }
+                let argument_start = stack.len() - arity;
+                let callee_index = argument_start - 1;
+                if let Value::Function(function) = &stack[callee_index] {
+                    let value =
+                        self.call_function(function, &stack[argument_start..], item.span)?;
+                    stack.truncate(callee_index);
+                    stack.push(value);
+                    return Ok(BytecodeStep::Next(instruction + 1));
+                }
+                let arguments = stack.split_off(stack.len() - arity);
+                let callee = stack.pop().unwrap();
+                stack.push(self.call(callee, arguments, item.span)?);
+            }
+            Op::MakeArray(length) => {
+                let values = stack.split_off(stack.len() - length);
+                stack.push(Value::Array(Arc::new(values)));
+            }
+            Op::Index => {
+                let index = expect_index(stack.pop().unwrap(), item.span)?;
+                let collection = stack.pop().unwrap();
+                stack.push(index_value(collection, index, item.span)?);
+            }
+            Op::Coalesce(target) => {
+                if stack.last().is_some_and(|value| value != &Value::Null) {
+                    self.maybe_collect(stack);
+                    return Ok(BytecodeStep::Next(*target));
+                }
+            }
+            Op::Propagate => match stack.pop().unwrap() {
+                Value::Ok(value) => stack.push(value.as_ref().clone()),
+                Value::Err(value) => {
+                    return Ok(BytecodeStep::Return(Value::Err(value)));
+                }
+                other => {
+                    return Err(NivError::new(
+                        format!("or give needs a Result, found {}", other.type_name()),
+                        item.span.line,
+                        item.span.column,
+                    ));
+                }
+            },
+            Op::Get(name) => {
+                let object = stack.pop().unwrap();
+                stack.push(get_value(object, name, item.span)?);
+            }
+            Op::Print => {
+                println!("{}", stack.pop().unwrap());
+                stack.push(Value::Null);
+            }
+            Op::EnterScope => {
+                if self
+                    .fast_frames
+                    .last()
+                    .is_none_or(|frame| frame.plan.is_none())
+                {
+                    self.environment = self.child_scope(self.environment.clone());
+                }
+            }
+            Op::ExitScope => {
+                if self
+                    .fast_frames
+                    .last()
+                    .is_none_or(|frame| frame.plan.is_none())
+                {
+                    let parent = self.environment.lock().unwrap().parent.clone().unwrap();
+                    self.environment = parent;
+                }
+            }
+            Op::MakeFunction { name, params, body } => {
+                stack.push(Value::Function(Arc::new(Function {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: FunctionBody::Bytecode(body.clone()),
+                    closure: self.environment.clone(),
+                    fast_slots: fast_local_slots(params, body),
+                    #[cfg(feature = "host-runtime")]
+                    jit: JitState::default(),
+                })));
+            }
+            Op::Return => return Ok(BytecodeStep::Return(stack.pop().unwrap())),
+            Op::DefineRecord {
+                name,
+                fields,
+                derives,
+            } => {
+                let type_name = self.qualified(name);
+                let mut catalog = record_catalog(&self.environment);
+                catalog.insert(type_name.clone(), fields.clone());
+                let choices = choice_catalog(&self.environment);
+                let value = Value::RecordType(Arc::new(RecordType {
+                    name: type_name,
+                    field_indices: record_field_indices(fields),
+                    fields: fields.clone(),
+                    derives: derives.clone(),
+                    catalog,
+                    choices,
+                }));
+                self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                stack.push(value);
+            }
+            Op::DefineEnum {
+                name,
+                variants,
+                payload_variants,
+            } => {
+                let value = Value::EnumType(Arc::new(EnumType {
+                    name: self.qualified(name),
+                    variants: variants.clone(),
+                    payload_variants: payload_variants.iter().cloned().collect(),
+                }));
+                self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                stack.push(value);
+            }
+            Op::DefineProtocol { name, members } => {
+                let value = Value::ProtocolType(Arc::new(ProtocolType {
+                    name: self.qualified(name),
+                    members: members.clone(),
+                }));
+                self.environment.lock().unwrap().values.insert(
+                    name.clone(),
+                    Binding {
+                        value: value.clone(),
+                        mutable: false,
+                    },
+                );
+                stack.push(value);
+            }
+            Op::AdoptProtocol {
+                protocol,
+                type_name,
+                mappings,
+            } => {
+                let protocol_name = match self.lookup(protocol) {
+                    Some(Value::ProtocolType(protocol)) => protocol.name.clone(),
+                    _ => self.qualified(protocol),
+                };
+                let base = type_name.split('<').next().unwrap_or(type_name).to_string();
+                let qualified = self.qualified(&base);
+                for (member, implementation_name) in mappings {
+                    let implementation = self.lookup(implementation_name).ok_or_else(|| {
+                        NivError::new(
+                            format!("unknown protocol implementation '{implementation_name}'"),
+                            item.span.line,
+                            item.span.column,
+                        )
+                    })?;
+                    for adopted_name in [&base, &qualified] {
+                        self.protocol_dispatch.insert(
+                            (protocol_name.clone(), member.clone(), adopted_name.clone()),
+                            implementation.clone(),
+                        );
+                    }
+                }
+                stack.push(if mappings.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Bool(true)
+                });
+            }
+            Op::Prepare(_) => {
+                if let Some(metrics) = &self.metrics {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.plan_allocations = metrics.plan_allocations.saturating_add(1);
+                }
+            }
+            Op::Perform => {
+                if let Some(metrics) = &self.metrics {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
+                }
+            }
+            Op::Match(arms) => {
+                let subject = stack.pop().unwrap();
+                match self.execute_bytecode_match(subject, arms, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                }
+            }
+            Op::DefineModule {
+                name,
+                body,
+                exports,
+            } => {
+                stack.push(self.execute_bytecode_module(name, body, exports, item.span)?);
+            }
+            Op::Iterate { name, body } => {
+                let iterable = stack.pop().unwrap();
+                match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                }
+            }
+            Op::Using { name, body } => {
+                let resource = stack.pop().unwrap();
+                match self.execute_bytecode_using(name, resource, body, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                }
+            }
+        }
+        self.maybe_collect(stack);
+        if matches!(
+            item.op,
+            Op::Constant(_)
+                | Op::Binary(_)
+                | Op::Call(_)
+                | Op::PerformCall(_)
+                | Op::MakeArray(_)
+                | Op::Index
+                | Op::Get(_)
+                | Op::MakeFunction { .. }
+                | Op::DefineRecord { .. }
+                | Op::DefineEnum { .. }
+        ) && let Some(value) = stack.last()
+        {
+            self.charge_memory(value, item.span)?;
+        }
+        Ok(BytecodeStep::Next(instruction + 1))
     }
 
     fn is_cancelled(&self) -> bool {

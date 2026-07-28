@@ -2226,6 +2226,30 @@ fn unified_project_commands_create_develop_test_ship_and_add() {
     );
     assert!(String::from_utf8_lossy(&executed.stdout).contains("Welcome to Nivren"));
 
+    let native_build = std::process::Command::new(niv)
+        .args([
+            "build",
+            "--standalone",
+            "--native",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        native_build.status.success(),
+        "native standalone failed: {}",
+        String::from_utf8_lossy(&native_build.stderr)
+    );
+    let embedded = nivren::standalone::extract(&fs::read(&standalone).unwrap()).unwrap();
+    assert!(
+        embedded
+            .manifest
+            .starts_with("# nivren-standalone-engine = native\n")
+    );
+    let executed = std::process::Command::new(&standalone).output().unwrap();
+    assert!(executed.status.success());
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("Welcome to Nivren"));
+
     let project_text = project.display().to_string();
     let added = std::process::Command::new(niv)
         .args(["add", "answerlib", "1.2.3", &project_text])
@@ -5543,6 +5567,18 @@ fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
     let extension = if cfg!(windows) { "obj" } else { "o" };
     let object = directory.join(format!("target/aot/double.{extension}"));
     assert!(fs::metadata(&object).unwrap().len() > 64);
+    let program_object = directory.join(format!("target/aot/program.{extension}"));
+    let first_program = fs::read(&program_object).unwrap();
+    assert!(first_program.len() > 64);
+    assert!(directory.join("target/aot/program.nivb").is_file());
+    assert!(directory.join("target/aot/program.json").is_file());
+    assert!(directory.join("target/aot/nivren_program.h").is_file());
+    let repeated = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["build", "--aot", directory.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(repeated.status.success());
+    assert_eq!(fs::read(&program_object).unwrap(), first_program);
 
     #[cfg(unix)]
     {
@@ -5573,7 +5609,74 @@ fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
                 .unwrap()
                 .success()
         );
+
+        let trace_host = directory.join("trace_host.c");
+        let trace_executable = directory.join("trace_host");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("target/aot/program.json")).unwrap())
+                .unwrap();
+        let instructions = metadata["instructions"].as_u64().unwrap();
+        fs::write(
+            &trace_host,
+            format!(
+                "#include <stdint.h>\ntypedef int64_t(*Callback)(void*,uint64_t);\nextern int64_t nivren_program(void*,Callback);\nstruct State{{uint64_t visited;}};\nstatic int64_t step(void* raw,uint64_t pc){{struct State* state=(struct State*)raw;state->visited++;return pc+1=={instructions}u?-1:(int64_t)(pc+1);}}\nint main(void){{struct State state={{0}};return nivren_program(&state,step)==-1&&state.visited=={instructions}u?0:1;}}\n"
+            ),
+        )
+        .unwrap();
+        let linked = std::process::Command::new("cc")
+            .args([
+                trace_host.to_str().unwrap(),
+                program_object.to_str().unwrap(),
+                "-o",
+                trace_executable.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            std::process::Command::new(trace_executable)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn complete_program_aot_does_not_require_an_integer_kernel() {
+    let directory = module_fixture("complete-native-aot");
+    fs::create_dir_all(directory.join("src")).unwrap();
+    fs::write(
+        directory.join("niv.toml"),
+        "[package]\nname = \"complete-native-aot\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("src/main.niv"),
+        "shape Greeting { text: String }\nGreeting(\"hello\").text",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["build", "--aot", directory.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("optimized-kernels 0"));
+    let extension = if cfg!(windows) { "obj" } else { "o" };
+    assert!(
+        directory
+            .join(format!("target/aot/program.{extension}"))
+            .is_file()
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 

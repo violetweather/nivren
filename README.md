@@ -1,6 +1,6 @@
 # Nivren
 
-Nivren is an intent-first application programming language focused on safety, clarity, visible effects, and a coherent path from a first script to production software. This repository contains the local 0.10 Edition 3 development line on the road to 1.0.
+Nivren is an intent-first application programming language focused on safety, clarity, visible effects, and a coherent path from a first script to production software. This repository contains the local Edition 4 beta development line on the road to 1.0.
 
 Start with `docs/GETTING_STARTED.md` for archive verification, installation, and a first project.
 
@@ -27,12 +27,14 @@ niv test my-app/tests/niv
 niv test --snapshots my-app/tests/niv
 niv ship my-app
 niv run program.niv
+niv run --native program.niv
 niv run .
 niv check .
 niv install /path/to/registry .
 niv install --trusted https://registry.example root.pub .
 niv build .
 niv build --standalone .
+niv build --standalone --native .
 niv build --aot .
 niv package .
 niv run target/example.nivb
@@ -68,12 +70,12 @@ niv repl
 - Verified versioned bytecode, portable application bundles, call-frame traces, and precise closure-environment collection
 - Typed application APIs for bounded file handles, paths, environment, processes, time, shape-derived JSON plus bounded typed data streams, TCP clients/listeners, HTTP clients/servers, certificate-verified TLS clients and certificate/key-configured secure WebSocket servers, and logging
 - Structured worker tasks, cooperative cancellation and deadlines, bounded channels, multi-stream OS readiness plus backpressure-aware adapters, a versioned compiler facade, schema-driven C11/C++17 bindings, capability/path-gated dynamic C libraries, bounded asynchronous host operations, and an isolated C ABI with owned native callbacks plus async event-loop wakeups
-- Incremental builds, standalone executables, deterministic native AOT objects for eligible pure typed functions, portable WASI and zero-import browser compiler/runtime guests with a JavaScript SDK, shared/static embedding libraries, SBOM-bearing release archives, LSP and VS Code support, debugging, profiling, coverage, property/fuzz tests, deterministic packages, and private registries
+- Incremental builds, VM and native standalone executables, deterministic complete-program native AOT objects plus optimized integer kernels, portable WASI and zero-import browser compiler/runtime guests with a JavaScript SDK, ABI v3 shared/static embedding libraries, SBOM-bearing release archives, LSP and VS Code support, debugging, profiling, coverage, property/fuzz tests, deterministic packages, and private registries
 - An integration-tested official package catalog for bounded SHA-256/HMAC, Argon2id password storage, secure random keys, random-nonce ChaCha20-Poly1305 authenticated encryption, compact HS256 JWT authentication, AWS Signature Version 4, W3C tracing, Prometheus metrics, deterministic compression, explicit-schema CSV and typed columnar tables, dense matrices, PCM16 audio, escaped SVG interfaces, descriptive statistics, parameterized SQL, Redis RESP2/RESP3 with TLS/AUTH/pipelines/pools/Cluster redirects, Discord REST, typed testing, pure routing, and structured validation, with generated public API docs and semantic compatibility rules
 - Safe declaration reflection and compiler facade v2 generation APIs that emit inspectable source instead of hidden text macros
 - Built-ins: `clock()`, `len(value)`, `type(value)`, `append(array, value)`, `assert(condition, message)`, `ok(value)`, and `err(value)`
 
-The implementation remains pre-1.0 until every open capability-audit row has executable evidence and the full platform, security, performance, compatibility, installer, documentation, and production-pilot gates pass together. Local Edition 3 work is not published until those gates are complete.
+The implementation remains pre-1.0 until every open capability-audit row has executable evidence and the full platform, security, performance, compatibility, installer, documentation, and production-pilot gates pass together. Local Edition 4 work is not published until those gates are complete.
 
 The supported OCI recipe under `containers/` builds a minimal non-root image with verified-TLS certificate roots. CI runs its default command on a read-only filesystem; no image is published before the complete 1.0 gate.
 

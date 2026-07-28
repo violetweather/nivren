@@ -58,6 +58,11 @@ name = "intent_proof"
 path = "benches/intent_proof.rs"
 harness = false
 
+[[bench]]
+name = "compiler_proof"
+path = "benches/compiler_proof.rs"
+harness = false
+
 [profile.release]
 lto = true
 strip = true

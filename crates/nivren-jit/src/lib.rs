@@ -1,7 +1,7 @@
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, UserFuncName, types};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -27,6 +27,256 @@ pub struct CompiledFunction {
 }
 
 pub struct AotObject;
+
+/// Runtime helper invoked by a complete-program native trace. Returning a
+/// non-negative value selects the next instruction. Negative values terminate
+/// the trace and are preserved for the runtime (`-1` complete, `-2` return,
+/// `-3` checked error).
+pub type TraceCallback = unsafe extern "C" fn(*mut std::ffi::c_void, u64) -> i64;
+
+/// A Cranelift-compiled control trace for an arbitrary verified bytecode chunk.
+/// Individual value operations use the runtime helper ABI, while instruction
+/// selection, jumps, loops, and termination execute as native control flow.
+pub struct CompiledTrace {
+    _module: JITModule,
+    function: unsafe extern "C" fn(*mut std::ffi::c_void, TraceCallback) -> i64,
+    instructions: usize,
+}
+
+pub struct TraceObject;
+
+// SAFETY: See `CompiledFunction`; a trace also owns a finalized immutable JIT
+// module and receives all mutable execution state through its caller context.
+unsafe impl Send for CompiledTrace {}
+// SAFETY: Calls execute immutable code and use caller-owned context values.
+unsafe impl Sync for CompiledTrace {}
+
+impl CompiledTrace {
+    pub fn compile(instructions: usize) -> Result<Self, String> {
+        check_trace_limits(instructions)?;
+        let mut flags = settings::builder();
+        flags
+            .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("is_pic", "false")
+            .map_err(|error| error.to_string())?;
+        let isa = cranelift_native::builder()
+            .map_err(|error| error.to_string())?
+            .finish(settings::Flags::new(flags))
+            .map_err(|error| error.to_string())?;
+        let builder = JITBuilder::with_isa(isa, default_libcall_names());
+        let mut module = JITModule::new(builder);
+        let signature = trace_signature(&mut module);
+        let function_id = module
+            .declare_function("nivren_trace", Linkage::Local, &signature)
+            .map_err(|error| error.to_string())?;
+        let mut context = module.make_context();
+        context.func.signature = signature;
+        context.func.name = UserFuncName::user(0, 1);
+        define_trace_body(&mut context.func, instructions)?;
+        module
+            .define_function(function_id, &mut context)
+            .map_err(|error| error.to_string())?;
+        module.clear_context(&mut context);
+        module
+            .finalize_definitions()
+            .map_err(|error| error.to_string())?;
+        let pointer = module.get_finalized_function(function_id);
+        let function = unsafe {
+            std::mem::transmute::<
+                *const u8,
+                unsafe extern "C" fn(*mut std::ffi::c_void, TraceCallback) -> i64,
+            >(pointer)
+        };
+        Ok(Self {
+            _module: module,
+            function,
+            instructions,
+        })
+    }
+
+    /// Runs this trace with a raw C callback boundary.
+    ///
+    /// # Safety
+    ///
+    /// `context` must satisfy the callback's contract and both values must
+    /// remain valid for the complete synchronous invocation.
+    pub unsafe fn run(&self, context: *mut std::ffi::c_void, callback: TraceCallback) -> i64 {
+        // SAFETY: Guaranteed by the caller contract above.
+        unsafe { (self.function)(context, callback) }
+    }
+
+    pub fn run_with<F>(&self, callback: &mut F) -> i64
+    where
+        F: FnMut(u64) -> i64,
+    {
+        unsafe extern "C" fn invoke<F>(context: *mut std::ffi::c_void, pc: u64) -> i64
+        where
+            F: FnMut(u64) -> i64,
+        {
+            // SAFETY: `run_with` supplies the address of its live, uniquely
+            // borrowed callback for this synchronous native invocation.
+            unsafe { (&mut *context.cast::<F>())(pc) }
+        }
+
+        // SAFETY: The callback pointer remains live and uniquely borrowed until
+        // the native trace returns. `invoke` never stores the pointer.
+        unsafe { (self.function)((callback as *mut F).cast::<std::ffi::c_void>(), invoke::<F>) }
+    }
+
+    #[must_use]
+    pub fn instructions(&self) -> usize {
+        self.instructions
+    }
+}
+
+impl TraceObject {
+    pub fn compile(name: &str, instructions: usize) -> Result<Vec<u8>, String> {
+        check_export_name(name)?;
+        check_trace_limits(instructions)?;
+        let mut flags = settings::builder();
+        flags
+            .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("is_pic", "true")
+            .map_err(|error| error.to_string())?;
+        let isa = cranelift_native::builder()
+            .map_err(|error| error.to_string())?
+            .finish(settings::Flags::new(flags))
+            .map_err(|error| error.to_string())?;
+        let builder = ObjectBuilder::new(isa, "nivren_trace_aot", default_libcall_names())
+            .map_err(|error| error.to_string())?;
+        let mut module = ObjectModule::new(builder);
+        let signature = trace_signature(&mut module);
+        let function_id = module
+            .declare_function(name, Linkage::Export, &signature)
+            .map_err(|error| error.to_string())?;
+        let mut context = module.make_context();
+        context.func.signature = signature;
+        context.func.name = UserFuncName::user(0, 1);
+        define_trace_body(&mut context.func, instructions)?;
+        module
+            .define_function(function_id, &mut context)
+            .map_err(|error| error.to_string())?;
+        module.clear_context(&mut context);
+        module.finish().emit().map_err(|error| error.to_string())
+    }
+}
+
+fn check_trace_limits(instructions: usize) -> Result<(), String> {
+    if instructions == 0 || instructions > 1_000_000 {
+        Err("native traces require 1 through 1000000 instructions".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn check_export_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        Err("AOT export name must contain only ASCII letters, digits, or underscore".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn trace_signature<M: Module>(module: &mut M) -> cranelift_codegen::ir::Signature {
+    let pointer = module.target_config().pointer_type();
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(pointer));
+    signature.params.push(AbiParam::new(pointer));
+    signature.returns.push(AbiParam::new(types::I64));
+    signature
+}
+
+fn define_trace_body(
+    function: &mut cranelift_codegen::ir::Function,
+    instructions: usize,
+) -> Result<(), String> {
+    let pointer = function.signature.params[0].value_type;
+    let call_conv = function.signature.call_conv;
+    let mut builder_context = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(function, &mut builder_context);
+    let entry = builder.create_block();
+    let dispatch = builder.create_block();
+    let invalid = builder.create_block();
+    let exit = builder.create_block();
+    let instruction_blocks = (0..instructions)
+        .map(|_| builder.create_block())
+        .collect::<Vec<_>>();
+    builder.append_block_params_for_function_params(entry);
+    builder.append_block_param(dispatch, types::I64);
+    builder.append_block_param(exit, types::I64);
+    let context_var = Variable::from_u32(0);
+    let callback_var = Variable::from_u32(1);
+    builder.declare_var(context_var, pointer);
+    builder.declare_var(callback_var, pointer);
+    builder.switch_to_block(entry);
+    builder.seal_block(entry);
+    builder.def_var(context_var, builder.block_params(entry)[0]);
+    builder.def_var(callback_var, builder.block_params(entry)[1]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let zero_arguments = [zero.into()];
+    builder.ins().jump(dispatch, &zero_arguments);
+
+    builder.switch_to_block(dispatch);
+    let next = builder.block_params(dispatch)[0];
+    let mut switch = Switch::new();
+    for (index, block) in instruction_blocks.iter().enumerate() {
+        switch.set_entry(
+            u128::try_from(index).map_err(|_| "trace index overflow")?,
+            *block,
+        );
+    }
+    switch.emit(&mut builder, next, invalid);
+
+    let mut callback_signature = cranelift_codegen::ir::Signature::new(call_conv);
+    callback_signature.params.push(AbiParam::new(pointer));
+    callback_signature.params.push(AbiParam::new(types::I64));
+    callback_signature.returns.push(AbiParam::new(types::I64));
+    let callback_signature = builder.import_signature(callback_signature);
+    for (index, block) in instruction_blocks.into_iter().enumerate() {
+        builder.switch_to_block(block);
+        let context = builder.use_var(context_var);
+        let callback = builder.use_var(callback_var);
+        let index = builder.ins().iconst(
+            types::I64,
+            i64::try_from(index).map_err(|_| "trace index overflow")?,
+        );
+        let call = builder
+            .ins()
+            .call_indirect(callback_signature, callback, &[context, index]);
+        let result = builder.inst_results(call)[0];
+        let terminated = builder.ins().icmp_imm(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+            result,
+            0,
+        );
+        let result_arguments = [result.into()];
+        builder.ins().brif(
+            terminated,
+            exit,
+            &result_arguments,
+            dispatch,
+            &result_arguments,
+        );
+    }
+
+    builder.switch_to_block(invalid);
+    let invalid_status = builder.ins().iconst(types::I64, -3);
+    builder.ins().return_(&[invalid_status]);
+    builder.switch_to_block(exit);
+    let exit_status = builder.block_params(exit)[0];
+    builder.ins().return_(&[exit_status]);
+    builder.seal_all_blocks();
+    builder.finalize();
+    Ok(())
+}
 
 impl AotObject {
     pub fn compile(
@@ -423,7 +673,22 @@ fn define_integer_function<M: Module>(
 mod tests {
     use std::sync::Arc;
 
-    use super::{AotObject, CallError, CompiledFunction, IntOp};
+    use super::{AotObject, CallError, CompiledFunction, CompiledTrace, IntOp, TraceObject};
+
+    struct TraceState {
+        visited: Vec<u64>,
+        instructions: u64,
+    }
+
+    unsafe extern "C" fn trace_step(context: *mut std::ffi::c_void, pc: u64) -> i64 {
+        let state = unsafe { &mut *context.cast::<TraceState>() };
+        state.visited.push(pc);
+        if pc + 1 == state.instructions {
+            -1
+        } else {
+            i64::try_from(pc + 1).unwrap()
+        }
+    }
 
     #[test]
     fn native_integer_code_executes_and_preserves_overflow() {
@@ -475,5 +740,28 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn complete_program_trace_executes_native_control_and_is_reproducible() {
+        let trace = CompiledTrace::compile(4).unwrap();
+        let mut state = TraceState {
+            visited: vec![],
+            instructions: 4,
+        };
+        // SAFETY: State and callback remain live for the synchronous trace.
+        assert_eq!(
+            unsafe { trace.run((&mut state as *mut TraceState).cast(), trace_step) },
+            -1
+        );
+        assert_eq!(state.visited, vec![0, 1, 2, 3]);
+        assert_eq!(trace.instructions(), 4);
+
+        let first = TraceObject::compile("nivren_program", 4).unwrap();
+        let second = TraceObject::compile("nivren_program", 4).unwrap();
+        assert!(first.len() > 64);
+        assert_eq!(first, second);
+        assert!(TraceObject::compile("bad-name", 4).is_err());
+        assert!(CompiledTrace::compile(0).is_err());
     }
 }

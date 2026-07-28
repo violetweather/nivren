@@ -135,7 +135,7 @@ Every operation needs `Native`. A manifest may grant all native access or restri
 - `std.reflect.kind(value)` returns the public runtime type name.
 - `std.reflect.fields(shapeValue)` returns a `Result<Map<String,String>,String>` of declared field names to runtime value kinds.
 - `std.reflect.schema(ShapeOrChoice)` returns deterministic declaration metadata. `$kind` is `shape` or `choice`, `$name` is the qualified name, shape entries map fields to canonical type schemas, and choice entries map variants to stable declaration ordinals.
-- `niv bindgen c` and Rust compiler facade v3 consume the same checked public AST/schema contract. The C ABI remains independently versioned at v2. Generated output is ordinary inspectable source; it receives no access to lexical values, runtime memory, or compiler internals.
+- `niv bindgen c` and Rust compiler facade v3 consume the same checked public AST/schema contract. The C ABI remains independently versioned at v3. Generated output is ordinary inspectable source; it receives no access to lexical values, runtime memory, or compiler internals.
 
 ## Core globals
 

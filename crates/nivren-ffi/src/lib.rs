@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
-pub const NIVREN_ABI_VERSION: u32 = 2;
+pub const NIVREN_ABI_VERSION: u32 = 3;
 
 #[repr(C)]
 pub struct NivrenBuffer {
@@ -157,6 +157,44 @@ pub unsafe extern "C" fn nivren_run_utf8(source: *const u8, length: usize) -> Ni
         Err(error) => return error,
     };
     match catch_unwind(AssertUnwindSafe(|| nivren::run(source))) {
+        Ok(Ok(value)) => NivrenBuffer::new(value.to_string().into_bytes(), 0),
+        Ok(Err(errors)) => NivrenBuffer::new(
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes(),
+            1,
+        ),
+        Err(_) => NivrenBuffer::error("internal Nivren panic", 3),
+    }
+}
+
+/// Checks, compiles, and executes source through the complete-program native
+/// Cranelift tier. This entry point never silently redirects to the VM.
+///
+/// # Safety
+///
+/// `source` follows the same pointer and lifetime contract as
+/// `nivren_run_utf8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nivren_run_native_utf8(source: *const u8, length: usize) -> NivrenBuffer {
+    let source = match unsafe { decode_source(source, length) } {
+        Ok(source) => source,
+        Err(error) => return error,
+    };
+    match catch_unwind(AssertUnwindSafe(
+        || -> Result<_, Vec<nivren::error::NivError>> {
+            let tokens = nivren::lexer::scan(source)?;
+            let program = nivren::parser::parse(tokens)?;
+            nivren::typecheck::check(&program)?;
+            let chunk = nivren::bytecode::compile(&program)?;
+            nivren::runtime::Interpreter::new()
+                .run_native(&chunk)
+                .map_err(|error| vec![error])
+        },
+    )) {
         Ok(Ok(value)) => NivrenBuffer::new(value.to_string().into_bytes(), 0),
         Ok(Err(errors)) => NivrenBuffer::new(
             errors
@@ -430,7 +468,8 @@ mod tests {
     use super::{
         NivrenBuffer, nivren_abi_version, nivren_async_run_cancel, nivren_async_run_finished,
         nivren_async_run_free, nivren_buffer_free, nivren_check_utf8, nivren_compile_utf8,
-        nivren_format_utf8, nivren_run_async_utf8, nivren_run_host_utf8, nivren_run_utf8,
+        nivren_format_utf8, nivren_run_async_utf8, nivren_run_host_utf8, nivren_run_native_utf8,
+        nivren_run_utf8,
     };
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -466,6 +505,36 @@ mod tests {
         unsafe { nivren_buffer_free(buffer) };
     }
 
+    unsafe extern "C" fn invalid_host_buffer(
+        _: *const u8,
+        _: usize,
+        _: *const u8,
+        _: usize,
+        _: *mut c_void,
+    ) -> NivrenBuffer {
+        NivrenBuffer {
+            data: std::ptr::null_mut(),
+            length: 1,
+            capacity: 0,
+            status: 0,
+        }
+    }
+
+    unsafe extern "C" fn count_only_free(_: NivrenBuffer, context: *mut c_void) {
+        // SAFETY: The test keeps its counter alive for the synchronous call.
+        unsafe { *(context.cast::<usize>()) += 1 };
+    }
+
+    unsafe extern "C" fn nested_host_buffer(
+        _: *const u8,
+        _: usize,
+        _: *const u8,
+        _: usize,
+        _: *mut c_void,
+    ) -> NivrenBuffer {
+        NivrenBuffer::new(br#"{"name":"Nivren","values":[20,22]}"#.to_vec(), 0)
+    }
+
     unsafe extern "C" fn async_complete(buffer: NivrenBuffer, context: *mut c_void) {
         // SAFETY: The async test keeps this context alive through handle join.
         let context = unsafe { &*context.cast::<AsyncContext>() };
@@ -490,13 +559,19 @@ mod tests {
 
     #[test]
     fn c_boundary_runs_source_and_reports_invalid_input() {
-        assert_eq!(nivren_abi_version(), 2);
+        assert_eq!(nivren_abi_version(), 3);
         let source = b"20 + 22";
         // SAFETY: The byte slice remains readable for the call.
         let buffer = unsafe { nivren_run_utf8(source.as_ptr(), source.len()) };
         assert_eq!((buffer.status, output(&buffer)), (0, "42".into()));
         // SAFETY: This is the unchanged, not-yet-freed returned buffer.
         unsafe { nivren_buffer_free(buffer) };
+
+        // SAFETY: The byte slice remains readable for the native call.
+        let native = unsafe { nivren_run_native_utf8(source.as_ptr(), source.len()) };
+        assert_eq!((native.status, output(&native)), (0, "42".into()));
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(native) };
 
         // SAFETY: A null pointer is explicitly accepted when length is zero.
         let empty = unsafe { nivren_run_utf8(std::ptr::null(), 0) };
@@ -554,6 +629,48 @@ mod tests {
         assert_eq!(frees, 1);
         // SAFETY: This is the unchanged, not-yet-freed returned buffer.
         unsafe { nivren_buffer_free(hosted) };
+
+        let nested_source = br#"
+shape Reply { name: String, values: [Int] }
+define read() gives Result<String, String> needs Native {
+    keep response = std.host.invoke("nested", "request") or give
+    keep reply = std.json.decode(Reply, response) or give
+    give ok(reply.name)
+}
+read()
+"#;
+        let mut nested_frees = 0usize;
+        // SAFETY: Callback functions and the counter remain live for the call.
+        let nested = unsafe {
+            nivren_run_host_utf8(
+                nested_source.as_ptr(),
+                nested_source.len(),
+                Some(nested_host_buffer),
+                Some(host_free),
+                (&mut nested_frees as *mut usize).cast(),
+            )
+        };
+        assert_eq!((nested.status, output(&nested)), (0, "Ok(Nivren)".into()));
+        assert_eq!(nested_frees, 1);
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(nested) };
+
+        let mut invalid_frees = 0usize;
+        // SAFETY: Callback functions and the counter remain live for the call.
+        let invalid_callback = unsafe {
+            nivren_run_host_utf8(
+                host_source.as_ptr(),
+                host_source.len(),
+                Some(invalid_host_buffer),
+                Some(count_only_free),
+                (&mut invalid_frees as *mut usize).cast(),
+            )
+        };
+        assert_eq!(invalid_callback.status, 0);
+        assert!(output(&invalid_callback).contains("null buffer with nonzero length"));
+        assert_eq!(invalid_frees, 1);
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(invalid_callback) };
     }
 
     #[test]

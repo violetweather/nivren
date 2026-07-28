@@ -29,6 +29,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         [command] if command == "run" => run_file("."),
+        [command, flag] if command == "run" && flag == "--native" => run_native_file("."),
+        [command, flag, path] if command == "run" && flag == "--native" => run_native_file(path),
         [command, path] if command == "run" => run_file(path),
         [command, flag, output, path] if command == "run" && flag == "--crash-report" => {
             run_with_crash_report(path, output)
@@ -43,6 +45,16 @@ fn main() -> ExitCode {
         [command, path] if command == "check" => check_file(path),
         [command] if command == "build" => build_project("."),
         [command, flag] if command == "build" && flag == "--standalone" => build_standalone("."),
+        [command, standalone, native]
+            if command == "build" && standalone == "--standalone" && native == "--native" =>
+        {
+            build_native_standalone(".")
+        }
+        [command, standalone, native, path]
+            if command == "build" && standalone == "--standalone" && native == "--native" =>
+        {
+            build_native_standalone(path)
+        }
         [command, flag, path] if command == "build" && flag == "--standalone" => {
             build_standalone(path)
         }
@@ -197,8 +209,19 @@ fn run_embedded_application() -> Option<ExitCode> {
             return Some(ExitCode::from(70));
         }
     };
-    let result = nivren::bundle::decode(&application.bundle)
-        .and_then(|chunk| project_interpreter(&manifest).run_bytecode(&chunk));
+    let native = application
+        .manifest
+        .lines()
+        .next()
+        .is_some_and(|line| line == "# nivren-standalone-engine = native");
+    let result = nivren::bundle::decode(&application.bundle).and_then(|chunk| {
+        let mut interpreter = project_interpreter(&manifest);
+        if native {
+            interpreter.run_native(&chunk)
+        } else {
+            interpreter.run_bytecode(&chunk)
+        }
+    });
     Some(match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
@@ -224,6 +247,39 @@ fn run_file(path: &str) -> ExitCode {
             .run_bytecode(&chunk)
             .map_err(|error| vec![error])
     }) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(errors) => {
+            report(path, &source, &errors);
+            ExitCode::from(70)
+        }
+    }
+}
+
+fn run_native_file(path: &str) -> ExitCode {
+    if is_project_path(Path::new(path)) {
+        return run_native_project(path);
+    }
+    let source = if is_bundle_path(Path::new(path)) {
+        String::new()
+    } else {
+        match read_source(path) {
+            Ok(source) => source,
+            Err(code) => return code,
+        }
+    };
+    let result = if is_bundle_path(Path::new(path)) {
+        fs::read(path)
+            .map_err(|error| vec![NivError::new(error.to_string(), 1, 1)])
+            .and_then(|bytes| nivren::bundle::decode(&bytes).map_err(|error| vec![error]))
+    } else {
+        compile_file(Path::new(path))
+    }
+    .and_then(|chunk| {
+        Interpreter::new()
+            .run_native(&chunk)
+            .map_err(|error| vec![error])
+    });
+    match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(errors) => {
             report(path, &source, &errors);
@@ -267,6 +323,30 @@ fn run_project(path: &str) -> ExitCode {
     let result = compile_project(Path::new(path)).and_then(|(manifest, chunk)| {
         project_interpreter(&manifest)
             .run_bytecode(&chunk)
+            .map_err(|error| vec![error])
+    });
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(errors) => {
+            report(&entry.display().to_string(), &source, &errors);
+            ExitCode::from(70)
+        }
+    }
+}
+
+fn run_native_project(path: &str) -> ExitCode {
+    let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(65);
+        }
+    };
+    let entry = manifest.entry_path();
+    let source = fs::read_to_string(&entry).unwrap_or_default();
+    let result = compile_project(Path::new(path)).and_then(|(manifest, chunk)| {
+        project_interpreter(&manifest)
+            .run_native(&chunk)
             .map_err(|error| vec![error])
     });
     match result {
@@ -423,6 +503,14 @@ fn build_project(path: &str) -> ExitCode {
 }
 
 fn build_standalone(path: &str) -> ExitCode {
+    build_standalone_engine(path, false)
+}
+
+fn build_native_standalone(path: &str) -> ExitCode {
+    build_standalone_engine(path, true)
+}
+
+fn build_standalone_engine(path: &str, native: bool) -> ExitCode {
     let (manifest, chunk) = match compile_project(Path::new(path)) {
         Ok(result) => result,
         Err(errors) => {
@@ -444,7 +532,12 @@ fn build_standalone(path: &str) -> ExitCode {
             return ExitCode::from(74);
         }
     };
-    let application = match nivren::standalone::attach(&current, &bundle, &manifest.source()) {
+    let manifest_source = if native {
+        format!("# nivren-standalone-engine = native\n{}", manifest.source())
+    } else {
+        manifest.source()
+    };
+    let application = match nivren::standalone::attach(&current, &bundle, &manifest_source) {
         Ok(application) => application,
         Err(error) => {
             report(path, "", &[error]);
@@ -538,6 +631,49 @@ fn build_aot(path: &str) -> ExitCode {
         eprintln!("error: cannot create {}: {error}", directory.display());
         return ExitCode::from(73);
     }
+    let extension = if cfg!(windows) { "obj" } else { "o" };
+    let program_object = directory.join(format!("program.{extension}"));
+    let program_bytes = match nivren_jit::TraceObject::compile("nivren_program", chunk.code.len()) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("error: cannot compile complete program ahead of time: {error}");
+            return ExitCode::from(70);
+        }
+    };
+    if let Err(error) = write_atomic(&program_object, &program_bytes) {
+        eprintln!("error: cannot write {}: {error}", program_object.display());
+        return ExitCode::from(73);
+    }
+    let bundle = match nivren::bundle::encode(&chunk) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            report(path, "", &[error]);
+            return ExitCode::from(70);
+        }
+    };
+    let program_bundle = directory.join("program.nivb");
+    if let Err(error) = write_atomic(&program_bundle, &bundle) {
+        eprintln!("error: cannot write {}: {error}", program_bundle.display());
+        return ExitCode::from(73);
+    }
+    let header = directory.join("nivren_program.h");
+    let header_bytes = b"#ifndef NIVREN_PROGRAM_H\n#define NIVREN_PROGRAM_H\n#include <stdint.h>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\ntypedef int64_t (*NivrenTraceCallback)(void *context, uint64_t instruction);\nint64_t nivren_program(void *context, NivrenTraceCallback callback);\n#ifdef __cplusplus\n}\n#endif\n#endif\n";
+    if let Err(error) = write_atomic(&header, header_bytes) {
+        eprintln!("error: cannot write {}: {error}", header.display());
+        return ExitCode::from(73);
+    }
+    let metadata = format!(
+        "{{\n  \"abi\": \"nivren-trace-v1\",\n  \"bytecode\": \"program.nivb\",\n  \"entry\": \"nivren_program\",\n  \"instructions\": {},\n  \"object\": \"program.{}\"\n}}\n",
+        chunk.code.len(),
+        extension
+    );
+    let metadata_path = directory.join("program.json");
+    if let Err(error) = write_atomic(&metadata_path, metadata.as_bytes()) {
+        eprintln!("error: cannot write {}: {error}", metadata_path.display());
+        return ExitCode::from(73);
+    }
+    println!("aot {}", program_object.display());
+    println!("aot {}", program_bundle.display());
     let mut emitted = 0usize;
     for instruction in &chunk.code {
         let nivren::bytecode::Op::MakeFunction { name, params, body } = &instruction.op else {
@@ -558,7 +694,6 @@ fn build_aot(path: &str) -> ExitCode {
                 return ExitCode::from(70);
             }
         };
-        let extension = if cfg!(windows) { "obj" } else { "o" };
         let output = directory.join(format!("{name}.{extension}"));
         if let Err(error) = write_atomic(&output, &bytes) {
             eprintln!("error: cannot write {}: {error}", output.display());
@@ -567,10 +702,7 @@ fn build_aot(path: &str) -> ExitCode {
         println!("aot {}", output.display());
         emitted += 1;
     }
-    if emitted == 0 {
-        eprintln!("error: no pure explicitly typed Int functions are eligible for native AOT");
-        return ExitCode::from(65);
-    }
+    println!("aot optimized-kernels {emitted}");
     ExitCode::SUCCESS
 }
 
@@ -2011,7 +2143,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv ship [project]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!("\nBinding generation:\n  niv bindgen c <schema.niv> <output.h>");

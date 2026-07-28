@@ -67,10 +67,12 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 - Deterministic explain snapshot, optimized/non-optimized properties, unauthorized-effect properties, batching/parallel/backpressure tests, Bytecode 7 bundle verification, and existing cleanup/cancellation failure suites: passing.
 - Stop-and-correct triggers: none remain active. Intent Proof is closed and Compiler Proof may now begin without weakening this gate.
 
-## Compiler Proof — ready to begin
+## Compiler Proof — passed 2026-07-28
 
-Intent Proof passed. Compiler Proof has not started.
+Complete-program Cranelift control now covers every verified Bytecode 7 construct through one checked native helper ABI, with no VM fallback. VM/native results and typed failures agree for Edition 4 proof programs, shapes, choices, collections, closures, generics, protocols, intent, structured concurrency, capabilities, limits, cancellation, and deterministic resource cleanup. Complete deterministic AOT objects, native standalone executables, ABI v3 static/shared embedding libraries, browser-Wasm, and WASI are covered by executable gates.
+
+The initial per-instruction trace failed performance at `1.766` times the tiered baseline. Bounded verified helper regions corrected the crossing cost to `0.988`; the threshold remained `1.10`. The safe-Rust kernel ratio is `0.967` against a `2.0` ceiling, and the native application ratio is `0.206` against Node with a `1.5` ceiling. Full evidence and the stop-and-correct record are in `docs/EDITION_4_COMPILER_PROOF_AUDIT.md`.
 
 ## Product Proof — not started
 
-Blocked on Compiler Proof.
+Compiler Proof passed. Product work may begin, but nothing is pushed or published until the Product Proof matrix also passes.

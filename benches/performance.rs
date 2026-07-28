@@ -26,12 +26,27 @@ fn main() {
         value
     });
     let speedup = vm.as_secs_f64() / native.as_secs_f64();
+    let complete_native = median(7, || {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_jit_threshold(16);
+        let value = black_box(interpreter.run_native(&chunk).unwrap());
+        assert_eq!(value, Value::Int(400004));
+        assert!(interpreter.jit_stats().executions > 100_000);
+        assert_eq!(interpreter.native_stats().fallbacks, 0);
+        value
+    });
+    let complete_native_ratio = complete_native.as_secs_f64() / native.as_secs_f64();
     println!("nivren_benchmark_vm_ms {:.3}", vm.as_secs_f64() * 1000.0);
     println!(
         "nivren_benchmark_tiered_ms {:.3}",
         native.as_secs_f64() * 1000.0
     );
     println!("nivren_benchmark_jit_speedup {speedup:.3}");
+    println!(
+        "nivren_benchmark_complete_native_ms {:.3}",
+        complete_native.as_secs_f64() * 1000.0
+    );
+    println!("nivren_benchmark_complete_native_ratio {complete_native_ratio:.3}");
 
     let recursive_source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } fibonacci(20)";
     let recursive_tokens = nivren::lexer::scan(recursive_source).unwrap();
@@ -86,6 +101,12 @@ fn main() {
         if recursive_speedup < 1.10 {
             eprintln!(
                 "performance gate failed: recursive bytecode speedup {recursive_speedup:.3} is below 1.10"
+            );
+            std::process::exit(1);
+        }
+        if complete_native_ratio > 1.10 {
+            eprintln!(
+                "performance gate failed: complete native ratio {complete_native_ratio:.3} exceeds 1.10"
             );
             std::process::exit(1);
         }

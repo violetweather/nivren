@@ -74,9 +74,36 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
       - run: cargo bench --bench performance --locked
         env:
           NIVREN_BENCH_GATE: "1"
+      - run: cargo bench --bench compiler_proof --locked
+        env:
+          NIVREN_COMPILER_BENCH_GATE: "1"
+      - run: cargo build --release --bin niv --locked
+      - run: node tools/compiler_proof_app_gate.mjs
+
+  compiler-hardening:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: AddressSanitizer native compiler proof
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1
+        run: cargo test --target x86_64-unknown-linux-gnu --test compiler_proof --locked
+      - name: Valgrind native CLI execution
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes valgrind
+          cargo build --bin niv --locked
+          valgrind --error-exitcode=1 --leak-check=full target/debug/niv run --native proofs/edition4/intent_snapshot.niv
 
   wasm:
     name: WebAssembly host and guest

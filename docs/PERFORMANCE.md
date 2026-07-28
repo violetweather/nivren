@@ -67,3 +67,9 @@ An earlier gate correctly stopped when separate `Perform` instructions made the 
 ## Managed environments
 
 Closure environments use two generations. Frequent minor collections reclaim unreachable young scopes and promote survivors after two marks. Every eighth collection starts old-generation marking on a background worker while the bytecode mutator continues. Before sweeping, the runtime performs a final root remark and unions it with the concurrent snapshot, so values made reachable during marking cannot be reclaimed. `HeapStats` exposes minor/major counts and an in-progress concurrent-mark flag; GC stress tests exercise escaping closures and cyclic environments.
+
+## Edition 4 Compiler Proof gates
+
+`NIVREN_BENCH_GATE=1 cargo bench --bench performance` compares complete-program native control with the established tiered runtime and rejects a ratio above `1.10`. `NIVREN_COMPILER_BENCH_GATE=1 cargo bench --bench compiler_proof` compares the normalized checked Cranelift kernel with the equivalent safe Rust kernel and rejects a ratio above `2.0`. After building the release CLI, `node tools/compiler_proof_app_gate.mjs` runs equivalent native Nivren and Node file applications as fresh processes and rejects a Nivren/Node ratio above `1.5`.
+
+The passing Apple M4 evidence on July 28, 2026 was `0.988` for complete native/tiered, `0.967` for native kernel/safe Rust, and `0.206` for native application/Node. The first complete trace measured `1.766` and stopped the checkpoint; bounded verified helper regions fixed the ABI-crossing regression without relaxing the gate.

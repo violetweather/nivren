@@ -1,6 +1,6 @@
 # Getting started with Nivren
 
-Nivren 0.10 is a pre-1.0 Edition 3 development build. The repository is intentionally not being published again until the full roadmap, documentation, installers, website, and validation gates agree.
+Nivren Edition 4 is a local pre-1.0 beta development build. The repository is intentionally not being published again until the full roadmap, documentation, installers, website, and validation gates agree.
 
 ## Install a release build
 
@@ -86,7 +86,7 @@ A missing `needs` is a check error. A missing or out-of-scope manifest grant is 
 
 ## Embed Nivren
 
-Release archives include a shared library, static library, and `nivren.h`. ABI version 2 can check, format, compile, or run UTF-8 source. `nivren_run_host_utf8` adds an owned callback/free pair exposed through the `Native` capability; `nivren_run_async_utf8` adds cooperative cancellation, one owned completion, and an event-loop wake callback. `niv bindgen c schema.niv output.h` derives deterministic C11/C++17 data views from checked shapes and choices. Rust build tools and editors can use `nivren::compiler::Compiler`, whose facade version is independent of internal modules. See `docs/EMBEDDING.md` for ownership and lifecycle rules.
+Release archives include a shared library, static library, and `nivren.h`. ABI version 3 can check, format, compile, run through the VM, or run through complete-program native control with `nivren_run_native_utf8`. `nivren_run_host_utf8` adds an owned callback/free pair exposed through the `Native` capability; `nivren_run_async_utf8` adds cooperative cancellation, one owned completion, and an event-loop wake callback. `niv bindgen c schema.niv output.h` derives deterministic C11/C++17 data views from checked shapes and choices. Rust build tools and editors can use `nivren::compiler::Compiler`, whose facade version is independent of internal modules. See `docs/EMBEDDING.md` for ownership and lifecycle rules and `docs/UNSAFE_MODULES.md` for explicit systems boundaries.
 
 Programs that need an existing C library can use `std.native.open(path)` inside a function that declares `needs Native`, keep the opaque `NativeLibrary` inside `using`, and call a bounded primitive signature with `std.native.call_int` or `call_float`. A project can replace unrestricted `Native = "allow"` with a `path:` grant for the library location. This boundary deliberately trusts the library and selected export signature.
 
