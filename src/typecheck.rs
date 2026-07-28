@@ -1898,6 +1898,7 @@ impl Checker {
                 type_params,
                 fields,
                 span,
+                ..
             } => {
                 if self.type_names.contains_key(name) {
                     self.errors.push(NivError::new(

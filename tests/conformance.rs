@@ -18,6 +18,14 @@ fn edition_three_black_box_conformance_vectors() {
     );
 }
 
+#[test]
+fn edition_four_language_proof_conformance_vectors() {
+    run_suite(
+        include_str!("../conformance/edition4-language-proof.json"),
+        "edition4-language-proof",
+    );
+}
+
 fn run_suite(source: &str, edition: &str) {
     let cases: serde_json::Value = serde_json::from_str(source).unwrap();
     let cases = cases.as_array().unwrap();

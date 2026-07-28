@@ -109,11 +109,17 @@ fn declaration_signature(statement: &Stmt) -> String {
             name,
             type_params,
             fields,
+            derives,
             ..
         } => {
             let generics = generic_parameters(type_params);
             let fields = fields.iter().map(field_name).collect::<Vec<_>>().join(", ");
-            format!("`shape {name}{generics} {{ {fields} }}`")
+            let derives = if derives.is_empty() {
+                String::new()
+            } else {
+                format!(" with {}", derives.join(", "))
+            };
+            format!("`shape {name}{generics} {{ {fields} }}{derives}`")
         }
         Stmt::Enum {
             name,

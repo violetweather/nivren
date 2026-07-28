@@ -1,0 +1,26 @@
+shape CopyPlan holds {
+    source is String
+    destination is String
+} with Display, Validate, Arguments
+
+define copy_configuration
+takes {
+    plan is CopyPlan
+}
+gives Null or String
+needs FileRead
+{
+    keep contents set std.files.read with {
+        path set plan.source
+    } or give
+    give ok(none)
+}
+
+prepare copy as CopyPlan with {
+    source set "config/app.json"
+    destination set "build/app.json"
+}
+
+copy_configuration with {
+    plan set perform copy
+}

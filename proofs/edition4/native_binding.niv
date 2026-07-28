@@ -1,0 +1,22 @@
+shape LibraryPlan holds {
+    path is String
+    symbol is String
+} with Display, Validate
+
+define inspect_library
+takes {
+    plan is LibraryPlan
+}
+gives String
+{
+    give plan.symbol
+}
+
+prepare library as LibraryPlan with {
+    path set "libexample"
+    symbol set "nivren_example"
+}
+
+inspect_library with {
+    plan set perform library
+}

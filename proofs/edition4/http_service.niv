@@ -1,0 +1,26 @@
+shape FetchPlan holds {
+    url is String
+    timeout is Float
+} with Display, Validate
+
+define fetch
+takes {
+    plan is FetchPlan
+}
+gives String or String
+needs Network within "api.example.test"
+{
+    give std.web.get with {
+        url set plan.url
+        timeout set plan.timeout
+    }
+}
+
+prepare request as FetchPlan with {
+    url set "https://api.example.test/users"
+    timeout set 5.0
+}
+
+fetch with {
+    plan set perform request
+}

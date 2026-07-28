@@ -1,0 +1,37 @@
+[
+  {
+    "name": "intent-bindings-and-call",
+    "source": "define add takes { left is Int right is Int } gives Int { give left + right } keep answer is Int set add with { left set 20 right set 22 } show(answer)",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "42\n"
+  },
+  {
+    "name": "nominal-shape-and-prepare",
+    "source": "type UserId from Int shape Query holds { id is UserId limit is Int } with Display, Validate prepare query as Query with { id set UserId with { value set 7 } limit set 10 } show((perform query).limit)",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "10\n"
+  },
+  {
+    "name": "typed-result-and-cases",
+    "source": "define answer gives Int or String { give ok(42) } show(choose answer with {} { case Ok carries value => value case Err carries problem => -1 })",
+    "arguments": ["run", "{source}"],
+    "status": 0,
+    "stdout": "42\n"
+  },
+  {
+    "name": "canonical-label-order",
+    "source": "define add takes { left is Int right is Int } gives Int { give left + right } add with { right set 22 left set 20 }",
+    "arguments": ["check", "{source}"],
+    "status": 65,
+    "stderr_contains": "canonical order"
+  },
+  {
+    "name": "unknown-derive",
+    "source": "shape User holds { name is String } with Magic",
+    "arguments": ["check", "{source}"],
+    "status": 65,
+    "stderr_contains": "unknown derive 'Magic'"
+  }
+]

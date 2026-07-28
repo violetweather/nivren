@@ -161,6 +161,7 @@ pub enum Stmt {
         name: String,
         type_params: Vec<TypeParam>,
         fields: Vec<FieldDef>,
+        derives: Vec<String>,
         span: Span,
     },
     Enum {

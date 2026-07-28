@@ -1,0 +1,40 @@
+shape MessagePlan holds {
+    endpoint is String
+    body is String
+    timeout is Float
+} with Json, Display, Validate
+
+define send_message
+takes {
+    plan is MessagePlan
+}
+gives String or String
+needs Network within "discord.com"
+{
+    keep headers set std.map.single with {
+        key set "Content-Type"
+        value set "application/json"
+    }
+    keep response set std.web.request with {
+        method set "POST"
+        url set plan.endpoint
+        headers set headers
+        body set plan.body
+        timeout set plan.timeout
+        maximum set 1048576
+    } or give
+    give ok(std.map.get with {
+        map set response
+        key set "status"
+    } ?? "missing")
+}
+
+prepare message as MessagePlan with {
+    endpoint set "https://discord.com/api/v10/channels/example/messages"
+    body set "{\"content\":\"hello from Nivren\"}"
+    timeout set 10.0
+}
+
+send_message with {
+    plan set perform message
+}

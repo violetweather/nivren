@@ -1,0 +1,29 @@
+type UserId from Int
+
+shape User holds {
+    id is UserId
+    name is String
+} with Json, Compare, Display, Validate, DatabaseRow
+
+shape QueryPlan holds {
+    statement is String
+    maximum_rows is Int
+} with Display, Validate
+
+define query_users
+takes {
+    plan is QueryPlan
+}
+gives QueryPlan
+{
+    give plan
+}
+
+prepare query as QueryPlan with {
+    statement set "select id, name from users"
+    maximum_rows set 100
+}
+
+query_users with {
+    plan set perform query
+}

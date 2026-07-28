@@ -48,6 +48,106 @@ fn arithmetic_and_precedence() {
 }
 
 #[test]
+fn edition_four_intent_grammar_checks_and_runs_in_both_engines() {
+    let source = r#"
+type UserId from Int
+
+shape User holds {
+    id is UserId
+    name is String
+    email is maybe String
+} with Json, Compare, Display, Validate
+
+choice LookupProblem holds {
+    case Missing
+    case Invalid carries String
+}
+
+define add
+takes {
+    left is Int
+    right is Int
+}
+gives Int
+{
+    give left + right
+}
+
+define checked_add
+takes {
+    left is Int
+    right is Int
+}
+gives Int or String
+needs Network within "example.test"
+{
+    give ok(add with {
+        left set left
+        right set right
+    })
+}
+
+shape AddPlan holds {
+    left is Int
+    right is Int
+}
+
+prepare addition as AddPlan with {
+    left set 20
+    right set 22
+}
+
+change total is Int set perform addition.left
+change total to total + addition.right
+
+keep answer set choose checked_add with {
+    left set total
+    right set 0
+} {
+    case Ok carries value => value
+    case Err carries problem => -1
+}
+
+when answer == 42 {
+    show("intent")
+} otherwise {
+    show("wrong")
+}
+
+change visited is Int set 0
+each value in [1, 2, 3] {
+    change visited to visited + value
+}
+repeat while visited < 10 {
+    change visited to visited + 1
+}
+
+answer + visited
+"#;
+    assert_eq!(eval_tree(source), Value::Int(52));
+    assert_eq!(eval_vm(source), Value::Int(52));
+}
+
+#[test]
+fn edition_four_diagnostics_name_the_intended_forms() {
+    let errors = nivren::check("keep answer is Int = 42").unwrap_err();
+    assert!(errors[0].message.contains("set"));
+
+    let errors = nivren::check("prepare request as Request { value set 1 }").unwrap_err();
+    assert!(errors[0].message.contains("with"));
+
+    let errors = nivren::check("shape User holds { name is String } with Magic").unwrap_err();
+    assert!(errors[0].message.contains("unknown derive 'Magic'"));
+
+    let errors = nivren::check(
+        "define add takes { left is Int right is Int } gives Int { give left + right }\n\
+         add with { right set 2 left set 1 }",
+    )
+    .unwrap_err();
+    assert!(errors[0].message.contains("canonical order"));
+}
+
+#[test]
 fn through_pipelines_values_into_readable_stages() {
     assert_eq!(
         eval(
@@ -98,6 +198,93 @@ fn public_edition_three_examples_all_type_check() {
         nivren::check(&source)
             .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
     }
+}
+
+#[test]
+fn edition_four_language_proof_programs_all_type_check() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4");
+    for name in [
+        "cli_automation.niv",
+        "http_service.niv",
+        "database_service.niv",
+        "realtime_bot.niv",
+        "concurrent_pipeline.niv",
+        "native_binding.niv",
+    ] {
+        let path = root.join(name);
+        let source = fs::read_to_string(&path).unwrap();
+        nivren::check(&source)
+            .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
+        let formatted = nivren::formatter::format(&source);
+        assert_eq!(nivren::formatter::format(&formatted), formatted);
+    }
+}
+
+#[test]
+fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
+    let tasks = [
+        (
+            "keep answer: Int = 42\nanswer",
+            "keep answer is Int set 42\nanswer",
+        ),
+        (
+            "change count: Int = 0\ncount = count + 1\ncount",
+            "change count is Int set 0\nchange count to count + 1\ncount",
+        ),
+        (
+            "define add(left: Int, right: Int) gives Int { give left + right }\nadd(20, 22)",
+            "define add takes { left is Int right is Int } gives Int { give left + right }\nadd with { left set 20 right set 22 }",
+        ),
+        (
+            "shape User { name: String, active: Bool }\nUser(\"Mira\", yes).name",
+            "shape User holds { name is String active is Bool }\nUser with { name set \"Mira\" active set yes }.name",
+        ),
+        (
+            "choice State { Ready, Failed(String) }\nchoose State.Ready { Ready => 1, Failed(problem) => 0 }",
+            "choice State holds { case Ready case Failed carries String }\nchoose State.Ready { case Ready => 1 case Failed carries problem => 0 }",
+        ),
+        (
+            "keep name: String? = none\nname ?? \"guest\"",
+            "keep name is maybe String set none\nname ?? \"guest\"",
+        ),
+        (
+            "change total = 0\neach value within [1, 2, 3] { total = total + value }\ntotal",
+            "change total set 0\neach value in [1, 2, 3] { change total to total + value }\ntotal",
+        ),
+        (
+            "change count = 0\nrepeat count < 3 { count = count + 1 }\ncount",
+            "change count set 0\nrepeat while count < 3 { change count to count + 1 }\ncount",
+        ),
+        (
+            "define answer() gives Result<Int, String> { give ok(42) }\nanswer()",
+            "define answer gives Int or String { give ok(42) }\nanswer with {}",
+        ),
+        (
+            "define double(value: Int) gives Int { give value * 2 }\n21 through double",
+            "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
+        ),
+        (
+            "shape Request { path: String, timeout: Float }\nkeep request = Request(\"/\", 5.0)\nrequest.path",
+            "shape Request holds { path is String timeout is Float }\nprepare request as Request with { path set \"/\" timeout set 5.0 }\n(perform request).path",
+        ),
+        (
+            "define greet(name: String) gives String { give \"hello \" + name }\ngreet(\"Nivren\")",
+            "define greet takes { name is String } gives String { give \"hello \" + name }\ngreet with { name set \"Nivren\" }",
+        ),
+    ];
+    let mut ratios = Vec::new();
+    for (edition_three, edition_four) in tasks {
+        nivren::check(edition_four).unwrap_or_else(|errors| panic!("{edition_four}: {errors:?}"));
+        let old = nivren::lexer::scan(edition_three).unwrap().len() - 1;
+        let new = nivren::lexer::scan(edition_four).unwrap().len() - 1;
+        ratios.push(new as f64 / old as f64);
+    }
+    ratios.sort_by(f64::total_cmp);
+    let median = (ratios[5] + ratios[6]) / 2.0;
+    assert!(
+        median <= 1.15,
+        "Edition 4 median token ratio {median:.3} exceeds the 1.15 language-proof budget"
+    );
 }
 
 #[test]
