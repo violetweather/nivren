@@ -224,8 +224,7 @@ define user_name
 takes {
     value is User
 }
-gives String
-{
+gives String {
     give value.name
 }
 
@@ -414,6 +413,10 @@ fn public_edition_three_examples_all_type_check() {
         let source = fs::read_to_string(&path).unwrap();
         nivren::check(&source)
             .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
+        let formatted = nivren::formatter::format(&source);
+        assert_eq!(nivren::formatter::format(&formatted), formatted);
+        nivren::check(&formatted)
+            .unwrap_or_else(|errors| panic!("formatted {} failed: {errors:?}", path.display()));
     }
 }
 
@@ -434,6 +437,8 @@ fn edition_four_language_proof_programs_all_type_check() {
             .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
         let formatted = nivren::formatter::format(&source);
         assert_eq!(nivren::formatter::format(&formatted), formatted);
+        nivren::check(&formatted)
+            .unwrap_or_else(|errors| panic!("formatted {} failed: {errors:?}", path.display()));
     }
 }
 
@@ -2371,17 +2376,50 @@ define greet
 takes {
     user is User
 }
-gives String
-{
+gives String {
     keep text is String set user.name
     give text
 }
-greet with { user set User with { name set "Mira" } }
+greet with {
+    user set User with {
+        name set "Mira"
+    }
+}
 "#;
     let formatted = nivren::formatter::format(source);
     assert_eq!(formatted, expected);
     assert_eq!(nivren::formatter::format(&formatted), formatted);
     assert!(nivren::check(&formatted).is_ok());
+}
+
+#[test]
+fn edition_four_formatter_erases_equivalent_line_layout_choices() {
+    let compact = r#"shape User holds { name is String } with Json define greet takes { user is User } gives String { give user.name } greet with { user set User with { name set "Mira" } }"#;
+    let vertical = r#"
+shape User holds {
+    name is String
+} with Json
+
+define greet
+takes {
+    user is User
+}
+gives String
+{
+    give user.name
+}
+
+greet with {
+    user set User with {
+        name set "Mira"
+    }
+}
+"#;
+    let compact = nivren::formatter::format(compact);
+    let vertical = nivren::formatter::format(vertical);
+    assert_eq!(compact, vertical);
+    assert_eq!(nivren::formatter::format(&compact), compact);
+    assert!(nivren::check(&compact).is_ok());
 }
 
 #[test]

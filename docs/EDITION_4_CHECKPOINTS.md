@@ -13,7 +13,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 | Labeled argument safety | Passing | Labels survive the AST; local declarations, imported exports, core functions, compatibility aliases, and every typed standard-library function validate exact canonical names/order; catalog coverage and arity are checked automatically |
 | Derive behavior | Passing | All eight derives enforce dependencies/field constraints and generate labeled methods; JSON, comparison, display, key, validation, deterministic binary, strict row, and argument decoding agree in the tree and Bytecode 6 engines |
 | Scoped source capabilities | Passing for Language Proof | Fixed capability vocabulary, bounded scope metadata, host-only Network validation, and generated documentation pass; runtime authorization remains gated by Intent Proof |
-| Canonical formatter | Partial | Edition 4 spacing, indentation, comments, strings, and operators have deterministic output; example and arbitrary-source idempotence properties pass; canonical line breaking remains open |
+| Canonical formatter | Passing | Spacing, clauses, structural line layout, four-space indentation, comments, strings, and operators are deterministic; compact/vertical equivalence, arbitrary-source idempotence, 29 Edition 3 examples, and six Edition 4 proof programs pass after formatting |
 | Usability corpus | Passing | Twelve paired tasks type-check within the 1.15 median token budget; six executable maintenance cases add no conceptual steps and reduce recorded ambiguous choices |
 | Actionable diagnostics | Passing for implemented forms | Canonical bindings, nominal wrappers, shapes, choices, preparation, pipelines, scopes, protocols, adoptions, derives, and label order have correction-oriented assertions |
 | Clippy warnings denied | Passing | The complete workspace passes Rust 1.97 clippy with warnings denied |
@@ -26,8 +26,7 @@ This ledger prevents later Edition 4 work from bypassing the agreed proof gates.
 
 ### Remaining Language Proof blockers
 
-1. Finish canonical line breaking in the comment-preserving Edition 4 formatter.
-2. Rerun the entire checkpoint matrix and record final measurements.
+1. Rerun the entire checkpoint matrix and record final measurements.
 
 ## Intent Proof — not started
 

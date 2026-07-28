@@ -2,18 +2,10 @@ pub fn format(source: &str) -> String {
     let mut output = String::new();
     let mut indent = 0usize;
     let mut block_comment_depth = 0usize;
-    let mut previous_blank = false;
 
-    for raw_line in source.lines() {
+    for raw_line in canonical_lines(source) {
         let line = raw_line.trim();
-        if line.is_empty() {
-            if !output.is_empty() && !previous_blank {
-                output.push('\n');
-            }
-            previous_blank = true;
-            continue;
-        }
-        previous_blank = false;
+        debug_assert!(!line.is_empty());
         let started_in_block_comment = block_comment_depth > 0;
         let (opens, closes, begins_with_close) = braces(line, &mut block_comment_depth);
         let line = if started_in_block_comment || line.starts_with("/*") {
@@ -34,6 +26,245 @@ pub fn format(source: &str) -> String {
             .saturating_sub(closes.saturating_sub(accounted_close));
     }
     output
+}
+
+fn canonical_lines(source: &str) -> Vec<String> {
+    let characters = source.chars().collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut index = 0;
+    let mut pending_space = false;
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    let mut data_blocks = Vec::new();
+    let mut previous_word = String::new();
+
+    while index < characters.len() {
+        let character = characters[index];
+        let next = characters.get(index + 1).copied();
+        if character.is_whitespace() {
+            if character == '\n'
+                && parentheses == 0
+                && brackets == 0
+                && !data_blocks.last().copied().unwrap_or(false)
+                && next_non_whitespace(&characters, index + 1) != Some('{')
+            {
+                flush_line(&mut lines, &mut current);
+                previous_word.clear();
+            }
+            pending_space = !current.is_empty();
+            index += 1;
+            continue;
+        }
+        if character == '/' && next == Some('/') {
+            push_space(&mut current, &mut pending_space);
+            while index < characters.len() && characters[index] != '\n' {
+                current.push(characters[index]);
+                index += 1;
+            }
+            flush_line(&mut lines, &mut current);
+            pending_space = false;
+            previous_word.clear();
+            continue;
+        }
+        if character == '/' && next == Some('*') {
+            flush_line(&mut lines, &mut current);
+            let mut comment = String::new();
+            let mut depth = 0usize;
+            while index < characters.len() {
+                let character = characters[index];
+                let next = characters.get(index + 1).copied();
+                comment.push(character);
+                if character == '/' && next == Some('*') {
+                    depth += 1;
+                    comment.push('*');
+                    index += 2;
+                    continue;
+                }
+                if character == '*' && next == Some('/') {
+                    depth = depth.saturating_sub(1);
+                    comment.push('/');
+                    index += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                index += 1;
+            }
+            for line in comment.lines() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    lines.push(line.to_string());
+                }
+            }
+            pending_space = false;
+            previous_word.clear();
+            continue;
+        }
+        if character == '"' {
+            push_space(&mut current, &mut pending_space);
+            current.push(character);
+            index += 1;
+            let mut escaped = false;
+            while index < characters.len() {
+                let character = characters[index];
+                current.push(character);
+                index += 1;
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    break;
+                }
+            }
+            previous_word.clear();
+            continue;
+        }
+        if character.is_alphabetic() || character == '_' {
+            let start = index;
+            index += 1;
+            while index < characters.len()
+                && (characters[index].is_alphanumeric() || characters[index] == '_')
+            {
+                index += 1;
+            }
+            let word = characters[start..index].iter().collect::<String>();
+            if should_break_before(&word, &previous_word, &current, parentheses, brackets) {
+                flush_line(&mut lines, &mut current);
+                pending_space = false;
+            }
+            push_space(&mut current, &mut pending_space);
+            current.push_str(&word);
+            previous_word = word;
+            continue;
+        }
+        match character {
+            '{' => {
+                let data_block = is_data_block_header(&current);
+                push_space(&mut current, &mut pending_space);
+                current.push('{');
+                flush_line(&mut lines, &mut current);
+                data_blocks.push(data_block);
+                previous_word.clear();
+            }
+            '}' => {
+                flush_line(&mut lines, &mut current);
+                current.push('}');
+                data_blocks.pop();
+                previous_word.clear();
+                pending_space = false;
+            }
+            ';' => {
+                trim_spaces(&mut current);
+                current.push(';');
+                flush_line(&mut lines, &mut current);
+                previous_word.clear();
+                pending_space = false;
+            }
+            '(' => {
+                push_space(&mut current, &mut pending_space);
+                current.push(character);
+                parentheses += 1;
+                previous_word.clear();
+            }
+            ')' => {
+                current.push(character);
+                parentheses = parentheses.saturating_sub(1);
+                previous_word.clear();
+            }
+            '[' => {
+                push_space(&mut current, &mut pending_space);
+                current.push(character);
+                brackets += 1;
+                previous_word.clear();
+            }
+            ']' => {
+                current.push(character);
+                brackets = brackets.saturating_sub(1);
+                previous_word.clear();
+            }
+            _ => {
+                push_space(&mut current, &mut pending_space);
+                current.push(character);
+                previous_word.clear();
+            }
+        }
+        index += 1;
+    }
+    flush_line(&mut lines, &mut current);
+    lines
+}
+
+fn next_non_whitespace(characters: &[char], mut index: usize) -> Option<char> {
+    while index < characters.len() {
+        if !characters[index].is_whitespace() {
+            return Some(characters[index]);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_data_block_header(header: &str) -> bool {
+    let header = header.trim();
+    header.contains(" holds")
+        || header.starts_with("takes")
+        || header.starts_with("expose")
+        || header.ends_with(" with")
+}
+
+fn should_break_before(
+    word: &str,
+    previous_word: &str,
+    current: &str,
+    parentheses: usize,
+    brackets: usize,
+) -> bool {
+    if current.trim().is_empty() || parentheses > 0 || brackets > 0 {
+        return false;
+    }
+    if current.trim_start().starts_with('}') && !matches!(word, "with" | "otherwise" | "or") {
+        return true;
+    }
+    if matches!(word, "takes" | "gives" | "needs") {
+        return true;
+    }
+    matches!(
+        word,
+        "keep"
+            | "change"
+            | "prepare"
+            | "when"
+            | "each"
+            | "repeat"
+            | "using"
+            | "show"
+            | "expose"
+            | "define"
+            | "shape"
+            | "choice"
+            | "case"
+            | "protocol"
+            | "adopt"
+            | "import"
+    ) || (word == "give" && previous_word != "or")
+}
+
+fn push_space(output: &mut String, pending_space: &mut bool) {
+    if *pending_space && !output.is_empty() && !output.ends_with([' ', '.', '(', '[']) {
+        output.push(' ');
+    }
+    *pending_space = false;
+}
+
+fn flush_line(lines: &mut Vec<String>, current: &mut String) {
+    let line = current.trim();
+    if !line.is_empty() {
+        lines.push(line.to_string());
+    }
+    current.clear();
 }
 
 fn normalize_line(line: &str) -> String {
@@ -98,7 +329,8 @@ fn normalize_line(line: &str) -> String {
             }
             '=' => {
                 trim_spaces(&mut output);
-                if !output.is_empty() {
+                let joins_previous_operator = output.ends_with(['<', '>', '!']);
+                if !output.is_empty() && !joins_previous_operator {
                     output.push(' ');
                 }
                 output.push('=');

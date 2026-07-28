@@ -48,6 +48,8 @@ Derives generate labeled shape methods: `to_json`/`from_json`, `compare`, `displ
 
 Labeled-call names are preserved in the checked syntax tree. Local functions and shapes use their declared parameters or fields; imported module exports retain that metadata and are checked at the call site. Official callables use the same canonical metadata catalog. A labeled call with missing metadata is rejected rather than silently reverting to positional behavior.
 
+The canonical formatter removes layout-only blank lines, emits four-space block indentation, places structural braces deterministically, keeps executable statements on separate lines, and compacts fields or labeled values within their data boundary before applying the structural layout. Function `takes`, `gives`, and `needs` clauses receive deterministic clause breaks. Strings and nested block or line comments are never interpreted as structure. Formatting is idempotent, preserves comments, and maps compact and vertical spellings of the same checked token sequence to one representation.
+
 Scoped `needs` declarations preserve both the capability and boundary. Capabilities are drawn from the fixed capability vocabulary. Boundaries must be non-empty, bounded, and free of control characters; `Network` boundaries name hosts rather than URLs. This is static Language Proof validation only. Authorization and enforcement belong to the Intent Proof checkpoint.
 
 `gives Value or Problem` denotes the same checked result type represented internally as `Result<Value, Problem>`. `maybe Value` denotes the standard optional type. Edition 4 source MUST NOT require `T?` or `Result<T, E>` spellings.
