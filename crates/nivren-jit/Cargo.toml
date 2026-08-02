@@ -8,7 +8,7 @@ description = "Isolated native-code tier for the Nivren runtime"
 repository = "https://github.com/violetweather/nivren"
 
 [dependencies]
-cranelift-codegen = "=0.121.2"
+cranelift-codegen = "=0.125.4"
 cranelift-frontend = "=0.121.2"
 cranelift-jit = "=0.121.2"
 cranelift-module = "=0.121.2"
