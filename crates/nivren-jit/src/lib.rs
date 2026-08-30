@@ -2,6 +2,15 @@ use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, UserFuncName, types
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
+
+/// Cranelift now allocates variable numbers itself, so slots are mapped through
+/// the order in which they were declared rather than assumed to match.
+fn slot_variable(variables: &[Variable], slot: u32) -> Result<Variable, String> {
+    variables
+        .get(usize::try_from(slot).map_err(|_| "JIT slot index overflow")?)
+        .copied()
+        .ok_or_else(|| format!("JIT slot {slot} was never declared"))
+}
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -224,10 +233,8 @@ fn define_trace_body(
     builder.append_block_params_for_function_params(entry);
     builder.append_block_param(dispatch, types::I64);
     builder.append_block_param(exit, types::I64);
-    let context_var = Variable::from_u32(0);
-    let callback_var = Variable::from_u32(1);
-    builder.declare_var(context_var, pointer);
-    builder.declare_var(callback_var, pointer);
+    let context_var = builder.declare_var(pointer);
+    let callback_var = builder.declare_var(pointer);
     builder.switch_to_block(entry);
     builder.seal_block(entry);
     builder.def_var(context_var, builder.block_params(entry)[0]);
@@ -392,9 +399,10 @@ impl CompiledFunction {
             function.seal_block(entry);
             let argument_pointer = function.block_params(entry)[0];
             let overflow_pointer = function.block_params(entry)[1];
+            let mut variables = Vec::with_capacity(slots);
             for slot in 0..slots {
-                let variable = Variable::from_u32(u32::try_from(slot).unwrap());
-                function.declare_var(variable, types::I64);
+                let variable = function.declare_var(types::I64);
+                variables.push(variable);
                 let initial = if slot < parameters {
                     function.ins().load(
                         types::I64,
@@ -414,10 +422,12 @@ impl CompiledFunction {
                     IntOp::Constant(value) => {
                         stack.push(function.ins().iconst(types::I64, *value));
                     }
-                    IntOp::Load(slot) => stack.push(function.use_var(Variable::from_u32(*slot))),
+                    IntOp::Load(slot) => {
+                        stack.push(function.use_var(slot_variable(&variables, *slot)?))
+                    }
                     IntOp::Define(slot) | IntOp::Store(slot) => {
                         let value = *stack.last().ok_or("JIT stack underflow")?;
-                        function.def_var(Variable::from_u32(*slot), value);
+                        function.def_var(slot_variable(&variables, *slot)?, value);
                     }
                     IntOp::Pop => {
                         stack.pop().ok_or("JIT stack underflow")?;
@@ -582,9 +592,10 @@ fn define_integer_function<M: Module>(
         function.seal_block(entry);
         let argument_pointer = function.block_params(entry)[0];
         let overflow_pointer = function.block_params(entry)[1];
+        let mut variables = Vec::with_capacity(slots);
         for slot in 0..slots {
-            let variable = Variable::from_u32(u32::try_from(slot).unwrap());
-            function.declare_var(variable, types::I64);
+            let variable = function.declare_var(types::I64);
+            variables.push(variable);
             let initial = if slot < parameters {
                 function.ins().load(
                     types::I64,
@@ -602,10 +613,12 @@ fn define_integer_function<M: Module>(
         for operation in operations {
             match operation {
                 IntOp::Constant(value) => stack.push(function.ins().iconst(types::I64, *value)),
-                IntOp::Load(slot) => stack.push(function.use_var(Variable::from_u32(*slot))),
+                IntOp::Load(slot) => {
+                    stack.push(function.use_var(slot_variable(&variables, *slot)?))
+                }
                 IntOp::Define(slot) | IntOp::Store(slot) => {
                     let value = *stack.last().ok_or("AOT stack underflow")?;
-                    function.def_var(Variable::from_u32(*slot), value);
+                    function.def_var(slot_variable(&variables, *slot)?, value);
                 }
                 IntOp::Pop => {
                     stack.pop().ok_or("AOT stack underflow")?;

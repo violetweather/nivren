@@ -2,12 +2,24 @@ protocol Named {
     define name(value: Self) gives String
 }
 
-shape User { name: String }
-define user_name(value: User) gives String { give value.name }
+shape User holds {
+    name is String
+}
+
+define user_name
+takes { value is User }
+gives String
+{
+    give value.name
+}
+
 adopt Named for User { name = user_name }
 
-define present<Value: Named>(value: Value) gives String {
+define present<Value: Named>
+takes { value is Value }
+gives String
+{
     give Named.name(value)
 }
 
-show present(User("Mira"))
+show(present with { value set User with { name set "Mira" } })

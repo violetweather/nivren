@@ -1,9 +1,15 @@
-keep language: String = "Nivren"
-keep values: [Int] = [2, 3, 5, 7]
+keep language is String set "Nivren"
+keep values is [Int] set [2, 3, 5, 7]
 
-define add(total: Int, value: Int) gives Int {
+define add
+takes {
+    total is Int
+    value is Int
+}
+gives Int
+{
     give total + value
 }
 
 show("Hello, " + language + "!")
-show(values through std.list.fold(0, add))
+show(values through std.list.fold with { initial set 0 combine set add })

@@ -1,23 +1,35 @@
-define serve_once(listener: TcpListener) gives Result<Null, String> needs Network {
+define serve_once
+takes {
+    listener is TcpListener
+}
+gives Null or String
+needs Network
+{
     using server = listener {
-        keep accepted = std.net.accept(server, 30.0)
+        keep accepted set std.net.accept with { listener set server timeout set 30.0 }
         using connection = accepted or give {
-            keep request = std.web.read_request(connection, 1048576) or give
-            keep path = std.map.get(request, "path") ?? "/"
-            keep headers = std.map.single("Content-Type", "text/plain; charset=utf-8")
-            keep sent = std.web.respond(
-                connection,
-                200,
-                headers,
-                "Nivren received " + path
-            ) or give
+            keep request set std.web.read_request with {
+                stream set connection
+                maximum set 1048576
+            } or give
+            keep path set std.map.get with { map set request key set "path" } ?? "/"
+            keep headers set std.map.single with {
+                key set "Content-Type"
+                value set "text/plain; charset=utf-8"
+            }
+            keep sent set std.web.respond with {
+                stream set connection
+                status set 200
+                headers set headers
+                body set "Nivren received " + path
+            } or give
             give ok(none)
         }
     }
 }
 
-keep opened = std.net.listen("127.0.0.1", 8080)
+keep opened set std.net.listen with { host set "127.0.0.1" port set 8080 }
 choose opened {
-    Ok(listener) => serve_once(listener),
-    Err(problem) => err(problem)
+    case Ok carries listener => serve_once with { listener set listener }
+    case Err carries problem => err(problem)
 }

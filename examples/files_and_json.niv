@@ -1,12 +1,21 @@
-shape Document { title: String, published: Bool }
+shape Document holds {
+    title is String
+    published is Bool
+}
 
-define load_document(path: String) gives Result<String, String> needs FileRead {
-    keep opened = std.files.open_read(path)
+define load_document
+takes {
+    path is String
+}
+gives String or String
+needs FileRead
+{
+    keep opened set std.files.open_read with { path set path }
     using file = opened or give {
-        keep source = std.files.read_open(file, 1048576) or give
-        keep document = std.json.decode(Document, source) or give
-        give std.json.stringify(document)
+        keep source set std.files.read_open with { file set file maximum set 1048576 } or give
+        keep document set std.json.decode with { schema set Document source set source } or give
+        give std.json.stringify with { value set document }
     }
 }
 
-load_document("data.json")
+load_document with { path set "data.json" }

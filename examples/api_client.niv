@@ -1,13 +1,19 @@
-define fetch_status(url: String) gives Result<String, String> needs Network {
-    keep response = std.web.request(
-        "GET",
-        url,
-        std.web.headers(),
-        "",
-        5.0,
-        1048576
-    ) or give
-    give ok(std.map.get(response, "status") ?? "missing status")
+define fetch_status
+takes {
+    url is String
+}
+gives String or String
+needs Network
+{
+    keep response set std.web.request with {
+        method set "GET"
+        url set url
+        headers set std.web.headers with {}
+        body set ""
+        timeout set 5.0
+        maximum set 1048576
+    } or give
+    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
 }
 
-fetch_status("https://example.com")
+fetch_status with { url set "https://example.com" }

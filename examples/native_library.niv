@@ -1,12 +1,22 @@
-define add_with_library(path: String) gives Result<Int, String> needs Native {
-    keep opened = std.native.open(path) or give
+define add_with_library
+takes {
+    path is String
+}
+gives Int or String
+needs Native
+{
+    keep opened set std.native.open with { path set path } or give
     using library = opened {
-        give std.native.call_int(library, "nivren_add", [20, 22])
+        give std.native.call_int with {
+            library set library
+            symbol set "nivren_add"
+            arguments set [20, 22]
+        }
     }
 }
 
-keep answer = add_with_library("./libnivren_example.so")
+keep answer set add_with_library with { path set "./libnivren_example.so" }
 show(choose answer {
-    Ok(value) => value,
-    Err(problem) => -1,
+    case Ok carries value => value
+    case Err carries problem => -1
 })

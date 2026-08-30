@@ -1,5 +1,18 @@
-choice Role { Admin, Member }
-shape Address { city: String, postal: U32 }
-shape User { name: String, role: Role, address: Address?, tags: [String] }
+choice Role holds {
+    case Admin
+    case Member
+}
+
+shape Address holds {
+    city is String
+    postal is U32
+}
+
+shape User holds {
+    name is String
+    role is Role
+    address is maybe Address
+    tags is [String]
+}
 
 expose { Role, Address, User }

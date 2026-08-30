@@ -1,15 +1,19 @@
-define packet_fields() gives Result<String, String> {
-    keep version: U8 = std.u8.from_int(3) or give
-    keep port: U16 = std.u16.from_int(8080) or give
-    keep sequence: U64 = std.u64.parse("18446744073709551615") or give
+define packet_fields
+gives String or String
+{
+    keep version is U8 set std.u8.from_int with { value set 3 } or give
+    keep port is U16 set std.u16.from_int with { value set 8080 } or give
+    keep sequence is U64 set std.u64.parse with {
+        source set "18446744073709551615"
+    } or give
     give ok(
-        std.u8.format(version)
-        + ":" + std.u16.format(port)
-        + ":" + std.u64.format(sequence)
+        std.u8.format with { value set version }
+        + ":" + std.u16.format with { value set port }
+        + ":" + std.u64.format with { value set sequence }
     )
 }
 
-choose packet_fields() {
-    Ok(value) => value,
-    Err(problem) => problem
+choose packet_fields with {} {
+    case Ok carries value => value
+    case Err carries problem => problem
 }
