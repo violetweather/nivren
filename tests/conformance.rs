@@ -26,6 +26,14 @@ fn edition_four_language_proof_conformance_vectors() {
     );
 }
 
+#[test]
+fn edition_five_language_draft_conformance_vectors() {
+    run_suite(
+        include_str!("../conformance/edition5-language-draft.json"),
+        "edition5-language-draft",
+    );
+}
+
 fn run_suite(source: &str, edition: &str) {
     let cases: serde_json::Value = serde_json::from_str(source).unwrap();
     let cases = cases.as_array().unwrap();

@@ -8,6 +8,10 @@ Finality: after Freeze Proof, the namespace set and every contract in this docum
 
 Every numeric bound in this document is a frozen **default** under the declared-limits policy of `LANGUAGE-5-DRAFT.md` section 15.3: an application's root manifest may declare a different concrete value for a named limit within its published range, and unconfigured programs keep the defaults forever.
 
+## 1.1 Implementation status (edition-5-draft branch)
+
+Implemented with tests: the `std.text` growth (except the `codepoints`/`graphemes` iterators, which wait on the iterator seam and a Unicode segmentation decision), `std.time.monotonic` plus calendar fields and `difference_seconds`, `std.uint`, `std.plans` (dynamic portability checking), the `std.gpu` availability surface, and `std.reflect.schema` over functions (parameter names and positions; declared types, results, and generics still require checker-side generation). Pending: `I128`/`U128`, the `Number`/`Integer`/`Exact` protocol refinements as user-visible constraints, `Display` adoption for text holes, `Iterate`, `std.source`, and the alias removals.
+
 ## 2. Namespaces
 
 The canonical namespaces are `std.files`, `std.web`, `std.tasks`, and `std.channels`, plus the topical namespaces this document names. The Edition 2 compatibility aliases `std.fs`, `std.http`, `std.task`, and `std.channel` are removed, exercising the removal clause of the Edition 3 specification; `niv fix` rewrites every alias reference to its canonical spelling. The namespace set is closed: new capability areas ship as packages, not as new `std` namespaces.

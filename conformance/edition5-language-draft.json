@@ -1,0 +1,132 @@
+[
+  {
+    "name": "loop-stop",
+    "source": "change total set 0\nchange value set 0\nrepeat while value < 10 {\n    change value to value + 1\n    when value == 4 { stop }\n    change total to total + value\n}\nshow(total)",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "6\n"
+  },
+  {
+    "name": "loop-skip",
+    "source": "change total set 0\neach item in [1, 2, 3, 4, 5] {\n    when item == 2 { skip }\n    change total to total + item\n}\nshow(total)",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "13\n"
+  },
+  {
+    "name": "choose-literals-and-otherwise",
+    "source": "show(choose 3 {\n    case 1 => \"one\"\n    case 2 => \"two\"\n    otherwise as number => std.int.format(number)\n})",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "3\n"
+  },
+  {
+    "name": "choose-or-pattern-and-guard",
+    "source": "choice Size holds {\n    case Small\n    case Large carries Int\n}\ndefine describe takes { value is Size } gives String {\n    give choose value {\n        case Large carries amount when amount > 10 => \"big\"\n        case Large carries amount => \"large\"\n        case Small => \"small\"\n    }\n}\nshow(describe with { value set Size.Large(25) })",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "big\n"
+  },
+  {
+    "name": "choose-shape-pattern",
+    "source": "shape Point holds {\n    x is Int\n    y is Int\n}\nshow(choose Point with { x set 0, y set 0 } {\n    case Point holds { x set 0, y set 0 } => \"origin\"\n    case Point holds { x set x } => std.int.format(x)\n})",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "origin\n"
+  },
+  {
+    "name": "keep-destructures-shapes",
+    "source": "shape Point holds {\n    x is Int\n    y is Int\n}\nkeep Point holds { x set x, y set y } set Point with { x set 3, y set 4 }\nshow(x * 10 + y)",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "34\n"
+  },
+  {
+    "name": "when-carries-unwraps-maybe",
+    "source": "keep table set std.map.single(1, \"one\")\nchange seen set \"missing\"\nwhen std.map.get(table, 1) carries value {\n    change seen to value\n}\nshow(seen)",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "one\n"
+  },
+  {
+    "name": "text-literal-interpolates",
+    "source": "keep name set \"world\"\nshow(text \"Hello {name}, {1 + 2}!\")",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "Hello world, 3!\n"
+  },
+  {
+    "name": "promise-never-rejects-calls",
+    "source": "promise never Time\nstd.time.sleep(0.1)",
+    "arguments": [
+      "check",
+      "{source}"
+    ],
+    "status": 65,
+    "stderr_contains": "promise never Time"
+  },
+  {
+    "name": "samples-stay-quiet-in-runs",
+    "source": "sample \"adding\" {\n    1 + 1\n} shows \"3\"\nshow(42)",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "42\n"
+  },
+  {
+    "name": "uint-checked-arithmetic",
+    "source": "define compute takes { } gives String or String {\n    keep small set std.uint.from_int(7) or give\n    keep large set std.uint.from_int(6) or give\n    give ok(std.uint.format(small + large))\n}\nshow(choose compute with {} {\n    case Ok carries value => value\n    case Err carries message => message\n})",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "13\n"
+  },
+  {
+    "name": "loop-exit-needs-a-loop",
+    "source": "stop",
+    "arguments": [
+      "check",
+      "{source}"
+    ],
+    "status": 65,
+    "stderr_contains": "no 'repeat' or 'each' loop"
+  },
+  {
+    "name": "portable-plan-round-trip",
+    "source": "shape FetchPlan holds {\n    address is String\n    attempts is Int\n} with Json\ndefine round_trip takes { } gives String or String {\n    prepare request as FetchPlan with { address set \"example.com\", attempts set 3 }\n    keep encoded set std.plans.encode(request) or give\n    keep decoded set std.plans.decode(FetchPlan, encoded) or give\n    give ok(decoded.address)\n}\nshow(choose round_trip with {} {\n    case Ok carries value => value\n    case Err carries message => message\n})",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "example.com\n"
+  }
+]
