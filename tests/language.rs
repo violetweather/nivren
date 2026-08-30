@@ -297,6 +297,40 @@ std.json.decode with {
 }
 
 #[test]
+fn edition_four_labels_may_reuse_contextual_keywords() {
+    // `std.iter.range` declares a canonical first label named `start`, which is
+    // also the structured-concurrency keyword. The labeled-call form must still
+    // reach it, and `start` must keep spawning tasks in expression position.
+    let ranged = r#"
+keep counted set std.iter.range with { start set 0 end set 10 step set 2 }
+show(counted)
+"#;
+    assert!(nivren::check(ranged).is_ok());
+
+    let spawned = r#"
+define first
+gives Int
+{
+    give 20
+}
+
+keep value set wait start first
+show(value)
+"#;
+    assert!(nivren::check(spawned).is_ok());
+
+    let named = r#"
+shape Window holds {
+    start is Int
+}
+
+keep frame set Window with { start set 3 }
+show(frame.start)
+"#;
+    assert!(nivren::check(named).is_ok());
+}
+
+#[test]
 fn edition_four_derives_are_checked_and_gate_generated_operations() {
     let complete = r#"
 shape Release holds {
@@ -391,41 +425,25 @@ fn through_pipelines_values_into_readable_stages() {
     );
 }
 
-#[test]
-fn public_edition_three_examples_all_type_check() {
+fn public_example_sources() -> Vec<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
-    for name in [
-        "api_client.niv",
-        "async_files.niv",
-        "discord_bot.niv",
-        "files_and_json.niv",
-        "fixed_width_numbers.niv",
-        "getting_started.niv",
-        "hello.niv",
-        "json_stream.niv",
-        "line_stream.niv",
-        "iterators.niv",
-        "native_host.niv",
-        "async_host.niv",
-        "atomics.niv",
-        "authenticated_encryption.niv",
-        "csv_tables.niv",
-        "signed_token.niv",
-        "native_library.niv",
-        "native_schema.niv",
-        "network_reactor.niv",
-        "tcp_lines.niv",
-        "numbers.niv",
-        "passwords.niv",
-        "scoped_lock.niv",
-        "secure_websocket.niv",
-        "secure_websocket_server.niv",
-        "time_zones.niv",
-        "transactions.niv",
-        "web_server.niv",
-        "websocket_echo.niv",
-    ] {
-        let path = root.join(name);
+    let mut paths: Vec<PathBuf> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "niv"))
+        .collect();
+    paths.sort();
+    assert!(
+        paths.len() >= 29,
+        "expected the published example corpus, found {} files",
+        paths.len()
+    );
+    paths
+}
+
+#[test]
+fn public_edition_four_examples_all_type_check() {
+    for path in public_example_sources() {
         let source = fs::read_to_string(&path).unwrap();
         nivren::check(&source)
             .unwrap_or_else(|errors| panic!("{} failed: {errors:?}", path.display()));
@@ -433,6 +451,33 @@ fn public_edition_three_examples_all_type_check() {
         assert_eq!(nivren::formatter::format(&formatted), formatted);
         nivren::check(&formatted)
             .unwrap_or_else(|errors| panic!("formatted {} failed: {errors:?}", path.display()));
+    }
+}
+
+#[test]
+fn public_examples_contain_no_edition_three_residue() {
+    for path in public_example_sources() {
+        let source = fs::read_to_string(&path).unwrap();
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let residue = if trimmed.starts_with("keep ") || trimmed.starts_with("change ") {
+                // Edition 4 binds with `set` and reassigns with `to`; a bare `=`
+                // is Edition 3 spelling. `==` and `=>` are ordinary operators.
+                trimmed.match_indices('=').any(|(at, _)| {
+                    !trimmed[at..].starts_with("==")
+                        && !trimmed[at..].starts_with("=>")
+                        && !trimmed[..at].ends_with(['=', '!', '<', '>'])
+                })
+            } else {
+                trimmed.contains("gives Result<")
+            };
+            assert!(
+                !residue,
+                "{}:{} still uses Edition 3 spelling: {trimmed}",
+                path.display(),
+                index + 1
+            );
+        }
     }
 }
 
