@@ -38,7 +38,7 @@ use nivren_jit::{CallError as JitCallError, CompiledFunction, CompiledTrace};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::ast::{Expr, Literal, Span, Stmt, TextPiece, TypeRef};
+use crate::ast::{Expr, Literal, Pattern, Span, Stmt, TextPiece, TypeRef};
 use crate::bytecode::{BytecodeArm, Chunk, Op};
 use crate::error::NivError;
 use crate::fixed::{FixedInt, FixedKind};
@@ -1989,72 +1989,188 @@ impl Interpreter {
                     span.column,
                 )),
             },
-            Expr::Match(subject, arms, span) => match evaluate_part!(self, subject) {
-                Value::Enum(value) => {
-                    let arm = arms
-                        .iter()
-                        .find(|arm| arm.variant == value.variant)
-                        .ok_or_else(|| {
-                            NivError::new(
-                                format!("no choose arm for {}.{}", value.type_name, value.variant),
-                                span.line,
-                                span.column,
-                            )
-                        })?;
-                    self.evaluate_match_arm(arm, value.payload.clone())
-                }
-                Value::Ok(value) => {
-                    let arm = arms.iter().find(|arm| arm.variant == "Ok").ok_or_else(|| {
-                        NivError::new("no choose arm for Ok", span.line, span.column)
-                    })?;
-                    self.evaluate_match_arm(arm, Some(value.as_ref().clone()))
-                }
-                Value::Err(value) => {
-                    let arm = arms
-                        .iter()
-                        .find(|arm| arm.variant == "Err")
-                        .ok_or_else(|| {
-                            NivError::new("no choose arm for Err", span.line, span.column)
-                        })?;
-                    self.evaluate_match_arm(arm, Some(value.as_ref().clone()))
-                }
-                other => Err(NivError::new(
-                    format!(
-                        "choose requires choice or Result value, found {}",
-                        other.type_name()
-                    ),
-                    span.line,
-                    span.column,
-                )),
-            },
+            Expr::Match(subject, arms, span) => {
+                let subject_value = evaluate_part!(self, subject);
+                self.evaluate_match(&subject_value, arms, *span)
+            }
         };
         let value = result?;
         self.charge_memory(&value, expression.span())?;
         Ok(value)
     }
 
-    fn evaluate_match_arm(
+    fn evaluate_match(
         &mut self,
-        arm: &crate::ast::MatchArm,
-        payload: Option<Value>,
+        subject: &Value,
+        arms: &[crate::ast::MatchArm],
+        span: Span,
     ) -> Result<Value, NivError> {
-        if let (Some(name), Some(value)) = (&arm.binding, payload) {
+        for arm in arms {
+            let mut matched = None;
+            for pattern in &arm.patterns {
+                if let Some(bindings) = self.pattern_bindings(pattern, subject) {
+                    matched = Some(bindings);
+                    break;
+                }
+            }
+            let Some(bindings) = matched else { continue };
             let previous = self.environment.clone();
             let environment = self.child_scope(previous.clone());
-            environment.lock().unwrap().values.insert(
-                name.clone(),
-                Binding {
-                    value,
-                    mutable: false,
-                },
-            );
+            {
+                let mut scope = environment.lock().unwrap();
+                for (name, value) in bindings {
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
             self.environment = environment;
-            let result = self.evaluate(&arm.value);
+            let outcome = (|| {
+                if let Some(guard) = &arm.guard {
+                    let decision = self.evaluate(guard)?;
+                    if let Value::EarlyReturn(value) = decision {
+                        return Ok(Some(Value::EarlyReturn(value)));
+                    }
+                    if !expect_bool(decision, span)? {
+                        return Ok(None);
+                    }
+                }
+                self.evaluate(&arm.value).map(Some)
+            })();
             self.environment = previous;
-            result
-        } else {
-            self.evaluate(&arm.value)
+            match outcome? {
+                Some(value) => return Ok(value),
+                None => continue,
+            }
         }
+        Err(NivError::new(
+            "no choose arm matched this value; add an 'otherwise' arm",
+            span.line,
+            span.column,
+        ))
+    }
+
+    /// Matches one pattern against a value, producing its bindings on
+    /// success. Name resolution follows the checker's rule: an identifier
+    /// that names a case of the subject's own choice type is a case test;
+    /// any other identifier binds.
+    fn pattern_bindings(&self, pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+        let mut bindings = vec![];
+        self.pattern_matches(pattern, value, &mut bindings)
+            .then_some(bindings)
+    }
+
+    fn pattern_matches(
+        &self,
+        pattern: &Pattern,
+        value: &Value,
+        bindings: &mut Vec<(String, Value)>,
+    ) -> bool {
+        match pattern {
+            Pattern::Any(_) => true,
+            Pattern::Binding(name, _) => {
+                bindings.push((name.clone(), value.clone()));
+                true
+            }
+            Pattern::Literal(literal, _) => {
+                let literal_value = match literal {
+                    Literal::Int(int) => Value::Int(*int),
+                    Literal::Float(float) => Value::Float(*float),
+                    Literal::String(string) => Value::String(string.clone()),
+                    Literal::Bool(boolean) => Value::Bool(*boolean),
+                    Literal::Null => Value::Null,
+                };
+                *value == literal_value
+            }
+            Pattern::Name(name, _) => match value {
+                Value::Enum(subject) => {
+                    if subject.variant == *name {
+                        true
+                    } else if self.enum_has_variant(&subject.type_name, name) {
+                        false
+                    } else {
+                        bindings.push((name.clone(), value.clone()));
+                        true
+                    }
+                }
+                Value::Ok(_) => match name.as_str() {
+                    "Ok" => true,
+                    "Err" => false,
+                    _ => {
+                        bindings.push((name.clone(), value.clone()));
+                        true
+                    }
+                },
+                Value::Err(_) => match name.as_str() {
+                    "Err" => true,
+                    "Ok" => false,
+                    _ => {
+                        bindings.push((name.clone(), value.clone()));
+                        true
+                    }
+                },
+                _ => {
+                    bindings.push((name.clone(), value.clone()));
+                    true
+                }
+            },
+            Pattern::Carries(name, inner, _) => match value {
+                Value::Enum(subject) if subject.variant == *name => match &subject.payload {
+                    Some(payload) => {
+                        let payload = payload.clone();
+                        self.pattern_matches(inner, &payload, bindings)
+                    }
+                    None => false,
+                },
+                Value::Ok(payload) if name == "Ok" => {
+                    let payload = payload.as_ref().clone();
+                    self.pattern_matches(inner, &payload, bindings)
+                }
+                Value::Err(payload) if name == "Err" => {
+                    let payload = payload.as_ref().clone();
+                    self.pattern_matches(inner, &payload, bindings)
+                }
+                _ => false,
+            },
+            Pattern::Shape(name, fields, _) => match value {
+                Value::Record(record)
+                    if record.type_name == *name
+                        || record.type_name.ends_with(&format!(".{name}")) =>
+                {
+                    for (field, sub_pattern) in fields {
+                        let Some(index) = record.field_indices.get(field).copied() else {
+                            return false;
+                        };
+                        let field_value = record.fields[index].1.clone();
+                        if !self.pattern_matches(sub_pattern, &field_value, bindings) {
+                            return false;
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// Whether `variant` is a declared case of the named choice type. The
+    /// type value is found by its full name first, then by its final path
+    /// segment; an unknown type conservatively reports no such case.
+    fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
+        let found = lookup(&self.environment, type_name).or_else(|| {
+            type_name
+                .rsplit('.')
+                .next()
+                .and_then(|short| lookup(&self.environment, short))
+        });
+        matches!(
+            found,
+            Some(Value::EnumType(enum_type)) if enum_type.variants.iter().any(|name| name == variant)
+        )
     }
 
     fn binary(
@@ -3917,48 +4033,59 @@ impl Interpreter {
         arms: &[BytecodeArm],
         span: Span,
     ) -> Result<VmFlow, NivError> {
-        let (variant, payload) = match subject {
-            Value::Enum(value) => (value.variant.clone(), value.payload.clone()),
-            Value::Ok(value) => ("Ok".into(), Some(value.as_ref().clone())),
-            Value::Err(value) => ("Err".into(), Some(value.as_ref().clone())),
-            other => {
-                return Err(NivError::new(
-                    format!(
-                        "choose requires choice or Result value, found {}",
-                        other.type_name()
-                    ),
-                    span.line,
-                    span.column,
-                ));
+        for arm in arms {
+            let mut matched = None;
+            for pattern in &arm.patterns {
+                if let Some(bindings) = self.pattern_bindings(pattern, &subject) {
+                    matched = Some(bindings);
+                    break;
+                }
             }
-        };
-        let arm = arms
-            .iter()
-            .find(|arm| arm.variant == variant)
-            .ok_or_else(|| {
-                NivError::new(
-                    format!("no choose arm for {variant}"),
-                    span.line,
-                    span.column,
-                )
-            })?;
-        let previous = self.environment.clone();
-        self.roots.push(previous.clone());
-        if let (Some(binding), Some(value)) = (&arm.binding, payload) {
+            let Some(bindings) = matched else { continue };
+            let previous = self.environment.clone();
+            self.roots.push(previous.clone());
             let child = self.child_scope(previous.clone());
-            child.lock().unwrap().values.insert(
-                binding.clone(),
-                Binding {
-                    value,
-                    mutable: false,
-                },
-            );
+            {
+                let mut scope = child.lock().unwrap();
+                for (name, value) in bindings {
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
             self.environment = child;
+            let outcome = (|| {
+                if let Some(guard) = &arm.guard {
+                    match self.execute_chunk(guard)? {
+                        VmFlow::Continue(decision) => {
+                            if !expect_bool(decision, span)? {
+                                return Ok(None);
+                            }
+                        }
+                        returned @ VmFlow::Return(_) => return Ok(Some(returned)),
+                        VmFlow::Stop | VmFlow::Skip => {
+                            return Err(loop_exit_escape_error(span));
+                        }
+                    }
+                }
+                self.execute_chunk(&arm.body).map(Some)
+            })();
+            self.roots.pop();
+            self.environment = previous;
+            match outcome? {
+                Some(flow) => return Ok(flow),
+                None => continue,
+            }
         }
-        let result = self.execute_chunk(&arm.body);
-        self.roots.pop();
-        self.environment = previous;
-        result
+        Err(NivError::new(
+            "no choose arm matched this value; add an 'otherwise' arm",
+            span.line,
+            span.column,
+        ))
     }
 
     fn execute_bytecode_module(

@@ -6630,6 +6630,183 @@ text + 1
 }
 
 #[test]
+fn choose_guards_select_arms_with_bound_values_in_both_engines() {
+    let source = r#"
+choice Size holds {
+    case Small
+    case Large carries Int
+}
+define describe takes { value is Size } gives String {
+    give choose value {
+        case Large carries amount when amount > 10 => "big"
+        case Large carries amount => "large"
+        case Small => "small"
+    }
+}
+keep first set describe with { value set Size.Large(25) }
+keep second set describe with { value set Size.Large(5) }
+keep third set describe with { value set Size.Small }
+text "{first} {second} {third}"
+"#;
+    let expected = Value::String("big large small".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_or_patterns_join_cases_in_both_engines() {
+    let source = r#"
+choice Color holds {
+    case Red
+    case Green
+    case Blue
+}
+choose Color.Green {
+    case Red or Green => "warm"
+    case Blue => "cool"
+}
+"#;
+    let expected = Value::String("warm".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_matches_literals_with_an_otherwise_arm_in_both_engines() {
+    let source = r#"
+choose 3 {
+    case 1 => "one"
+    case 2 => "two"
+    otherwise as number => std.int.format(number)
+}
+"#;
+    let expected = Value::String("3".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_matches_nested_shape_patterns_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+keep origin set Point with { x set 0, y set 0 }
+choose origin {
+    case Point holds { x set 0, y set 0 } => "origin"
+    case Point holds { x set x } => std.int.format(x)
+}
+"#;
+    let expected = Value::String("origin".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_matches_case_payloads_with_nested_patterns_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+choice Placement holds {
+    case At carries Point
+}
+choose Placement.At(Point with { x set 0, y set 7 }) {
+    case At carries Point holds { x set 0, y set y } => std.int.format(y)
+    case At carries any => "elsewhere"
+}
+"#;
+    let expected = Value::String("7".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_exhaustiveness_rules_guard_the_new_patterns() {
+    let errors = nivren::check(r#"choose 5 { case 1 => "one" }"#).unwrap_err();
+    assert!(errors[0].to_string().contains("otherwise"));
+    let errors = nivren::check(
+        r#"
+choose 5 {
+    otherwise => 1
+    case 2 => 2
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("unreachable"));
+    let errors = nivren::check(
+        r#"
+choice Color holds {
+    case Red
+    case Blue
+}
+choose Color.Red {
+    case Red => 1
+    case Red => 2
+    case Blue => 3
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("duplicate"));
+    let errors = nivren::check(
+        r#"
+choice Color holds {
+    case Red
+    case Blue
+}
+choose Color.Red {
+    case Red => 1
+    case Blue => 2
+    otherwise => 3
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("already exhaustive"));
+}
+
+#[test]
+fn choose_rejects_unsafe_or_impure_pattern_forms() {
+    let errors = nivren::check(
+        r#"
+choose 1.5 {
+    case 1.5 => 1
+    otherwise => 2
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("safe selector"));
+    let errors = nivren::check(
+        r#"
+choose 5 {
+    case any when perform 1 => 1
+    otherwise => 2
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("pure"));
+    let errors = nivren::check(
+        r#"
+choice Size holds {
+    case Small
+    case Large carries Int
+}
+choose Size.Small {
+    case Large carries amount or Small => 1
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("same names"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

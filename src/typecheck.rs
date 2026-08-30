@@ -1,9 +1,19 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{Expr, Literal, Span, Stmt, TextPiece, TypeRef};
+use crate::ast::{Expr, Literal, Pattern, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
 use crate::fixed::FixedKind;
 use crate::lexer::TokenKind;
+
+/// How much of a matched type one unguarded pattern covers.
+enum Coverage {
+    /// Matches every value of the type.
+    Full,
+    /// Fully covers exactly one case of a choice.
+    Case(String),
+    /// May fail to match; contributes nothing to exhaustiveness.
+    Partial,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Type {
@@ -183,7 +193,10 @@ fn contains_perform(expression: &Expr) -> bool {
         }
         Expr::Array(values, _) => values.iter().any(contains_perform),
         Expr::Match(subject, arms, _) => {
-            contains_perform(subject) || arms.iter().any(|arm| contains_perform(&arm.value))
+            contains_perform(subject)
+                || arms.iter().any(|arm| {
+                    contains_perform(&arm.value) || arm.guard.as_ref().is_some_and(contains_perform)
+                })
         }
         Expr::Text(pieces, _) => pieces
             .iter()
@@ -3103,121 +3116,376 @@ impl Checker {
                 }
             },
             Expr::Match(subject, arms, span) => {
-                let (type_name, variants, payloads) = match self.expression(subject) {
-                    Type::Enum(name, arguments) => {
-                        let definitions = self.enums.get(&name).cloned().unwrap_or_default();
-                        let variants = definitions
-                            .iter()
-                            .map(|(variant, _)| variant.clone())
-                            .collect();
-                        let payloads = definitions
-                            .into_iter()
-                            .filter_map(|(variant, payload)| {
-                                payload.map(|payload| {
-                                    let substitutions = self
-                                        .type_parameters
-                                        .get(&name)
-                                        .into_iter()
-                                        .flatten()
-                                        .cloned()
-                                        .zip(arguments.clone())
-                                        .collect();
-                                    (variant, substitute(&payload, &substitutions))
-                                })
-                            })
-                            .collect();
-                        (name, variants, payloads)
+                let subject_type = self.expression(subject);
+                if matches!(subject_type, Type::Unknown) {
+                    for arm in arms {
+                        for pattern in &arm.patterns {
+                            let mut bindings = BTreeMap::new();
+                            self.check_pattern(pattern, &Type::Unknown, &mut bindings);
+                        }
+                        self.expression(&arm.value);
                     }
-                    Type::Result(ok, error) => {
-                        let mut payloads = HashMap::<String, Type>::new();
-                        payloads.insert("Ok".into(), *ok);
-                        payloads.insert("Err".into(), *error);
-                        ("Result".into(), vec!["Ok".into(), "Err".into()], payloads)
-                    }
-                    Type::Unknown => return Type::Unknown,
-                    other => {
-                        self.errors.push(NivError::new(
-                            format!(
-                                "choose requires choice or Result value, found {}",
-                                other.name()
-                            ),
-                            span.line,
-                            span.column,
-                        ));
-                        return Type::Unknown;
-                    }
-                };
-                let mut seen = std::collections::HashSet::new();
+                    return Type::Unknown;
+                }
+                let choice = self.pattern_cases(&subject_type);
+                let mut covered = std::collections::HashSet::new();
+                let mut all_covered = false;
                 let mut result = Type::Unknown;
                 for arm in arms {
-                    if !variants.contains(&arm.variant) {
+                    if all_covered {
                         self.errors.push(NivError::new(
-                            format!("{type_name} has no variant '{}'", arm.variant),
-                            arm.span.line,
-                            arm.span.column,
-                        ));
-                    } else if !seen.insert(arm.variant.clone()) {
-                        self.errors.push(NivError::new(
-                            format!("duplicate choose arm '{}'", arm.variant),
+                            "this choose arm is unreachable; the arms above already cover every value",
                             arm.span.line,
                             arm.span.column,
                         ));
                     }
-                    let arm_type = if let Some(binding) = &arm.binding {
-                        if let Some(payload) = payloads.get(&arm.variant).cloned() {
-                            self.scopes.push(HashMap::new());
-                            self.declare(
-                                binding,
-                                Binding {
-                                    ty: payload,
-                                    mutable: false,
-                                },
-                                arm.span,
-                            );
-                            let ty = self.expression(&arm.value);
-                            self.scopes.pop();
-                            ty
-                        } else {
+                    let mut alternatives = vec![];
+                    let mut arm_full = false;
+                    for pattern in &arm.patterns {
+                        let mut bindings = BTreeMap::new();
+                        let coverage = self.check_pattern(pattern, &subject_type, &mut bindings);
+                        if arm.guard.is_none() {
+                            match coverage {
+                                Coverage::Full => {
+                                    if let Some((_, variants, _)) = &choice
+                                        && variants.iter().all(|variant| covered.contains(variant))
+                                        && !variants.is_empty()
+                                    {
+                                        self.errors.push(NivError::new(
+                                            "this arm is unreachable; the case arms above are already exhaustive",
+                                            arm.span.line,
+                                            arm.span.column,
+                                        ));
+                                    }
+                                    arm_full = true;
+                                }
+                                Coverage::Case(name) => {
+                                    if !covered.insert(name.clone()) {
+                                        self.errors.push(NivError::new(
+                                            format!("duplicate choose arm for case '{name}'"),
+                                            arm.span.line,
+                                            arm.span.column,
+                                        ));
+                                    }
+                                }
+                                Coverage::Partial => {}
+                            }
+                        }
+                        alternatives.push(bindings);
+                    }
+                    let bindings = alternatives.first().cloned().unwrap_or_default();
+                    for alternative in alternatives.iter().skip(1) {
+                        if alternative != &bindings {
                             self.errors.push(NivError::new(
-                                format!("{} has no payload to bind", arm.variant),
+                                "every 'or' alternative binds the same names at the same types",
                                 arm.span.line,
                                 arm.span.column,
                             ));
-                            self.expression(&arm.value)
                         }
-                    } else {
-                        if payloads.contains_key(&arm.variant) {
+                    }
+                    self.scopes.push(HashMap::new());
+                    for (name, ty) in &bindings {
+                        self.declare(
+                            name,
+                            Binding {
+                                ty: ty.clone(),
+                                mutable: false,
+                            },
+                            arm.span,
+                        );
+                    }
+                    if let Some(guard) = &arm.guard {
+                        if contains_perform(guard) {
                             self.errors.push(NivError::new(
-                                format!("{} payload must be bound", arm.variant),
+                                "a choose guard attempted to perform an effect; guards stay pure",
                                 arm.span.line,
                                 arm.span.column,
                             ));
                         }
-                        self.expression(&arm.value)
-                    };
+                        let found = self.expression(guard);
+                        self.require(&found, &Type::Bool, guard.span());
+                    }
+                    let arm_type = self.expression(&arm.value);
+                    self.scopes.pop();
+                    if arm_full {
+                        all_covered = true;
+                    }
                     if matches!(result, Type::Unknown) {
                         result = arm_type;
                     } else {
                         self.require(&arm_type, &result, arm.span);
                     }
                 }
-                let missing: Vec<_> = variants
+                if !all_covered {
+                    match &choice {
+                        Some((type_name, variants, _)) => {
+                            let missing: Vec<_> = variants
+                                .iter()
+                                .filter(|variant| !covered.contains(*variant))
+                                .cloned()
+                                .collect();
+                            if !missing.is_empty() {
+                                self.errors.push(NivError::new(
+                                    format!(
+                                        "non-exhaustive choose for {type_name}; missing {}; add the missing cases or an 'otherwise' arm",
+                                        missing.join(", ")
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                        }
+                        None => {
+                            self.errors.push(NivError::new(
+                                "non-exhaustive choose; end with an 'otherwise' arm or a binding pattern",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    /// Case information for a pattern position: the choice/Result type name,
+    /// its case names, and each payload type with generics substituted.
+    fn pattern_cases(&self, ty: &Type) -> Option<(String, Vec<String>, HashMap<String, Type>)> {
+        match ty {
+            Type::Enum(name, arguments) => {
+                let definitions = self.enums.get(name).cloned().unwrap_or_default();
+                let variants = definitions
                     .iter()
-                    .filter(|variant| !seen.contains(*variant))
-                    .cloned()
+                    .map(|(variant, _)| variant.clone())
                     .collect();
-                if !missing.is_empty() {
+                let substitutions: HashMap<String, Type> = self
+                    .type_parameters
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .zip(arguments.clone())
+                    .collect();
+                let payloads = definitions
+                    .into_iter()
+                    .filter_map(|(variant, payload)| {
+                        payload.map(|payload| (variant, substitute(&payload, &substitutions)))
+                    })
+                    .collect();
+                Some((name.clone(), variants, payloads))
+            }
+            Type::Result(ok, error) => {
+                let mut payloads = HashMap::new();
+                payloads.insert("Ok".to_string(), ok.as_ref().clone());
+                payloads.insert("Err".to_string(), error.as_ref().clone());
+                Some(("Result".into(), vec!["Ok".into(), "Err".into()], payloads))
+            }
+            _ => None,
+        }
+    }
+
+    /// Checks one pattern against the type it matches, recording bindings,
+    /// and reports how much of that type the pattern covers.
+    fn check_pattern(
+        &mut self,
+        pattern: &Pattern,
+        expected: &Type,
+        bindings: &mut BTreeMap<String, Type>,
+    ) -> Coverage {
+        match pattern {
+            Pattern::Any(_) => Coverage::Full,
+            Pattern::Binding(name, span) => {
+                self.bind_pattern_name(name, expected.clone(), *span, bindings);
+                Coverage::Full
+            }
+            Pattern::Literal(literal, span) => {
+                let literal_type = match literal {
+                    Literal::Int(_) => Type::Int,
+                    Literal::Float(_) => Type::Float,
+                    Literal::String(_) => Type::String,
+                    Literal::Bool(_) => Type::Bool,
+                    Literal::Null => Type::Null,
+                };
+                if matches!(literal, Literal::Float(_)) && matches!(expected, Type::Float) {
+                    self.errors.push(NivError::new(
+                        "a float literal is not a safe selector; compare with a 'when' guard instead",
+                        span.line,
+                        span.column,
+                    ));
+                } else if !matches!(expected, Type::Unknown)
+                    && literal_type != *expected
+                    && !(matches!(literal, Literal::Null) && matches!(expected, Type::Nullable(_)))
+                {
                     self.errors.push(NivError::new(
                         format!(
-                            "non-exhaustive choose for {type_name}; missing {}",
-                            missing.join(", ")
+                            "this pattern matches {}, but the choose subject is {}",
+                            literal_type.name(),
+                            expected.name()
                         ),
                         span.line,
                         span.column,
                     ));
                 }
-                result
+                Coverage::Partial
             }
+            Pattern::Name(name, span) => {
+                if let Some((_, variants, payloads)) = self.pattern_cases(expected) {
+                    if variants.contains(name) {
+                        if payloads.contains_key(name) {
+                            self.errors.push(NivError::new(
+                                format!("{name} carries a payload; bind it with 'carries'"),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        return Coverage::Case(name.clone());
+                    }
+                }
+                self.bind_pattern_name(name, expected.clone(), *span, bindings);
+                Coverage::Full
+            }
+            Pattern::Carries(name, inner, span) => match self.pattern_cases(expected) {
+                Some((type_name, variants, payloads)) => {
+                    if !variants.contains(name) {
+                        self.errors.push(NivError::new(
+                            format!("{type_name} has no case '{name}'"),
+                            span.line,
+                            span.column,
+                        ));
+                        self.check_pattern(inner, &Type::Unknown, bindings);
+                        Coverage::Partial
+                    } else if let Some(payload) = payloads.get(name).cloned() {
+                        let inner_coverage = self.check_pattern(inner, &payload, bindings);
+                        if matches!(inner_coverage, Coverage::Full) {
+                            Coverage::Case(name.clone())
+                        } else {
+                            Coverage::Partial
+                        }
+                    } else {
+                        self.errors.push(NivError::new(
+                            format!("{name} carries no payload to match"),
+                            span.line,
+                            span.column,
+                        ));
+                        self.check_pattern(inner, &Type::Unknown, bindings);
+                        Coverage::Partial
+                    }
+                }
+                None => {
+                    if !matches!(expected, Type::Unknown) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'{name} carries' matches a choice case, but the value is {}",
+                                expected.name()
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    self.check_pattern(inner, &Type::Unknown, bindings);
+                    Coverage::Partial
+                }
+            },
+            Pattern::Shape(name, fields, span) => match expected {
+                Type::Record(record_name, arguments) => {
+                    let matches_name = name == record_name
+                        || self
+                            .type_names
+                            .get(name)
+                            .is_some_and(|qualified| qualified == record_name);
+                    if !matches_name {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "this pattern names shape '{name}', but the value is {record_name}"
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    let field_types = self.records.get(record_name).cloned().unwrap_or_default();
+                    let substitutions: HashMap<String, Type> = self
+                        .type_parameters
+                        .get(record_name)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .zip(arguments.clone())
+                        .collect();
+                    let mut seen = std::collections::HashSet::new();
+                    let mut full = matches_name;
+                    for (field, sub_pattern) in fields {
+                        if !seen.insert(field.clone()) {
+                            self.errors.push(NivError::new(
+                                format!("field '{field}' appears more than once in this pattern"),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        match field_types.get(field) {
+                            Some(field_type) => {
+                                let field_type = substitute(field_type, &substitutions);
+                                if !matches!(
+                                    self.check_pattern(sub_pattern, &field_type, bindings),
+                                    Coverage::Full
+                                ) {
+                                    full = false;
+                                }
+                            }
+                            None => {
+                                self.errors.push(NivError::new(
+                                    format!("{record_name} has no field '{field}'"),
+                                    span.line,
+                                    span.column,
+                                ));
+                                self.check_pattern(sub_pattern, &Type::Unknown, bindings);
+                                full = false;
+                            }
+                        }
+                    }
+                    if full {
+                        Coverage::Full
+                    } else {
+                        Coverage::Partial
+                    }
+                }
+                Type::Unknown => {
+                    for (_, sub_pattern) in fields {
+                        self.check_pattern(sub_pattern, &Type::Unknown, bindings);
+                    }
+                    Coverage::Partial
+                }
+                other => {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "this pattern names shape '{name}', but the value is {}",
+                            other.name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                    for (_, sub_pattern) in fields {
+                        self.check_pattern(sub_pattern, &Type::Unknown, bindings);
+                    }
+                    Coverage::Partial
+                }
+            },
+        }
+    }
+
+    fn bind_pattern_name(
+        &mut self,
+        name: &str,
+        ty: Type,
+        span: Span,
+        bindings: &mut BTreeMap<String, Type>,
+    ) {
+        if bindings.insert(name.to_string(), ty).is_some() {
+            self.errors.push(NivError::new(
+                format!("this pattern binds '{name}' more than once"),
+                span.line,
+                span.column,
+            ));
         }
     }
 

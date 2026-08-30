@@ -1,6 +1,6 @@
 use crate::ast::{
-    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TextPiece, TypeParam,
-    TypeRef,
+    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Pattern, Span, Stmt, TextPiece,
+    TypeParam, TypeRef,
 };
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
@@ -1364,22 +1364,41 @@ impl Parser {
                 line: self.peek().line,
                 column: self.peek().column,
             };
+            if self.matches(&[TokenKind::Else]) {
+                let binding = if self.matches(&[TokenKind::As]) {
+                    Some(self.consume_identifier("expected a binding name after 'as'")?)
+                } else {
+                    None
+                };
+                self.consume(&TokenKind::FatArrow, "expected '=>' after otherwise")?;
+                let value = self.expression()?;
+                arms.push(MatchArm {
+                    patterns: vec![match binding {
+                        Some(name) => Pattern::Binding(name, arm_span),
+                        None => Pattern::Any(arm_span),
+                    }],
+                    guard: None,
+                    value,
+                    span: arm_span,
+                });
+                self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                continue;
+            }
             let edition_four = self.matches(&[TokenKind::Case]);
-            let variant = self.consume_identifier("expected case name")?;
-            let binding = if self.matches(&[TokenKind::Carries]) {
-                Some(self.consume_identifier("expected payload binding after 'carries'")?)
-            } else if self.matches(&[TokenKind::LeftParen]) {
-                let binding = self.consume_identifier("expected payload binding")?;
-                self.consume(&TokenKind::RightParen, "expected ')' after payload binding")?;
-                Some(binding)
+            let mut patterns = vec![self.arm_pattern()?];
+            while self.matches(&[TokenKind::Or]) {
+                patterns.push(self.arm_pattern()?);
+            }
+            let guard = if self.matches(&[TokenKind::If]) {
+                Some(self.expression()?)
             } else {
                 None
             };
             self.consume(&TokenKind::FatArrow, "expected '=>' after choice arm")?;
             let value = self.expression()?;
             arms.push(MatchArm {
-                variant,
-                binding,
+                patterns,
+                guard,
                 value,
                 span: arm_span,
             });
@@ -1392,6 +1411,78 @@ impl Parser {
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after choose")?;
         Ok(Expr::Match(Box::new(subject), arms, span))
+    }
+
+    fn arm_pattern(&mut self) -> Result<Pattern, NivError> {
+        let token = self.peek().clone();
+        let span = Span {
+            line: token.line,
+            column: token.column,
+        };
+        match token.kind {
+            TokenKind::Int(value) => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Int(value), span))
+            }
+            TokenKind::Float(value) => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Float(value), span))
+            }
+            TokenKind::String(value) => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::String(value), span))
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Bool(true), span))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Bool(false), span))
+            }
+            TokenKind::Null => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Null, span))
+            }
+            TokenKind::Identifier(name) => {
+                self.advance();
+                if name == "any" {
+                    return Ok(Pattern::Any(span));
+                }
+                if self.matches(&[TokenKind::Carries]) {
+                    let inner = self.arm_pattern()?;
+                    return Ok(Pattern::Carries(name, Box::new(inner), span));
+                }
+                if self.matches(&[TokenKind::Holds]) {
+                    self.consume(&TokenKind::LeftBrace, "expected '{' after 'holds'")?;
+                    let mut fields = vec![];
+                    while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+                        let field = self.consume_identifier("expected a field name")?;
+                        self.consume(&TokenKind::Set, "a field pattern uses 'set'")?;
+                        fields.push((field, self.arm_pattern()?));
+                        self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                    }
+                    self.consume(&TokenKind::RightBrace, "expected '}' after field patterns")?;
+                    return Ok(Pattern::Shape(name, fields, span));
+                }
+                if self.matches(&[TokenKind::LeftParen]) {
+                    let binding = self.consume_identifier("expected payload binding")?;
+                    let binding_span = self.previous_span();
+                    self.consume(&TokenKind::RightParen, "expected ')' after payload binding")?;
+                    return Ok(Pattern::Carries(
+                        name,
+                        Box::new(Pattern::Binding(binding, binding_span)),
+                        span,
+                    ));
+                }
+                Ok(Pattern::Name(name, span))
+            }
+            _ => Err(NivError::new(
+                "expected a pattern: a case, a literal, a shape, a binding, or 'any'",
+                span.line,
+                span.column,
+            )),
+        }
     }
 
     fn matches(&mut self, kinds: &[TokenKind]) -> bool {

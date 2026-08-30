@@ -75,10 +75,46 @@ pub struct AdoptionMember {
     pub span: Span,
 }
 
+/// One structural pattern inside a `choose` arm.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    /// `any`: matches every value, binds nothing.
+    Any(Span),
+    /// A literal value compared by standard equality.
+    Literal(Literal, Span),
+    /// An identifier: a case of the subject's choice type when it resolves
+    /// to one, otherwise an immutable binding of the matched value.
+    Name(String, Span),
+    /// An identifier that always binds, never resolving to a case
+    /// (`otherwise as name`, legacy `(name)` payload bindings).
+    Binding(String, Span),
+    /// `Case carries pattern`: a case test with a nested payload pattern.
+    Carries(String, Box<Pattern>, Span),
+    /// `Shape holds { field set pattern, … }`: a nominal shape test with
+    /// named field patterns; omitted fields match anything.
+    Shape(String, Vec<(String, Pattern)>, Span),
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Any(span)
+            | Self::Literal(_, span)
+            | Self::Name(_, span)
+            | Self::Binding(_, span)
+            | Self::Carries(_, _, span)
+            | Self::Shape(_, _, span) => *span,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchArm {
-    pub variant: String,
-    pub binding: Option<String>,
+    /// One or more `or`-joined alternatives; every alternative binds the
+    /// same names at the same types.
+    pub patterns: Vec<Pattern>,
+    /// An optional pure `when` guard evaluated with the arm's bindings.
+    pub guard: Option<Expr>,
     pub value: Expr,
     pub span: Span,
 }

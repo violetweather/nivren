@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "host-runtime")]
 use nivren_jit::IntOp;
 
-use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TextPiece, TypeRef};
+use crate::ast::{Expr, Literal, MatchArm, Pattern, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
@@ -120,8 +120,10 @@ pub enum Op {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BytecodeArm {
-    pub variant: String,
-    pub binding: Option<String>,
+    /// One or more `or`-joined pattern alternatives.
+    pub patterns: Vec<Pattern>,
+    /// An optional pure guard chunk evaluated with the arm's bindings.
+    pub guard: Option<Chunk>,
     pub body: Chunk,
     pub span: Span,
 }
@@ -622,8 +624,8 @@ fn compile_arm(arm: &MatchArm) -> BytecodeArm {
     let mut compiler = Compiler { code: vec![] };
     compiler.expression(&arm.value);
     BytecodeArm {
-        variant: arm.variant.clone(),
-        binding: arm.binding.clone(),
+        patterns: arm.patterns.clone(),
+        guard: arm.guard.as_ref().map(compile_expression),
         body: Chunk {
             version: BYTECODE_VERSION,
             code: compiler.code,
@@ -677,6 +679,9 @@ fn verify_in_context(chunk: &Chunk, in_loop: bool) -> Result<(), NivError> {
             }
             Op::Match(arms) => {
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        verify_in_context(guard, false)?;
+                    }
                     verify_in_context(&arm.body, false)?;
                 }
             }
@@ -900,6 +905,9 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
                 }
                 Op::Match(arms) => {
                     for (arm, value) in arms.iter().enumerate() {
+                        if let Some(guard) = &value.guard {
+                            walk(guard, &format!("{path}.arm{arm}.guard"), mappings);
+                        }
                         walk(&value.body, &format!("{path}.arm{arm}"), mappings);
                     }
                 }
@@ -974,21 +982,40 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
             Op::Match(arms) => {
                 output.push_str(&format!("{prefix}MATCH\n"));
                 for arm in arms {
-                    output.push_str(&format!(
-                        "{}ARM {}{}\n",
-                        "  ".repeat(indent + 1),
-                        arm.variant,
-                        arm.binding
-                            .as_ref()
-                            .map(|binding| format!("({binding})"))
-                            .unwrap_or_default()
-                    ));
+                    let patterns = arm
+                        .patterns
+                        .iter()
+                        .map(pattern_text)
+                        .collect::<Vec<_>>()
+                        .join(" or ");
+                    output.push_str(&format!("{}ARM {patterns}\n", "  ".repeat(indent + 1)));
+                    if let Some(guard) = &arm.guard {
+                        output.push_str(&format!("{}GUARD\n", "  ".repeat(indent + 1)));
+                        disassemble_chunk(guard, indent + 2, output);
+                    }
                     disassemble_chunk(&arm.body, indent + 2, output);
                 }
                 output.push_str(&format!("{}END_MATCH\n", "  ".repeat(indent)));
             }
             op => output.push_str(&format!("{prefix}{op:?}\n")),
         }
+    }
+}
+
+fn pattern_text(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Any(_) => "any".into(),
+        Pattern::Literal(literal, _) => format!("{literal:?}"),
+        Pattern::Name(name, _) | Pattern::Binding(name, _) => name.clone(),
+        Pattern::Carries(name, inner, _) => format!("{name} carries {}", pattern_text(inner)),
+        Pattern::Shape(name, fields, _) => format!(
+            "{name} holds {{ {} }}",
+            fields
+                .iter()
+                .map(|(field, sub)| format!("{field} set {}", pattern_text(sub)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

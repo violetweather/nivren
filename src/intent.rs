@@ -443,6 +443,9 @@ impl Analyzer {
             Expr::Match(subject, arms, _) => {
                 self.expression(subject, within_perform);
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.expression(guard, within_perform);
+                    }
                     self.expression(&arm.value, within_perform);
                 }
             }
@@ -549,6 +552,9 @@ fn collect_capabilities(
         Expr::Match(subject, arms, _) => {
             collect_capabilities(subject, standard, functions, output);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_capabilities(guard, standard, functions, output);
+                }
                 collect_capabilities(&arm.value, standard, functions, output);
             }
         }
@@ -633,7 +639,11 @@ fn portable_expression(expression: &Expr) -> bool {
         }
         Expr::Array(values, _) => values.iter().all(portable_expression),
         Expr::Match(subject, arms, _) => {
-            portable_expression(subject) && arms.iter().all(|arm| portable_expression(&arm.value))
+            portable_expression(subject)
+                && arms.iter().all(|arm| {
+                    portable_expression(&arm.value)
+                        && arm.guard.as_ref().is_none_or(portable_expression)
+                })
         }
         Expr::Text(pieces, _) => pieces.iter().all(|piece| match piece {
             crate::ast::TextPiece::Literal(_) => true,

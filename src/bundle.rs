@@ -1,4 +1,4 @@
-use crate::ast::{Literal, Span};
+use crate::ast::{Literal, Pattern, Span};
 use crate::bytecode::{BYTECODE_VERSION, BytecodeArm, Chunk, Instruction, Op, verify};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
@@ -224,15 +224,59 @@ impl Writer {
     }
 
     fn arm(&mut self, arm: &BytecodeArm) -> Result<(), NivError> {
-        self.string(&arm.variant)?;
-        if let Some(binding) = &arm.binding {
+        self.len(arm.patterns.len())?;
+        for pattern in &arm.patterns {
+            self.pattern(pattern)?;
+        }
+        if let Some(guard) = &arm.guard {
             self.u8(1);
-            self.string(binding)?;
+            self.chunk(guard)?;
         } else {
             self.u8(0);
         }
         self.span(arm.span)?;
         self.chunk(&arm.body)
+    }
+
+    fn pattern(&mut self, pattern: &Pattern) -> Result<(), NivError> {
+        match pattern {
+            Pattern::Any(span) => {
+                self.u8(0);
+                self.span(*span)
+            }
+            Pattern::Literal(literal, span) => {
+                self.u8(1);
+                self.span(*span)?;
+                self.literal(literal)
+            }
+            Pattern::Name(name, span) => {
+                self.u8(2);
+                self.span(*span)?;
+                self.string(name)
+            }
+            Pattern::Binding(name, span) => {
+                self.u8(3);
+                self.span(*span)?;
+                self.string(name)
+            }
+            Pattern::Carries(name, inner, span) => {
+                self.u8(4);
+                self.span(*span)?;
+                self.string(name)?;
+                self.pattern(inner)
+            }
+            Pattern::Shape(name, fields, span) => {
+                self.u8(5);
+                self.span(*span)?;
+                self.string(name)?;
+                self.len(fields.len())?;
+                for (field, sub_pattern) in fields {
+                    self.string(field)?;
+                    self.pattern(sub_pattern)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     fn literal(&mut self, value: &Literal) -> Result<(), NivError> {
@@ -442,19 +486,64 @@ impl Reader<'_> {
     }
 
     fn arm(&mut self, depth: usize) -> Result<BytecodeArm, NivError> {
-        let variant = self.string()?;
-        let binding = match self.u8()? {
+        let pattern_count = self.count()?;
+        if pattern_count == 0 {
+            return Err(bundle_error("a choose arm needs at least one pattern"));
+        }
+        let mut patterns = Vec::with_capacity(pattern_count);
+        for _ in 0..pattern_count {
+            patterns.push(self.pattern(depth)?);
+        }
+        let guard = match self.u8()? {
             0 => None,
-            1 => Some(self.string()?),
-            _ => return Err(bundle_error("invalid optional binding")),
+            1 => Some(self.chunk(depth)?),
+            _ => return Err(bundle_error("invalid optional guard")),
         };
         let span = self.span()?;
         let body = self.chunk(depth)?;
         Ok(BytecodeArm {
-            variant,
-            binding,
+            patterns,
+            guard,
             body,
             span,
+        })
+    }
+
+    fn pattern(&mut self, depth: usize) -> Result<Pattern, NivError> {
+        if depth > MAX_DEPTH {
+            return Err(bundle_error("pattern nesting is too deep"));
+        }
+        Ok(match self.u8()? {
+            0 => Pattern::Any(self.span()?),
+            1 => {
+                let span = self.span()?;
+                Pattern::Literal(self.literal()?, span)
+            }
+            2 => {
+                let span = self.span()?;
+                Pattern::Name(self.string()?, span)
+            }
+            3 => {
+                let span = self.span()?;
+                Pattern::Binding(self.string()?, span)
+            }
+            4 => {
+                let span = self.span()?;
+                let name = self.string()?;
+                Pattern::Carries(name, Box::new(self.pattern(depth + 1)?), span)
+            }
+            5 => {
+                let span = self.span()?;
+                let name = self.string()?;
+                let count = self.count()?;
+                let mut fields = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let field = self.string()?;
+                    fields.push((field, self.pattern(depth + 1)?));
+                }
+                Pattern::Shape(name, fields, span)
+            }
+            _ => return Err(bundle_error("unknown pattern kind")),
         })
     }
 
