@@ -41,11 +41,15 @@
       {
         "type": "nivren",
         "label": "Nivren",
-        "languages": ["nivren"],
+        "languages": [
+          "nivren"
+        ],
         "program": "${file}",
         "configurationAttributes": {
           "launch": {
-            "required": ["program"],
+            "required": [
+              "program"
+            ],
             "properties": {
               "program": {
                 "type": "string",
@@ -85,9 +89,9 @@
     "vscode-languageclient": "10.1.0"
   },
   "devDependencies": {
-    "@types/node": "22.15.3",
+    "@types/node": "^26.1.2",
     "@types/vscode": "1.90.0",
     "@vscode/vsce": "3.9.2",
-    "typescript": "5.8.3"
+    "typescript": "^7.0.2"
   }
 }
