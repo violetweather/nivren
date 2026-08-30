@@ -86,6 +86,14 @@ pub enum Op {
     LoopExit {
         skip: bool,
     },
+    /// `when subject carries binding`: consumes the subject; a present value
+    /// binds and runs the then chunk, `none` runs the else chunk. Both
+    /// chunks are transparent to loop-exit signals.
+    IfCarries {
+        binding: String,
+        then_branch: Chunk,
+        else_branch: Option<Chunk>,
+    },
     Using {
         name: String,
         body: Chunk,
@@ -256,6 +264,23 @@ impl Compiler {
                     Op::Repeat {
                         condition: compile_expression(condition),
                         body: compile_statement(body),
+                    },
+                    *span,
+                );
+            }
+            Stmt::IfCarries {
+                subject,
+                binding,
+                then_branch,
+                else_branch,
+                span,
+            } => {
+                self.expression(subject);
+                self.emit(
+                    Op::IfCarries {
+                        binding: binding.clone(),
+                        then_branch: compile_statement(then_branch),
+                        else_branch: else_branch.as_ref().map(|branch| compile_statement(branch)),
                     },
                     *span,
                 );
@@ -616,6 +641,16 @@ fn verify_in_context(chunk: &Chunk, in_loop: bool) -> Result<(), NivError> {
                 verify_in_context(condition, false)?;
                 verify_in_context(body, true)?;
             }
+            Op::IfCarries {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                verify_in_context(then_branch, in_loop)?;
+                if let Some(branch) = else_branch {
+                    verify_in_context(branch, in_loop)?;
+                }
+            }
             Op::LoopExit { skip } => {
                 if !in_loop {
                     let word = if *skip { "skip" } else { "stop" };
@@ -763,6 +798,7 @@ fn stack_effect(op: &Op) -> isize {
         | Op::Match(_)
         | Op::Iterate { .. }
         | Op::LoopExit { .. }
+        | Op::IfCarries { .. }
         | Op::Using { .. } => 0,
         Op::Prepare(_) | Op::Perform => 0,
     }
@@ -807,6 +843,7 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Repeat { .. } => "repeat",
             Op::LoopExit { skip: false } => "stop",
             Op::LoopExit { skip: true } => "skip",
+            Op::IfCarries { .. } => "when_carries",
             Op::Using { .. } => "using",
             Op::DefineProtocol { .. } => "define_protocol",
             Op::AdoptProtocol { .. } => "adopt_protocol",
@@ -835,6 +872,16 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
                 Op::Repeat { condition, body } => {
                     walk(condition, &format!("{path}.condition"), mappings);
                     walk(body, &format!("{path}.body"), mappings);
+                }
+                Op::IfCarries {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    walk(then_branch, &format!("{path}.carries"), mappings);
+                    if let Some(branch) = else_branch {
+                        walk(branch, &format!("{path}.otherwise"), mappings);
+                    }
                 }
                 Op::Match(arms) => {
                     for (arm, value) in arms.iter().enumerate() {
@@ -896,6 +943,19 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
                 disassemble_chunk(body, indent + 1, output);
                 output.push_str(&format!("{}END_REPEAT\n", "  ".repeat(indent)));
             }
+            Op::IfCarries {
+                binding,
+                then_branch,
+                else_branch,
+            } => {
+                output.push_str(&format!("{prefix}WHEN_CARRIES {binding}\n"));
+                disassemble_chunk(then_branch, indent + 1, output);
+                if let Some(branch) = else_branch {
+                    output.push_str(&format!("{}OTHERWISE\n", "  ".repeat(indent)));
+                    disassemble_chunk(branch, indent + 1, output);
+                }
+                output.push_str(&format!("{}END_WHEN_CARRIES\n", "  ".repeat(indent)));
+            }
             Op::Match(arms) => {
                 output.push_str(&format!("{prefix}MATCH\n"));
                 for arm in arms {
@@ -925,6 +985,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::IfCarries { span, .. }
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::For { span, .. }

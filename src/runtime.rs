@@ -1444,6 +1444,35 @@ impl Interpreter {
                     Ok(Flow::Continue(Value::Null))
                 }
             }
+            Stmt::IfCarries {
+                subject,
+                binding,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let value = self.evaluate(subject)?;
+                if let Value::EarlyReturn(value) = value {
+                    return Ok(Flow::Return(value.as_ref().clone()));
+                }
+                if matches!(value, Value::Null) {
+                    if let Some(branch) = else_branch {
+                        self.execute(branch)
+                    } else {
+                        Ok(Flow::Continue(Value::Null))
+                    }
+                } else {
+                    let environment = self.child_scope(self.environment.clone());
+                    environment.lock().unwrap().values.insert(
+                        binding.clone(),
+                        Binding {
+                            value,
+                            mutable: false,
+                        },
+                    );
+                    self.execute_block(std::slice::from_ref(then_branch.as_ref()), environment)
+                }
+            }
             Stmt::While {
                 condition, body, ..
             } => {
@@ -3755,6 +3784,41 @@ impl Interpreter {
                     BytecodeStep::Stop
                 });
             }
+            Op::IfCarries {
+                binding,
+                then_branch,
+                else_branch,
+            } => {
+                let subject = stack.pop().unwrap();
+                let flow = if matches!(subject, Value::Null) {
+                    match else_branch {
+                        Some(branch) => self.execute_chunk(branch)?,
+                        None => VmFlow::Continue(Value::Null),
+                    }
+                } else {
+                    let previous = self.environment.clone();
+                    self.roots.push(previous.clone());
+                    let child = self.child_scope(previous.clone());
+                    child.lock().unwrap().values.insert(
+                        binding.clone(),
+                        Binding {
+                            value: subject,
+                            mutable: false,
+                        },
+                    );
+                    self.environment = child;
+                    let result = self.execute_chunk(then_branch);
+                    self.roots.pop();
+                    self.environment = previous;
+                    result?
+                };
+                match flow {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop => return Ok(BytecodeStep::Stop),
+                    VmFlow::Skip => return Ok(BytecodeStep::Skip),
+                }
+            }
             Op::Using { name, body } => {
                 let resource = stack.pop().unwrap();
                 match self.execute_bytecode_using(name, resource, body, item.span)? {
@@ -4651,6 +4715,7 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Repeat { .. } => "repeat",
         Op::LoopExit { skip: false } => "stop",
         Op::LoopExit { skip: true } => "skip",
+        Op::IfCarries { .. } => "when_carries",
         Op::Using { .. } => "using",
     }
 }
@@ -11803,6 +11868,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::IfCarries { span, .. }
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::For { span, .. }

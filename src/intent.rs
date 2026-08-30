@@ -281,6 +281,18 @@ impl Analyzer {
                 self.statement(body);
             }
             Stmt::Stop(_) | Stmt::Skip(_) => {}
+            Stmt::IfCarries {
+                subject,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expression(subject, false);
+                self.statement(then_branch);
+                if let Some(branch) = else_branch {
+                    self.statement(branch);
+                }
+            }
             Stmt::For { iterable, body, .. } => {
                 self.expression(iterable, false);
                 self.statement(body);

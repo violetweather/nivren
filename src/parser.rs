@@ -878,17 +878,32 @@ impl Parser {
     fn if_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let condition = self.control_condition("when")?;
+        let carries = self.matches(&[TokenKind::Carries]);
+        let binding = if carries {
+            Some(self.consume_identifier("expected a binding name after 'carries'")?)
+        } else {
+            None
+        };
         let then_branch = Box::new(self.statement()?);
         let else_branch = if self.matches(&[TokenKind::Else]) {
             Some(Box::new(self.statement()?))
         } else {
             None
         };
-        Ok(Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-            span,
+        Ok(match binding {
+            Some(binding) => Stmt::IfCarries {
+                subject: condition,
+                binding,
+                then_branch,
+                else_branch,
+                span,
+            },
+            None => Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            },
         })
     }
 

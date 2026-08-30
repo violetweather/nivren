@@ -1745,6 +1745,43 @@ impl Checker {
                     self.statement(branch);
                 }
             }
+            Stmt::IfCarries {
+                subject,
+                binding,
+                then_branch,
+                else_branch,
+                span,
+            } => {
+                let inner = match self.expression(subject) {
+                    Type::Nullable(inner) => *inner,
+                    Type::Unknown => Type::Unknown,
+                    other => {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'when … carries' attempted to unwrap a maybe value, found {}; test a Bool with plain 'when' or handle a choice with 'choose'",
+                                other.name()
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                };
+                self.in_scope(|checker| {
+                    checker.declare(
+                        binding,
+                        Binding {
+                            ty: inner,
+                            mutable: false,
+                        },
+                        *span,
+                    );
+                    checker.statement(then_branch);
+                });
+                if let Some(branch) = else_branch {
+                    self.statement(branch);
+                }
+            }
             Stmt::While {
                 condition, body, ..
             } => {

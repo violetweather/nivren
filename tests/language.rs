@@ -6514,6 +6514,74 @@ len(std.iter.collect(advanced))
 }
 
 #[test]
+fn when_carries_unwraps_present_maybe_values_in_both_engines() {
+    let source = r#"
+keep table set std.map.single(1, "one")
+change seen set ""
+when std.map.get(table, 1) carries value {
+    change seen to value
+} otherwise {
+    change seen to "missing"
+}
+seen
+"#;
+    assert_eq!(eval_tree(source), Value::String("one".into()));
+    assert_eq!(eval_vm(source), Value::String("one".into()));
+}
+
+#[test]
+fn when_carries_takes_the_otherwise_branch_for_none_in_both_engines() {
+    let source = r#"
+keep table set std.map.single(1, "one")
+change seen set ""
+when std.map.get(table, 2) carries value {
+    change seen to value
+} otherwise {
+    change seen to "missing"
+}
+seen
+"#;
+    assert_eq!(eval_tree(source), Value::String("missing".into()));
+    assert_eq!(eval_vm(source), Value::String("missing".into()));
+}
+
+#[test]
+fn when_carries_bindings_stay_inside_the_matched_branch() {
+    let source = r#"
+keep table set std.map.single(1, "one")
+when std.map.get(table, 1) carries value {
+    show value
+}
+show value
+"#;
+    let errors = nivren::check(source).unwrap_err();
+    assert!(errors[0].to_string().contains("value"));
+}
+
+#[test]
+fn when_carries_rejects_subjects_that_are_not_maybe_values() {
+    let errors = nivren::check("when 5 carries x { show x }").unwrap_err();
+    assert!(errors[0].to_string().contains("maybe"));
+}
+
+#[test]
+fn loop_exits_pass_through_when_carries_branches_in_both_engines() {
+    let source = r#"
+keep table set std.map.single(3, "three")
+change total set 0
+each item in [1, 2, 3, 4] {
+    when std.map.get(table, item) carries found {
+        stop
+    }
+    change total to total + item
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(3));
+    assert_eq!(eval_vm(source), Value::Int(3));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

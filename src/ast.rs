@@ -190,6 +190,15 @@ pub enum Stmt {
         else_branch: Option<Box<Stmt>>,
         span: Span,
     },
+    /// `when subject carries name { … } otherwise { … }`: tests a `maybe`
+    /// value once, binding the present value immutably in the matched branch.
+    IfCarries {
+        subject: Expr,
+        binding: String,
+        then_branch: Box<Stmt>,
+        else_branch: Option<Box<Stmt>>,
+        span: Span,
+    },
     While {
         condition: Expr,
         body: Box<Stmt>,

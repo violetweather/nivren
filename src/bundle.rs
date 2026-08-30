@@ -199,6 +199,22 @@ impl Writer {
                 self.u8(32);
                 self.u8(u8::from(*skip));
             }
+            Op::IfCarries {
+                binding,
+                then_branch,
+                else_branch,
+            } => {
+                self.u8(33);
+                self.string(binding)?;
+                self.chunk(then_branch)?;
+                match else_branch {
+                    Some(branch) => {
+                        self.u8(1);
+                        self.chunk(branch)?;
+                    }
+                    None => self.u8(0),
+                }
+            }
         }
         Ok(())
     }
@@ -405,6 +421,15 @@ impl Reader<'_> {
             },
             32 => Op::LoopExit {
                 skip: self.u8()? != 0,
+            },
+            33 => Op::IfCarries {
+                binding: self.string()?,
+                then_branch: self.chunk(depth + 1)?,
+                else_branch: if self.u8()? != 0 {
+                    Some(self.chunk(depth + 1)?)
+                } else {
+                    None
+                },
             },
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };
