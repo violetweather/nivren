@@ -1,0 +1,24 @@
+# cargo-audit configuration.
+#
+# `cargo audit` reads Cargo.lock, which records every optional dependency in the
+# resolved universe even when no enabled feature pulls it into a build. An entry
+# here means the advisory does not reach any artifact Nivren produces, not that
+# the finding is unimportant. Each entry must state how that was verified and be
+# removed as soon as the dependency can actually be dropped.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0235 — out-of-bounds reads in rkyv archive validation.
+    #
+    # rkyv is an optional dependency of rust_decimal. Nivren depends on
+    # rust_decimal with default-features = false and only the "std" feature, so
+    # the rkyv feature is never enabled. Verified with `cargo tree -i rkyv`,
+    # which reports no reverse dependency, and by confirming that no rkyv
+    # artifact is produced under target/. Nivren never archives or deserialises
+    # rkyv data, so the vulnerable `access`/`from_bytes` paths are unreachable.
+    #
+    # rust_decimal 1.42.1 is the newest release and still lists rkyv 0.7, which
+    # upstream no longer supports. Drop this entry when rust_decimal moves to
+    # rkyv 0.8.17 or later, or when the optional dependency is removed.
+    "RUSTSEC-2026-0235",
+]

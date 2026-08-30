@@ -1,3 +1,7 @@
+#[cfg(feature = "host-runtime")]
+use rustls::pki_types::pem::PemObject;
+#[cfg(feature = "host-runtime")]
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
@@ -9483,7 +9487,7 @@ fn tls_client_stream(
         if pem.len() > 1024 * 1024 {
             return Err("additional TLS root PEM exceeds 1 MiB".into());
         }
-        let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+        let certificates = CertificateDer::pem_slice_iter(pem.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("invalid additional TLS root PEM: {error}"))?;
         if certificates.is_empty() {
@@ -9509,15 +9513,14 @@ fn tls_client_stream(
                     "TLS client certificate and private key PEM must each be at most 1 MiB".into(),
                 );
             }
-            let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(certificate))
+            let certificates = CertificateDer::pem_slice_iter(certificate.as_bytes())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| format!("invalid TLS client certificate PEM: {error}"))?;
             if certificates.is_empty() {
                 return Err("TLS client certificate PEM contains no certificates".into());
             }
-            let private_key = rustls_pemfile::private_key(&mut std::io::Cursor::new(private_key))
-                .map_err(|error| format!("invalid TLS client private key PEM: {error}"))?
-                .ok_or("TLS client private key PEM contains no key")?;
+            let private_key = PrivateKeyDer::from_pem_slice(private_key.as_bytes())
+                .map_err(|error| format!("invalid TLS client private key PEM: {error}"))?;
             client_builder
                 .with_client_auth_cert(certificates, private_key)
                 .map_err(|error| format!("invalid TLS client certificate/key pair: {error}"))?
@@ -9594,15 +9597,14 @@ fn tls_server_config(
     if client_auth == "none" && client_ca.is_some_and(|pem| !pem.is_empty()) {
         return Err("TLS client_ca_pem requires client_auth 'required'".into());
     }
-    let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(certificate_pem))
+    let certificates = CertificateDer::pem_slice_iter(certificate_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("invalid TLS certificate PEM: {error}"))?;
     if certificates.is_empty() {
         return Err("TLS certificate PEM contains no certificates".into());
     }
-    let private_key = rustls_pemfile::private_key(&mut std::io::Cursor::new(private_key_pem))
-        .map_err(|error| format!("invalid TLS private key PEM: {error}"))?
-        .ok_or("TLS private key PEM contains no key")?;
+    let private_key = PrivateKeyDer::from_pem_slice(private_key_pem.as_bytes())
+        .map_err(|error| format!("invalid TLS private key PEM: {error}"))?;
     let builder = if minimum == "1.3" {
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
     } else {
@@ -9614,7 +9616,7 @@ fn tls_server_config(
             return Err("TLS client CA PEM exceeds 1 MiB".into());
         }
         let mut roots = rustls::RootCertStore::empty();
-        let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(client_ca))
+        let certificates = CertificateDer::pem_slice_iter(client_ca.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("invalid TLS client CA PEM: {error}"))?;
         if certificates.is_empty() {
