@@ -7225,6 +7225,30 @@ std.host.invoke("nivren.echo", "{}")
 }
 
 #[test]
+fn reflection_schema_describes_functions_in_both_engines() {
+    let source = r#"
+define add takes { left is Int, right is Int } gives Int {
+    give left + right
+}
+choose std.reflect.schema(add) {
+    case Ok carries schema => choose std.text.join([
+        std.map.get(schema, "$kind") ?? "?",
+        std.map.get(schema, "$name") ?? "?",
+        std.map.get(schema, "left") ?? "?",
+        std.map.get(schema, "right") ?? "?"
+    ], " ") {
+        case Ok carries joined => joined
+        case Err carries message => message
+    }
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("function add 0 1".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

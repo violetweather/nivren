@@ -10696,9 +10696,28 @@ fn native_reflect_schema(arguments: Vec<Value>, _: Span) -> Result<Value, NivErr
                 .map(|(index, variant)| (variant.clone(), index.to_string()))
                 .collect(),
         ),
+        Value::Function(function) => (
+            "function",
+            &function.name,
+            function
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| (parameter.clone(), index.to_string()))
+                .collect(),
+        ),
+        Value::Native(native) => ("function", native.name, {
+            let mut entries: Vec<(String, String)> = (0..native.arity)
+                .map(|index| (format!("$parameter{index}"), index.to_string()))
+                .collect();
+            if let Some(capability) = native.capability {
+                entries.push(("$needs".into(), capability.into()));
+            }
+            entries
+        }),
         other => {
             return Ok(result_error(format!(
-                "std.reflect.schema expects a shape or choice constructor, found {}",
+                "std.reflect.schema expects a shape, choice, or function, found {}",
                 other.type_name()
             )));
         }

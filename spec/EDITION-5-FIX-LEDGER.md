@@ -98,6 +98,7 @@ Decision values: **Pending** (no decision yet), **Applied** (folded into the Edi
 | --- | --- | --- | --- | --- |
 | 44 | `Iterate.advance` "takes no arguments and gives maybe Item" cannot thread iterator state through immutable values — the signature is unimplementable as specified | `spec/STANDARD-LIBRARY-5.md` §6, `LANGUAGE-5-DRAFT.md` §11 | Persistent unfold shape: `advance takes { state is Self } gives maybe Step` where the standard shape `Step<State, Item> holds { item, next }`; `each` threads `next` | Pending |
 | 45 | Variables named `start`/`wait`/`race`/`together` are rejected because the task words are globally reserved, unlike `set`/`from` | `src/lexer.rs` keyword table | Decide: keep reserved (document in spec §2) or make contextual like `set` | Pending |
+| 46 | Text-literal holes cannot contain string literals: the plain lexer ends the outer `text "…"` string at the first inner quote | `src/parser.rs` text_literal | Lex `text` literals in the lexer with hole-aware quoting (or spec that holes hold quote-free expressions) | Pending |
 
 ## Cross-cutting fixes already proposed in earlier planning
 
