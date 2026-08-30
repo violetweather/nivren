@@ -7915,9 +7915,17 @@ fn native_crypto_encrypt(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
         Ok(cipher) => cipher,
         Err(_) => return Ok(result_error("invalid ChaCha20-Poly1305 key")),
     };
+    let nonce = match Nonce::try_from(nonce) {
+        Ok(nonce) => nonce,
+        Err(_) => {
+            return Ok(result_error(
+                "ChaCha20-Poly1305 nonce must contain exactly 12 bytes",
+            ));
+        }
+    };
     Ok(
         match cipher.encrypt(
-            Nonce::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad: associated,
@@ -7944,9 +7952,17 @@ fn native_crypto_decrypt(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
         Ok(cipher) => cipher,
         Err(_) => return Ok(result_error("invalid ChaCha20-Poly1305 key")),
     };
+    let nonce = match Nonce::try_from(nonce) {
+        Ok(nonce) => nonce,
+        Err(_) => {
+            return Ok(result_error(
+                "ChaCha20-Poly1305 nonce must contain exactly 12 bytes",
+            ));
+        }
+    };
     Ok(
         match cipher.decrypt(
-            Nonce::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad: associated,
