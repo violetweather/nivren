@@ -306,6 +306,9 @@ impl Compiler {
             Stmt::Skip(span) => {
                 self.emit(Op::LoopExit { skip: true }, *span);
             }
+            Stmt::Promise { span, .. } => {
+                self.emit(Op::Constant(Literal::Null), *span);
+            }
             Stmt::For {
                 name,
                 pattern,
@@ -1071,6 +1074,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::LetPattern { span, .. }
         | Stmt::Stop(span)
         | Stmt::Skip(span)
+        | Stmt::Promise { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

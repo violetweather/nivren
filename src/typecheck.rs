@@ -1,6 +1,22 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{Expr, Literal, Pattern, Span, Stmt, TextPiece, TypeRef};
+use crate::ast::{Expr, Literal, Pattern, PromiseClause, Span, Stmt, TextPiece, TypeRef};
+
+/// The complete, closed Edition 5 capability vocabulary.
+const CAPABILITY_VOCABULARY: [&str; 12] = [
+    "FileRead",
+    "FileWrite",
+    "Environment",
+    "Time",
+    "Process",
+    "Network",
+    "Task",
+    "Channel",
+    "Log",
+    "Native",
+    "Random",
+    "Gpu",
+];
 use crate::error::NivError;
 use crate::fixed::FixedKind;
 use crate::lexer::TokenKind;
@@ -225,6 +241,7 @@ struct Checker {
     namespace: String,
     loop_depth: usize,
     loop_boundary: Option<&'static str>,
+    active_promises: Vec<PromiseClause>,
 }
 
 impl Checker {
@@ -1690,6 +1707,7 @@ impl Checker {
             namespace,
             loop_depth: 0,
             loop_boundary: None,
+            active_promises: vec![],
         }
     }
 
@@ -1868,6 +1886,46 @@ impl Checker {
                 self.require_bool(condition);
                 self.inside_loop(|checker| checker.statement(body));
             }
+            Stmt::Promise { clauses, span } => {
+                let mut seen = std::collections::HashSet::new();
+                for clause in clauses {
+                    if !CAPABILITY_VOCABULARY.contains(&clause.capability.as_str()) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "a promise names the capability vocabulary; '{}' is not a capability",
+                                clause.capability
+                            ),
+                            clause.span.line,
+                            clause.span.column,
+                        ));
+                    }
+                    if !seen.insert(clause.capability.clone()) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "capability '{}' appears in more than one promise clause",
+                                clause.capability
+                            ),
+                            clause.span.line,
+                            clause.span.column,
+                        ));
+                    }
+                    if let Some(outer) = self.promise_for(&clause.capability)
+                        && outer.never
+                        && !clause.never
+                    {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'{} only within' conflicts with the active 'promise never {}'",
+                                clause.capability, clause.capability
+                            ),
+                            clause.span.line,
+                            clause.span.column,
+                        ));
+                    }
+                }
+                let _ = span;
+                self.active_promises.extend(clauses.iter().cloned());
+            }
             Stmt::Stop(span) | Stmt::Skip(span) => {
                 if self.loop_depth == 0 {
                     let word = if matches!(statement, Stmt::Stop(_)) {
@@ -2018,10 +2076,46 @@ impl Checker {
                 params,
                 return_type,
                 needs,
+                capability_needs,
                 body,
                 span,
                 ..
             } => {
+                for need in capability_needs {
+                    let Some(clause) = self.promise_for(&need.capability).cloned() else {
+                        continue;
+                    };
+                    if clause.never {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'{name}' declares needs {capability} inside 'promise never {capability}'; remove the need or the promise",
+                                capability = need.capability
+                            ),
+                            need.span.line,
+                            need.span.column,
+                        ));
+                    } else {
+                        match &need.boundary {
+                            Some(boundary) if clause.boundaries.contains(boundary) => {}
+                            Some(boundary) => self.errors.push(NivError::new(
+                                format!(
+                                    "scope \"{boundary}\" is outside the promised boundaries for {}",
+                                    need.capability
+                                ),
+                                need.span.line,
+                                need.span.column,
+                            )),
+                            None => self.errors.push(NivError::new(
+                                format!(
+                                    "'{name}' needs {capability} without a scope inside 'promise {capability} only within …'; add a within boundary from the promise",
+                                    capability = need.capability
+                                ),
+                                need.span.line,
+                                need.span.column,
+                            )),
+                        }
+                    }
+                }
                 let generic_names = type_params
                     .iter()
                     .map(|parameter| parameter.name.clone())
@@ -2930,6 +3024,22 @@ impl Checker {
                                         span.column,
                                     ));
                                 }
+                            }
+                        }
+                        for capability in &effective_required {
+                            if capability == "$effects" {
+                                continue;
+                            }
+                            if let Some(clause) = self.promise_for(capability)
+                                && clause.never
+                            {
+                                self.errors.push(NivError::new(
+                                    format!(
+                                        "this call needs {capability}, but an active 'promise never {capability}' renounces it; remove the call or the promise"
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
                             }
                         }
                         schema_decode_result.unwrap_or_else(|| substitute(&result, &substitutions))
@@ -3931,8 +4041,18 @@ impl Checker {
     }
     fn in_scope(&mut self, operation: impl FnOnce(&mut Self)) {
         self.scopes.push(HashMap::new());
+        let promise_mark = self.active_promises.len();
         operation(self);
+        self.active_promises.truncate(promise_mark);
         self.scopes.pop();
+    }
+
+    /// The innermost active promise clause for a capability, if any.
+    fn promise_for(&self, capability: &str) -> Option<&PromiseClause> {
+        self.active_promises
+            .iter()
+            .rev()
+            .find(|clause| clause.capability == capability)
     }
 }
 

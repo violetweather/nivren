@@ -1547,6 +1547,7 @@ impl Interpreter {
             }
             Stmt::Stop(_) => Ok(Flow::Stop),
             Stmt::Skip(_) => Ok(Flow::Skip),
+            Stmt::Promise { .. } => Ok(Flow::Continue(Value::Null)),
             Stmt::For {
                 name,
                 pattern,
@@ -12217,6 +12218,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::LetPattern { span, .. }
         | Stmt::Stop(span)
         | Stmt::Skip(span)
+        | Stmt::Promise { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

@@ -282,7 +282,7 @@ impl Analyzer {
                 self.expression(condition, false);
                 self.statement(body);
             }
-            Stmt::Stop(_) | Stmt::Skip(_) => {}
+            Stmt::Stop(_) | Stmt::Skip(_) | Stmt::Promise { .. } => {}
             Stmt::IfCarries {
                 subject,
                 then_branch,

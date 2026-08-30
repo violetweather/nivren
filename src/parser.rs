@@ -1,6 +1,6 @@
 use crate::ast::{
-    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Pattern, Span, Stmt, TextPiece,
-    TypeParam, TypeRef,
+    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Pattern, PromiseClause, Span, Stmt,
+    TextPiece, TypeParam, TypeRef,
 };
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
@@ -763,12 +763,88 @@ impl Parser {
             let span = self.previous_span();
             return Ok(Stmt::Block(self.block_contents()?, span));
         }
+        if let Some(statement) = self.promise_statement()? {
+            return Ok(statement);
+        }
         if let Some(statement) = self.loop_exit_statement() {
             return Ok(statement);
         }
         let expression = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Expression(expression))
+    }
+
+    /// `promise` is a contextual statement keyword: it introduces clauses
+    /// only when followed by `never` or a capability clause.
+    fn promise_statement(&mut self) -> Result<Option<Stmt>, NivError> {
+        let TokenKind::Identifier(word) = &self.peek().kind else {
+            return Ok(None);
+        };
+        if word != "promise"
+            || !matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+        {
+            return Ok(None);
+        }
+        self.advance();
+        let span = self.previous_span();
+        let mut clauses = vec![];
+        loop {
+            let clause_span = Span {
+                line: self.peek().line,
+                column: self.peek().column,
+            };
+            let first = self.consume_identifier("expected 'never' or a capability name")?;
+            if first == "never" {
+                let capability =
+                    self.consume_identifier("expected a capability name after 'never'")?;
+                clauses.push(PromiseClause {
+                    capability,
+                    never: true,
+                    boundaries: vec![],
+                    span: clause_span,
+                });
+            } else {
+                let only = self.consume_identifier("a scoped promise continues with 'only'")?;
+                if only != "only" {
+                    return Err(NivError::new(
+                        "a scoped promise reads 'Capability only within \"boundary\"'",
+                        clause_span.line,
+                        clause_span.column,
+                    ));
+                }
+                self.consume(&TokenKind::In, "expected 'within' after 'only'")?;
+                let mut boundaries = vec![];
+                loop {
+                    let TokenKind::String(boundary) = self.peek().kind.clone() else {
+                        return Err(self.error_here("expected a boundary string after 'within'"));
+                    };
+                    self.advance();
+                    boundaries.push(boundary);
+                    if self.check(&TokenKind::Comma)
+                        && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
+                    {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+                clauses.push(PromiseClause {
+                    capability: first,
+                    never: false,
+                    boundaries,
+                    span: clause_span,
+                });
+            }
+            if self.check(&TokenKind::Comma)
+                && matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+            {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.optional_semicolon();
+        Ok(Some(Stmt::Promise { clauses, span }))
     }
 
     /// `stop` and `skip` are contextual statement keywords: they end or

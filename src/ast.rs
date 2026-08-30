@@ -108,6 +108,16 @@ impl Pattern {
     }
 }
 
+/// One clause of a `promise` declaration: `never Capability` renounces a
+/// capability entirely; `Capability only within "…"` confines its scopes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PromiseClause {
+    pub capability: String,
+    pub never: bool,
+    pub boundaries: Vec<String>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchArm {
     /// One or more `or`-joined alternatives; every alternative binds the
@@ -265,6 +275,12 @@ pub enum Stmt {
     /// a function, task, or `using` boundary.
     Stop(Span),
     Skip(Span),
+    /// `promise never Network, FileRead only within "config"`: statically
+    /// proven renunciations binding the rest of the enclosing scope.
+    Promise {
+        clauses: Vec<PromiseClause>,
+        span: Span,
+    },
     For {
         name: String,
         /// When present, each element destructures through this irrefutable

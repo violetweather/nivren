@@ -6881,6 +6881,70 @@ text "{first} {second} {third}"
 }
 
 #[test]
+fn promise_never_rejects_renounced_needs_and_calls() {
+    let declaration = r#"
+promise never Network
+define fetch takes { address is String } gives String or String needs Network {
+    give std.web.get(address, 1.0)
+}
+"#;
+    let errors = nivren::check(declaration).unwrap_err();
+    assert!(errors[0].to_string().contains("promise never Network"));
+    let call = r#"
+promise never Time
+std.time.sleep(0.1)
+"#;
+    let errors = nivren::check(call).unwrap_err();
+    assert!(errors[0].to_string().contains("promise never Time"));
+}
+
+#[test]
+fn promise_only_within_confines_declared_scopes() {
+    let outside = r#"
+promise FileRead only within "path:./data"
+define read_config takes { } gives String or String needs FileRead within "path:./other" {
+    give std.files.read("./other/config")
+}
+"#;
+    let errors = nivren::check(outside).unwrap_err();
+    assert!(
+        errors[0]
+            .to_string()
+            .contains("outside the promised boundaries")
+    );
+    let inside = r#"
+promise FileRead only within "path:./data"
+define read_config takes { } gives String or String needs FileRead within "path:./data" {
+    give std.files.read("./data/config")
+}
+"#;
+    assert!(nivren::check(inside).is_ok());
+}
+
+#[test]
+fn promises_bind_only_their_enclosing_scope() {
+    let source = r#"
+{
+    promise never Time
+}
+std.time.sleep(0.1)
+"#;
+    assert!(nivren::check(source).is_ok());
+    let errors = nivren::check("promise never Magic").unwrap_err();
+    assert!(errors[0].to_string().contains("not a capability"));
+}
+
+#[test]
+fn promise_statements_run_as_quiet_declarations_in_both_engines() {
+    let source = r#"
+promise never Network
+1 + 2
+"#;
+    assert_eq!(eval_tree(source), Value::Int(3));
+    assert_eq!(eval_vm(source), Value::Int(3));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
