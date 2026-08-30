@@ -1,24 +1,71 @@
-define serve(certificate_pem: String, private_key_pem: String) gives Result<String, String> needs Network {
-    keep policy = std.web.tls_options()
-    keep opened = std.web.websocket_secure_listen("127.0.0.1", 8443, certificate_pem, private_key_pem, policy) or give
+define serve
+takes {
+    certificate_pem is String
+    private_key_pem is String
+}
+gives String or String
+needs Network
+{
+    keep policy set std.web.tls_options with {}
+    keep opened set std.web.websocket_secure_listen with {
+        host set "127.0.0.1"
+        port set 8443
+        certificate_pem set certificate_pem
+        private_key_pem set private_key_pem
+        options set policy
+    } or give
     using listener = opened {
-        keep accepted = std.web.websocket_secure_accept(listener, 30.0) or give
+        keep accepted set std.web.websocket_secure_accept with {
+            listener set listener
+            timeout set 30.0
+        } or give
         using socket = accepted {
-            keep message = std.web.websocket_receive(socket, 65536) or give
-            keep sent = std.web.websocket_send(socket, "secure:" + message) or give
+            keep message set std.web.websocket_receive with {
+                websocket set socket
+                maximum set 65536
+            } or give
+            keep sent set std.web.websocket_send with {
+                websocket set socket
+                message set "secure:" + message
+            } or give
             give ok(message)
         }
     }
 }
 
-define serve_mutual(certificate_pem: String, private_key_pem: String, client_ca_pem: String) gives Result<String, String> needs Network {
-    keep auth = std.map.set(std.web.tls_options(), "client_auth", "required")
-    keep policy = std.map.set(auth, "client_ca_pem", client_ca_pem)
-    keep opened = std.web.websocket_secure_listen("127.0.0.1", 9443, certificate_pem, private_key_pem, policy) or give
+define serve_mutual
+takes {
+    certificate_pem is String
+    private_key_pem is String
+    client_ca_pem is String
+}
+gives String or String
+needs Network
+{
+    keep auth set std.map.set with {
+        map set std.web.tls_options with {}
+        key set "client_auth"
+        value set "required"
+    }
+    keep policy set std.map.set with {
+        map set auth
+        key set "client_ca_pem"
+        value set client_ca_pem
+    }
+    keep opened set std.web.websocket_secure_listen with {
+        host set "127.0.0.1"
+        port set 9443
+        certificate_pem set certificate_pem
+        private_key_pem set private_key_pem
+        options set policy
+    } or give
     using listener = opened {
-        keep accepted = std.web.websocket_secure_accept(listener, 30.0) or give
+        keep accepted set std.web.websocket_secure_accept with {
+            listener set listener
+            timeout set 30.0
+        } or give
         using socket = accepted {
-            give std.web.websocket_receive(socket, 65536)
+            give std.web.websocket_receive with { websocket set socket maximum set 65536 }
         }
     }
 }

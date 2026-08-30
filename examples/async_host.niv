@@ -1,10 +1,20 @@
-define read_sensor(port: Int) gives Result<String, String> needs Native, Task {
-    keep request = "{\"port\":" + std.int.format(port) + "}"
-    keep queued = std.host.invoke_async("device.read", request) or give
+define read_sensor
+takes {
+    port is Int
+}
+gives String or String
+needs Native, Task
+{
+    keep request set "{\"port\":" + std.int.format with { value set port } + "}"
+    keep queued set std.host.invoke_async with {
+        name set "device.read"
+        request set request
+    } or give
     give wait queued
 }
 
-choose read_sensor(7) {
-    Ok(sample) => sample,
-    Err(problem) => problem,
+keep sample set read_sensor with { port set 7 }
+choose sample {
+    case Ok carries value => value
+    case Err carries problem => problem
 }

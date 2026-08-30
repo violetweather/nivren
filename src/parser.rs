@@ -1275,6 +1275,10 @@ impl Parser {
                 self.advance();
                 Ok("maybe".into())
             }
+            TokenKind::Start => {
+                self.advance();
+                Ok("start".into())
+            }
             _ => Err(self.error_here(message)),
         }
     }

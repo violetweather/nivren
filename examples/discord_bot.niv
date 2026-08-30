@@ -1,20 +1,33 @@
 // A minimal Discord message sender. Set DISCORD_BOT_TOKEN before running and
 // replace the channel ID in the URL. The Network grant can be scoped to
 // host:discord.com and Environment can remain an explicit project grant.
-define send_message(text: String) gives Result<String, String> needs Environment, Network {
-    keep token = std.env.get("DISCORD_BOT_TOKEN") ?? ""
-    keep headers = std.map.single("Authorization", "Bot " + token)
-        through std.map.set("Content-Type", "application/json")
-    keep body = "{\"content\":\"" + text + "\"}"
-    keep response = std.web.request(
-        "POST",
-        "https://discord.com/api/v10/channels/CHANNEL_ID/messages",
-        headers,
-        body,
-        10.0,
-        1048576
-    ) or give
-    give ok(std.map.get(response, "status") ?? "missing status")
+define send_message
+takes {
+    text is String
+}
+gives String or String
+needs Environment, Network
+{
+    keep token set std.env.get with { name set "DISCORD_BOT_TOKEN" } ?? ""
+    keep authorized set std.map.single with {
+        key set "Authorization"
+        value set "Bot " + token
+    }
+    keep headers set std.map.set with {
+        map set authorized
+        key set "Content-Type"
+        value set "application/json"
+    }
+    keep body set "{\"content\":\"" + text + "\"}"
+    keep response set std.web.request with {
+        method set "POST"
+        url set "https://discord.com/api/v10/channels/CHANNEL_ID/messages"
+        headers set headers
+        body set body
+        timeout set 10.0
+        maximum set 1048576
+    } or give
+    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
 }
 
-send_message("Hello from Nivren")
+send_message with { text set "Hello from Nivren" }

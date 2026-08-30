@@ -1,23 +1,49 @@
-define signing_input(header: String, payload: String) gives Result<String, String> {
-    keep prefix = std.text.concat(header, ".") or give
-    give std.text.concat(prefix, payload)
+define signing_input
+takes {
+    header is String
+    payload is String
+}
+gives String or String
+{
+    keep prefix set std.text.concat with { left set header right set "." } or give
+    give std.text.concat with { left set prefix right set payload }
 }
 
-define issue(payload_json: String, secret: Bytes) gives Result<String, String> {
-    keep payload = std.json.compact(payload_json) or give
-    keep header = std.encoding.base64url(std.bytes.from_string("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")) or give
-    keep encoded_payload = std.encoding.base64url(std.bytes.from_string(payload)) or give
-    keep message = signing_input(header, encoded_payload) or give
-    keep tag = std.crypto.hmac_sha256(secret, std.bytes.from_string(message)) or give
-    keep signature = std.encoding.base64url(tag) or give
-    keep prefix = std.text.concat(message, ".") or give
-    give std.text.concat(prefix, signature)
+define issue
+takes {
+    payload_json is String
+    secret is Bytes
+}
+gives String or String
+{
+    keep payload set std.json.compact with { source set payload_json } or give
+    keep header set std.encoding.base64url with {
+        bytes set std.bytes.from_string with {
+            value set "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+        }
+    } or give
+    keep encoded_payload set std.encoding.base64url with {
+        bytes set std.bytes.from_string with { value set payload }
+    } or give
+    keep message set signing_input with {
+        header set header
+        payload set encoded_payload
+    } or give
+    keep tag set std.crypto.hmac_sha256 with {
+        key set secret
+        message set std.bytes.from_string with { value set message }
+    } or give
+    keep signature set std.encoding.base64url with { bytes set tag } or give
+    keep prefix set std.text.concat with { left set message right set "." } or give
+    give std.text.concat with { left set prefix right set signature }
 }
 
-keep secret = std.bytes.from_string("replace this with secret key material")
-keep result = issue("{\"sub\":\"user-42\"}", secret)
-keep message = choose result {
-    Ok(token) => token,
-    Err(problem) => problem,
+keep secret set std.bytes.from_string with {
+    value set "replace this with secret key material"
+}
+keep result set issue with { payload_json set "{\"sub\":\"user-42\"}" secret set secret }
+keep message set choose result {
+    case Ok carries token => token
+    case Err carries problem => problem
 }
 show(message)

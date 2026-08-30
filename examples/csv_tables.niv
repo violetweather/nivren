@@ -1,13 +1,23 @@
-define summarize(source: String) gives Result<String, String> {
-    keep headers = ["name", "score"]
-    keep rows = std.csv.decode(source, headers, ",", 10000) or give
+define summarize
+takes {
+    source is String
+}
+gives String or String
+{
+    keep headers set ["name", "score"]
+    keep rows set std.csv.decode with {
+        source set source
+        headers set headers
+        delimiter set ","
+        maximum_rows set 10000
+    } or give
     when len(rows) == 0 { give ok("no rows") }
-    give ok(std.map.get(rows[0], "name") ?? "missing name")
+    give ok(std.map.get with { map set rows[0] key set "name" } ?? "missing name")
 }
 
-keep result = summarize("Nivren,100\r\n")
-keep message = choose result {
-    Ok(name) => name,
-    Err(problem) => problem,
+keep result set summarize with { source set "Nivren,100\r\n" }
+keep message set choose result {
+    case Ok carries name => name
+    case Err carries problem => problem
 }
 show(message)

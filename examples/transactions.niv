@@ -1,10 +1,16 @@
-define update() gives Result<Map<String, Int>, String> {
-    keep original = std.map.single("count", 1)
-    keep transaction = std.transactions.begin(original)
+define update
+gives Map<String, Int> or String
+{
+    keep original set std.map.single with { key set "count" value set 1 }
+    keep transaction set std.transactions.begin with { map set original }
     using changes = transaction {
-        keep written = std.transactions.set(changes, "count", 2) or give
-        give std.transactions.commit(changes)
+        keep written set std.transactions.set with {
+            transaction set changes
+            key set "count"
+            value set 2
+        } or give
+        give std.transactions.commit with { transaction set changes }
     }
 }
 
-update()
+update with {}

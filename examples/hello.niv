@@ -1,15 +1,20 @@
-define greet(name: String) gives String {
+define greet
+takes {
+    name is String
+}
+gives String
+{
     give "Hello, " + name + "!"
 }
 
-keep language: String = "Nivren"
-show(greet(language))
+keep language is String set "Nivren"
+show(greet with { name set language })
 
-change sum = 0
-change number = 1
-repeat (number <= 10) {
-    sum = sum + number
-    number = number + 1
+change sum set 0
+change number set 1
+repeat number <= 10 {
+    change sum to sum + number
+    change number to number + 1
 }
 show("The sum from 1 through 10 is:")
 show(sum)
