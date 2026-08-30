@@ -83,9 +83,19 @@ pub struct MatchArm {
     pub span: Span,
 }
 
+/// One piece of a `text "…"` literal: fixed text or one hole expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TextPiece {
+    Literal(String),
+    Hole(Expr),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Literal(Literal, Span),
+    /// A formatted `text "…"` literal; evaluation renders every piece and
+    /// joins them into one string.
+    Text(Vec<TextPiece>, Span),
     Variable(String, Span),
     Assign(String, Box<Expr>, Span),
     Unary(TokenKind, Box<Expr>, Span),
@@ -111,6 +121,7 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Self::Literal(_, span)
+            | Self::Text(_, span)
             | Self::Variable(_, span)
             | Self::Assign(_, _, span)
             | Self::Unary(_, _, span)

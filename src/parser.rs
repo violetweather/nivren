@@ -1,5 +1,6 @@
 use crate::ast::{
-    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef,
+    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TextPiece, TypeParam,
+    TypeRef,
 };
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
@@ -1204,7 +1205,15 @@ impl Parser {
             TokenKind::Int(value) => Ok(Expr::Literal(Literal::Int(value), span)),
             TokenKind::Float(value) => Ok(Expr::Literal(Literal::Float(value), span)),
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value), span)),
-            TokenKind::Identifier(name) => Ok(Expr::Variable(name, span)),
+            TokenKind::Identifier(name) => {
+                if name == "text" && matches!(self.peek().kind, TokenKind::String(_)) {
+                    let TokenKind::String(raw) = self.advance().kind.clone() else {
+                        unreachable!("the peeked token is a string");
+                    };
+                    return self.text_literal(&raw, span);
+                }
+                Ok(Expr::Variable(name, span))
+            }
             TokenKind::Match => self.match_expression(span),
             TokenKind::LeftBracket => {
                 let mut values = vec![];
@@ -1225,6 +1234,118 @@ impl Parser {
                 Ok(value)
             }
             _ => Err(NivError::new("expected expression", span.line, span.column)),
+        }
+    }
+
+    /// Splits a `text "…"` literal into fixed pieces and hole expressions.
+    /// `{` and `}` delimit one hole; `{{` and `}}` spell literal braces.
+    fn text_literal(&mut self, raw: &str, span: Span) -> Result<Expr, NivError> {
+        let mut pieces = vec![];
+        let mut literal = String::new();
+        let characters = raw.chars().collect::<Vec<_>>();
+        let mut index = 0;
+        while index < characters.len() {
+            let character = characters[index];
+            let next = characters.get(index + 1).copied();
+            match character {
+                '{' if next == Some('{') => {
+                    literal.push('{');
+                    index += 2;
+                }
+                '}' if next == Some('}') => {
+                    literal.push('}');
+                    index += 2;
+                }
+                '}' => {
+                    return Err(NivError::new(
+                        "a text literal found '}' without a hole; spell a literal brace '}}'",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                '{' => {
+                    if !literal.is_empty() {
+                        pieces.push(TextPiece::Literal(std::mem::take(&mut literal)));
+                    }
+                    let mut depth = 1usize;
+                    let mut in_string = false;
+                    let mut escaped = false;
+                    let mut hole = String::new();
+                    index += 1;
+                    while index < characters.len() {
+                        let character = characters[index];
+                        if in_string {
+                            if escaped {
+                                escaped = false;
+                            } else if character == '\\' {
+                                escaped = true;
+                            } else if character == '"' {
+                                in_string = false;
+                            }
+                        } else if character == '"' {
+                            in_string = true;
+                        } else if character == '{' {
+                            depth += 1;
+                        } else if character == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        hole.push(character);
+                        index += 1;
+                    }
+                    if depth != 0 {
+                        return Err(NivError::new(
+                            "a text hole is missing its closing '}'",
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    index += 1;
+                    pieces.push(TextPiece::Hole(self.text_hole(&hole, span)?));
+                }
+                other => {
+                    literal.push(other);
+                    index += 1;
+                }
+            }
+        }
+        if !literal.is_empty() {
+            pieces.push(TextPiece::Literal(literal));
+        }
+        Ok(Expr::Text(pieces, span))
+    }
+
+    fn text_hole(&mut self, source: &str, span: Span) -> Result<Expr, NivError> {
+        if source.trim().is_empty() {
+            return Err(NivError::new(
+                "a text hole needs an expression between '{' and '}'",
+                span.line,
+                span.column,
+            ));
+        }
+        let first_error = |errors: Vec<NivError>| {
+            let detail = errors
+                .into_iter()
+                .next()
+                .map(|error| error.message)
+                .unwrap_or_default();
+            NivError::new(
+                format!("a text hole holds an invalid expression: {detail}"),
+                span.line,
+                span.column,
+            )
+        };
+        let tokens = crate::lexer::scan(source).map_err(first_error)?;
+        let mut program = parse(tokens).map_err(first_error)?;
+        match (program.pop(), program.pop()) {
+            (Some(Stmt::Expression(expression)), None) => Ok(expression),
+            _ => Err(NivError::new(
+                "a text hole holds exactly one expression",
+                span.line,
+                span.column,
+            )),
         }
     }
 

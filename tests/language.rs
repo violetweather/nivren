@@ -6582,6 +6582,54 @@ total
 }
 
 #[test]
+fn text_literals_interpolate_values_in_both_engines() {
+    let source = r#"
+keep name set "world"
+text "Hello {name}, {1 + 2} and {yes}!"
+"#;
+    let expected = Value::String("Hello world, 3 and yes!".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn text_literals_escape_braces_and_allow_nested_hole_braces() {
+    let source = r#"text "{{a}} has {len([1, 2, 3])} items""#;
+    let expected = Value::String("{a} has 3 items".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn text_holes_reject_values_without_canonical_text() {
+    let errors = nivren::check(r#"text "{[1, 2]}""#).unwrap_err();
+    assert!(errors[0].to_string().contains("text hole"));
+}
+
+#[test]
+fn text_holes_reject_perform_boundaries() {
+    let errors = nivren::check(r#"text "{perform 1}""#).unwrap_err();
+    assert!(errors[0].to_string().contains("pure"));
+}
+
+#[test]
+fn text_holes_reject_empty_and_unterminated_forms() {
+    assert!(nivren::check(r#"text "{}""#).is_err());
+    assert!(nivren::check(r#"text "{name""#).is_err());
+    assert!(nivren::check(r#"text "name}""#).is_err());
+}
+
+#[test]
+fn text_stays_an_ordinary_identifier_without_a_string() {
+    let source = r#"
+keep text set 5
+text + 1
+"#;
+    assert_eq!(eval_tree(source), Value::Int(6));
+    assert_eq!(eval_vm(source), Value::Int(6));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

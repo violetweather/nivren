@@ -215,6 +215,10 @@ impl Writer {
                     None => self.u8(0),
                 }
             }
+            Op::MakeText(length) => {
+                self.u8(34);
+                self.len(*length)?;
+            }
         }
         Ok(())
     }
@@ -431,6 +435,7 @@ impl Reader<'_> {
                     None
                 },
             },
+            34 => Op::MakeText(self.count()?),
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };
         Ok(Instruction { op, span })

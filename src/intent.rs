@@ -320,6 +320,13 @@ impl Analyzer {
                 self.push(boundary_node(*span, capabilities));
                 self.expression(value, true);
             }
+            Expr::Text(pieces, _) => {
+                for piece in pieces {
+                    if let crate::ast::TextPiece::Hole(hole) = piece {
+                        self.expression(hole, within_perform);
+                    }
+                }
+            }
             Expr::Through(input, stage, span) => {
                 let capabilities = self.expression_capabilities(expression);
                 let pure = capabilities.is_empty();
@@ -545,6 +552,13 @@ fn collect_capabilities(
                 collect_capabilities(&arm.value, standard, functions, output);
             }
         }
+        Expr::Text(pieces, _) => {
+            for piece in pieces {
+                if let crate::ast::TextPiece::Hole(hole) = piece {
+                    collect_capabilities(hole, standard, functions, output);
+                }
+            }
+        }
         Expr::Literal(_, _) | Expr::Variable(_, _) => {}
     }
 }
@@ -621,6 +635,10 @@ fn portable_expression(expression: &Expr) -> bool {
         Expr::Match(subject, arms, _) => {
             portable_expression(subject) && arms.iter().all(|arm| portable_expression(&arm.value))
         }
+        Expr::Text(pieces, _) => pieces.iter().all(|piece| match piece {
+            crate::ast::TextPiece::Literal(_) => true,
+            crate::ast::TextPiece::Hole(hole) => portable_expression(hole),
+        }),
     }
 }
 

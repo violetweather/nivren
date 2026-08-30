@@ -7,7 +7,9 @@ Bytecode 8 is the Edition 5 development format. It extends Bytecode 7 with struc
 
 - `IfCarries { binding, then, else? }` executes `when subject carries binding`. It consumes the subject value; a present value binds the name immutably and runs the then chunk, while `none` runs the else chunk (or pushes `none` when absent). Stack effect is zero. Both chunks are **transparent** to loop-exit signals: the verifier passes the enclosing loop-body context through them, and a `stop`/`skip` inside a branch ends or advances the enclosing loop.
 
-The encoder tags `Repeat` as 31 (condition chunk, then body chunk), `LoopExit` as 32 (one flag byte), and `IfCarries` as 33 (binding string, then chunk, one presence byte, optional else chunk). The verifier treats `LoopExit` as a terminal instruction in control-flow joins, exactly like `Return`, and validates both nested `Repeat` chunks with the loop-body context flag set only for the body.
+- `MakeText(n)` implements the `text "…"` literal. It pops the top `n` piece values, renders each to its canonical text form (text as-is, whole numbers and booleans canonically, finite floats canonically; anything else is a typed error), joins them in order, and pushes one string. The joined result is bounded at 16 MiB. Stack effect is `1 - n`, identical in shape to `MakeArray(n)`.
+
+The encoder tags `Repeat` as 31 (condition chunk, then body chunk), `LoopExit` as 32 (one flag byte), `IfCarries` as 33 (binding string, then chunk, one presence byte, optional else chunk), and `MakeText` as 34 (one count). The verifier treats `LoopExit` as a terminal instruction in control-flow joins, exactly like `Return`, and validates both nested `Repeat` chunks with the loop-body context flag set only for the body.
 
 The `each` lowering (`Iterate`) is unchanged apart from consuming the two loop-exit signals. Runtime engines — the tree interpreter, the bytecode VM, and native trace execution — must agree on loop-exit behavior; a signal that reaches a scope boundary is a runtime defect, because the checker rejects `stop`/`skip` that would cross a function, task, or `using` boundary before code generation.
 

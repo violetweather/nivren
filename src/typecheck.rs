@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{Expr, Literal, Span, Stmt, TypeRef};
+use crate::ast::{Expr, Literal, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
 use crate::fixed::FixedKind;
 use crate::lexer::TokenKind;
@@ -161,6 +161,34 @@ pub(crate) fn standard_effects() -> BTreeMap<String, Vec<String>> {
     let mut effects = BTreeMap::new();
     collect("std", &checker.scopes[0]["std"].ty, &mut effects);
     effects
+}
+
+/// Reports whether an expression contains a `perform` boundary anywhere, so
+/// pure-only positions such as text holes can reject it with intent.
+fn contains_perform(expression: &Expr) -> bool {
+    match expression {
+        Expr::Perform(_, _) => true,
+        Expr::Literal(_, _) | Expr::Variable(_, _) => false,
+        Expr::Assign(_, value, _)
+        | Expr::Unary(_, value, _)
+        | Expr::Propagate(value, _)
+        | Expr::Get(value, _, _) => contains_perform(value),
+        Expr::Binary(left, _, right, _)
+        | Expr::Logical(left, _, right, _)
+        | Expr::Coalesce(left, right, _)
+        | Expr::Index(left, right, _)
+        | Expr::Through(left, right, _) => contains_perform(left) || contains_perform(right),
+        Expr::Call(callee, arguments, _, _) => {
+            contains_perform(callee) || arguments.iter().any(contains_perform)
+        }
+        Expr::Array(values, _) => values.iter().any(contains_perform),
+        Expr::Match(subject, arms, _) => {
+            contains_perform(subject) || arms.iter().any(|arm| contains_perform(&arm.value))
+        }
+        Expr::Text(pieces, _) => pieces
+            .iter()
+            .any(|piece| matches!(piece, TextPiece::Hole(hole) if contains_perform(hole))),
+    }
 }
 
 struct Checker {
@@ -2518,6 +2546,34 @@ impl Checker {
                 Literal::Bool(_) => Type::Bool,
                 Literal::Null => Type::Null,
             },
+            Expr::Text(pieces, span) => {
+                for piece in pieces {
+                    if let TextPiece::Hole(hole) = piece {
+                        if contains_perform(hole) {
+                            self.errors.push(NivError::new(
+                                "a text hole attempted to perform an effect; text holes stay pure — perform the effect first and place its result in a binding",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        let found = self.expression(hole);
+                        if !matches!(
+                            found,
+                            Type::String | Type::Int | Type::Float | Type::Bool | Type::Unknown
+                        ) {
+                            self.errors.push(NivError::new(
+                                format!(
+                                    "a text hole renders text, whole numbers, finite floats, or booleans; found {}",
+                                    found.name()
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                Type::String
+            }
             Expr::Variable(name, span) => self
                 .resolve(name)
                 .map(|binding| binding.ty.clone())

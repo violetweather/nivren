@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "host-runtime")]
 use nivren_jit::IntOp;
 
-use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TypeRef};
+use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
@@ -42,6 +42,9 @@ pub enum Op {
     /// stack behavior as `Call` without a second dispatch in effect-heavy code.
     PerformCall(usize),
     MakeArray(usize),
+    /// Joins the top `n` values into one string: each value renders its
+    /// canonical text form, and the joined result is bounded at 16 MiB.
+    MakeText(usize),
     Index,
     Coalesce(usize),
     Propagate,
@@ -462,6 +465,17 @@ impl Compiler {
             Expr::Literal(value, span) => {
                 self.emit(Op::Constant(value.clone()), *span);
             }
+            Expr::Text(pieces, span) => {
+                for piece in pieces {
+                    match piece {
+                        TextPiece::Literal(part) => {
+                            self.emit(Op::Constant(Literal::String(part.clone())), *span);
+                        }
+                        TextPiece::Hole(hole) => self.expression(hole),
+                    }
+                }
+                self.emit(Op::MakeText(pieces.len()), *span);
+            }
             Expr::Variable(name, span) => {
                 self.emit(Op::Load(name.clone()), *span);
             }
@@ -782,7 +796,7 @@ fn stack_effect(op: &Op) -> isize {
         Op::Pop => -1,
         Op::Binary(_) | Op::Index => -1,
         Op::Call(arguments) | Op::PerformCall(arguments) => -(*arguments as isize),
-        Op::MakeArray(values) => 1 - (*values as isize),
+        Op::MakeArray(values) | Op::MakeText(values) => 1 - (*values as isize),
         Op::Store(_)
         | Op::Define { .. }
         | Op::Unary(_)
@@ -826,6 +840,7 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Call(_) => "call",
             Op::PerformCall(_) => "perform_call",
             Op::MakeArray(_) => "make_array",
+            Op::MakeText(_) => "text",
             Op::Index => "index",
             Op::Coalesce(_) => "coalesce",
             Op::Propagate => "propagate",

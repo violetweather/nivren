@@ -38,7 +38,7 @@ use nivren_jit::{CallError as JitCallError, CompiledFunction, CompiledTrace};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::ast::{Expr, Literal, Span, Stmt, TypeRef};
+use crate::ast::{Expr, Literal, Span, Stmt, TextPiece, TypeRef};
 use crate::bytecode::{BytecodeArm, Chunk, Op};
 use crate::error::NivError;
 use crate::fixed::{FixedInt, FixedKind};
@@ -1792,6 +1792,22 @@ impl Interpreter {
             Expr::Variable(name, span) => self.lookup(name).ok_or_else(|| {
                 NivError::new(format!("undefined name '{name}'"), span.line, span.column)
             }),
+            Expr::Text(pieces, span) => {
+                let mut output = String::new();
+                for piece in pieces {
+                    match piece {
+                        TextPiece::Literal(part) => output.push_str(part),
+                        TextPiece::Hole(hole) => {
+                            let value = evaluate_part!(self, hole);
+                            output.push_str(&text_hole_string(&value, *span)?);
+                        }
+                    }
+                    if output.len() > MAX_TEXT_LITERAL_BYTES {
+                        return Err(text_too_long_error(*span));
+                    }
+                }
+                Ok(Value::String(output))
+            }
             Expr::Assign(name, expression, span) => {
                 let value = evaluate_part!(self, expression);
                 assign(&self.environment, name, value.clone(), *span)?;
@@ -3575,6 +3591,17 @@ impl Interpreter {
                 let values = stack.split_off(stack.len() - length);
                 stack.push(Value::Array(Arc::new(values)));
             }
+            Op::MakeText(length) => {
+                let values = stack.split_off(stack.len() - length);
+                let mut output = String::new();
+                for value in &values {
+                    output.push_str(&text_hole_string(value, item.span)?);
+                    if output.len() > MAX_TEXT_LITERAL_BYTES {
+                        return Err(text_too_long_error(item.span));
+                    }
+                }
+                stack.push(Value::String(output));
+            }
             Op::Index => {
                 let index = expect_index(stack.pop().unwrap(), item.span)?;
                 let collection = stack.pop().unwrap();
@@ -3838,6 +3865,7 @@ impl Interpreter {
                 | Op::Call(_)
                 | Op::PerformCall(_)
                 | Op::MakeArray(_)
+                | Op::MakeText(_)
                 | Op::Index
                 | Op::Get(_)
                 | Op::MakeFunction { .. }
@@ -4716,8 +4744,43 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::LoopExit { skip: false } => "stop",
         Op::LoopExit { skip: true } => "skip",
         Op::IfCarries { .. } => "when_carries",
+        Op::MakeText(_) => "text",
         Op::Using { .. } => "using",
     }
+}
+
+const MAX_TEXT_LITERAL_BYTES: usize = 16 * 1024 * 1024;
+
+/// Renders one text-hole value canonically. Only text, whole numbers, finite
+/// floats, and booleans have a canonical text form; everything else is a
+/// typed error the checker normally prevents.
+fn text_hole_string(value: &Value, span: Span) -> Result<String, NivError> {
+    match value {
+        Value::String(text) => Ok(text.clone()),
+        Value::Int(_) | Value::Bool(_) => Ok(value.to_string()),
+        Value::Float(number) if number.is_finite() => Ok(value.to_string()),
+        Value::Float(_) => Err(NivError::new(
+            "a text hole attempted to render a float that is not finite; handle NaN or infinity before formatting",
+            span.line,
+            span.column,
+        )),
+        other => Err(NivError::new(
+            format!(
+                "a text hole attempted to render {}, which has no canonical text; give text, a whole number, a finite float, or a boolean",
+                other.type_name()
+            ),
+            span.line,
+            span.column,
+        )),
+    }
+}
+
+fn text_too_long_error(span: Span) -> NivError {
+    NivError::new(
+        "a text literal grew beyond 16 MiB; build large output through bounded streams instead",
+        span.line,
+        span.column,
+    )
 }
 
 fn loop_exit_escape_error(span: Span) -> NivError {
