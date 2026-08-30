@@ -1,3 +1,5 @@
+trusted "bridges compute kernels to the embedding host accelerator"
+
 shape ComputeLimits holds {
     maximum_items is Int
     workgroup_size is Int

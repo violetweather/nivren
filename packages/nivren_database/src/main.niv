@@ -1,3 +1,5 @@
+trusted "bridges parameterized SQL to the embedding host database driver"
+
 shape PoolConfig holds {
     minimum is Int
     maximum is Int
