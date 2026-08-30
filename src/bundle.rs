@@ -237,6 +237,18 @@ impl Writer {
                 self.u8(35);
                 self.pattern(pattern)?;
             }
+            Op::Sample { title, body, shows } => {
+                self.u8(36);
+                self.string(title)?;
+                self.chunk(body)?;
+                match shows {
+                    Some(expected) => {
+                        self.u8(1);
+                        self.string(expected)?;
+                    }
+                    None => self.u8(0),
+                }
+            }
         }
         Ok(())
     }
@@ -515,6 +527,15 @@ impl Reader<'_> {
             34 => Op::MakeText(self.count()?),
             35 => Op::DefinePattern {
                 pattern: self.pattern(depth + 1)?,
+            },
+            36 => Op::Sample {
+                title: self.string()?,
+                body: self.chunk(depth + 1)?,
+                shows: if self.u8()? != 0 {
+                    Some(self.string()?)
+                } else {
+                    None
+                },
             },
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };

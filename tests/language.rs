@@ -6945,6 +6945,45 @@ promise never Network
 }
 
 #[test]
+fn samples_stay_quiet_in_ordinary_runs_and_execute_under_test_mode() {
+    let failing = r#"
+sample "adding" {
+    1 + 1
+} shows "3"
+42
+"#;
+    assert_eq!(eval_tree(failing), Value::Int(42));
+    assert_eq!(eval_vm(failing), Value::Int(42));
+    let program = nivren::parser::parse(nivren::lexer::scan(failing).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.enable_samples();
+    let error = interpreter.run_bytecode(&chunk).unwrap_err();
+    assert!(error.to_string().contains("sample 'adding'"));
+    let passing = failing.replace("shows \"3\"", "shows \"2\"");
+    let program = nivren::parser::parse(nivren::lexer::scan(&passing).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.enable_samples();
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(42));
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.enable_samples();
+    assert_eq!(interpreter.run(&program).unwrap(), Value::Int(42));
+}
+
+#[test]
+fn samples_are_checked_hermetic_and_uniquely_titled() {
+    let errors = nivren::check("sample \"a\" { 1 }\nsample \"a\" { 2 }\nnone").unwrap_err();
+    assert!(errors[0].to_string().contains("duplicate sample title"));
+    let errors = nivren::check("sample \"io\" { std.time.sleep(0.1) }\nnone").unwrap_err();
+    assert!(errors[0].to_string().contains("renounces"));
+    let errors = nivren::check("sample \"x\" { keep a set 1 } shows \"1\"\nnone").unwrap_err();
+    assert!(errors[0].to_string().contains("ends with one expression"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

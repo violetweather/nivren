@@ -766,6 +766,9 @@ impl Parser {
         if let Some(statement) = self.promise_statement()? {
             return Ok(statement);
         }
+        if let Some(statement) = self.sample_statement()? {
+            return Ok(statement);
+        }
         if let Some(statement) = self.loop_exit_statement() {
             return Ok(statement);
         }
@@ -845,6 +848,42 @@ impl Parser {
         }
         self.optional_semicolon();
         Ok(Some(Stmt::Promise { clauses, span }))
+    }
+
+    /// `sample` is a contextual statement keyword: it introduces a checked
+    /// example only when followed by its title string.
+    fn sample_statement(&mut self) -> Result<Option<Stmt>, NivError> {
+        let TokenKind::Identifier(word) = &self.peek().kind else {
+            return Ok(None);
+        };
+        if word != "sample" || !matches!(self.tokens[self.current + 1].kind, TokenKind::String(_)) {
+            return Ok(None);
+        }
+        self.advance();
+        let span = self.previous_span();
+        let TokenKind::String(title) = self.advance().kind.clone() else {
+            unreachable!("the peeked token is a string");
+        };
+        self.consume(&TokenKind::LeftBrace, "expected '{' before the sample body")?;
+        let body = self.block_contents()?;
+        let shows = if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "shows")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
+        {
+            self.advance();
+            let TokenKind::String(expected) = self.advance().kind.clone() else {
+                unreachable!("the peeked token is a string");
+            };
+            Some(expected)
+        } else {
+            None
+        };
+        self.optional_semicolon();
+        Ok(Some(Stmt::Sample {
+            title,
+            body,
+            shows,
+            span,
+        }))
     }
 
     /// `stop` and `skip` are contextual statement keywords: they end or

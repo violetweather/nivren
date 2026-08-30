@@ -2586,9 +2586,11 @@ fn test_path(path: &str, snapshots: Option<bool>, deterministic_time: Option<f64
             }
         };
         match compile_file(file).and_then(|chunk| {
-            manifest
+            let mut interpreter = manifest
                 .as_ref()
-                .map_or_else(Interpreter::new, project_interpreter)
+                .map_or_else(Interpreter::new, project_interpreter);
+            interpreter.enable_samples();
+            interpreter
                 .run_bytecode(&chunk)
                 .map_err(|error| vec![error])
         }) {

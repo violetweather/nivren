@@ -947,6 +947,9 @@ pub struct Interpreter {
     event_loop: Arc<RuntimeEventLoop>,
     protocol_dispatch: HashMap<(String, String, String), Value>,
     fast_frames: Vec<FastFrame>,
+    /// Whether `sample` declarations execute; `niv test` turns this on and
+    /// every other entry point leaves samples quiet.
+    run_samples: bool,
     native_execution_depth: usize,
     native_compilations: usize,
     native_executions: usize,
@@ -1127,6 +1130,7 @@ impl Interpreter {
             event_loop: Arc::new(RuntimeEventLoop::default()),
             protocol_dispatch: HashMap::new(),
             fast_frames: Vec::new(),
+            run_samples: false,
             native_execution_depth: 0,
             native_compilations: 0,
             native_executions: 0,
@@ -1181,6 +1185,11 @@ impl Interpreter {
     pub fn with_call_depth_limit(mut self, depth: usize) -> Self {
         self.max_call_depth = depth.max(1);
         self
+    }
+
+    /// Executes `sample` declarations instead of leaving them quiet.
+    pub fn enable_samples(&mut self) {
+        self.run_samples = true;
     }
 
     pub fn run(&mut self, statements: &[Stmt]) -> Result<Value, NivError> {
@@ -1548,6 +1557,40 @@ impl Interpreter {
             Stmt::Stop(_) => Ok(Flow::Stop),
             Stmt::Skip(_) => Ok(Flow::Skip),
             Stmt::Promise { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Sample {
+                title,
+                body,
+                shows,
+                span,
+            } => {
+                if !self.run_samples {
+                    return Ok(Flow::Continue(Value::Null));
+                }
+                let environment = self.child_scope(self.environment.clone());
+                match self.execute_block(body, environment)? {
+                    Flow::Continue(value) => {
+                        if let Some(expected) = shows {
+                            let actual = value.to_string();
+                            if &actual != expected {
+                                return Err(NivError::new(
+                                    format!(
+                                        "sample '{title}' shows {expected:?}, produced {actual:?}"
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                        }
+                        Ok(Flow::Continue(Value::Null))
+                    }
+                    Flow::Return(_) => Err(NivError::new(
+                        format!("sample '{title}' ends with an expression, not 'give'"),
+                        span.line,
+                        span.column,
+                    )),
+                    Flow::Stop | Flow::Skip => Err(loop_exit_escape_error(*span)),
+                }
+            }
             Stmt::For {
                 name,
                 pattern,
@@ -4091,6 +4134,44 @@ impl Interpreter {
                     VmFlow::Skip => return Ok(BytecodeStep::Skip),
                 }
             }
+            Op::Sample { title, body, shows } => {
+                if self.run_samples {
+                    let previous = self.environment.clone();
+                    self.roots.push(previous.clone());
+                    let child = self.child_scope(previous.clone());
+                    self.environment = child;
+                    let result = self.execute_chunk(body);
+                    self.roots.pop();
+                    self.environment = previous;
+                    match result? {
+                        VmFlow::Continue(value) => {
+                            if let Some(expected) = shows {
+                                let actual = value.to_string();
+                                if &actual != expected {
+                                    return Err(NivError::new(
+                                        format!(
+                                            "sample '{title}' shows {expected:?}, produced {actual:?}"
+                                        ),
+                                        item.span.line,
+                                        item.span.column,
+                                    ));
+                                }
+                            }
+                        }
+                        VmFlow::Return(_) => {
+                            return Err(NivError::new(
+                                format!("sample '{title}' ends with an expression, not 'give'"),
+                                item.span.line,
+                                item.span.column,
+                            ));
+                        }
+                        VmFlow::Stop | VmFlow::Skip => {
+                            return Err(loop_exit_escape_error(item.span));
+                        }
+                    }
+                }
+                stack.push(Value::Null);
+            }
             Op::Using { name, body } => {
                 let resource = stack.pop().unwrap();
                 match self.execute_bytecode_using(name, resource, body, item.span)? {
@@ -5028,6 +5109,7 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::IfCarries { .. } => "when_carries",
         Op::MakeText(_) => "text",
         Op::DefinePattern { .. } => "define_pattern",
+        Op::Sample { .. } => "sample",
         Op::Using { .. } => "using",
     }
 }
@@ -12219,6 +12301,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::Promise { span, .. }
+        | Stmt::Sample { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

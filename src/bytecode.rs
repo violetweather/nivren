@@ -87,6 +87,14 @@ pub enum Op {
     DefinePattern {
         pattern: Pattern,
     },
+    /// A checked example: quiet unless the runtime executes samples, in
+    /// which case the body runs hermetically and the final value's display
+    /// output must equal `shows` when present. Pushes `none`.
+    Sample {
+        title: String,
+        body: Chunk,
+        shows: Option<String>,
+    },
     /// A `repeat while` loop with its condition and body as nested chunks, so
     /// loop-exit signals unwind scopes safely instead of jumping across them.
     Repeat {
@@ -308,6 +316,21 @@ impl Compiler {
             }
             Stmt::Promise { span, .. } => {
                 self.emit(Op::Constant(Literal::Null), *span);
+            }
+            Stmt::Sample {
+                title,
+                body,
+                shows,
+                span,
+            } => {
+                self.emit(
+                    Op::Sample {
+                        title: title.clone(),
+                        body: compile_statements(body),
+                        shows: shows.clone(),
+                    },
+                    *span,
+                );
             }
             Stmt::For {
                 name,
@@ -679,6 +702,7 @@ fn verify_in_context(chunk: &Chunk, in_loop: bool) -> Result<(), NivError> {
         match &instruction.op {
             Op::MakeFunction { body, .. }
             | Op::DefineModule { body, .. }
+            | Op::Sample { body, .. }
             | Op::Using { body, .. } => verify_in_context(body, false)?,
             Op::Iterate { body, .. } => verify_in_context(body, true)?,
             Op::Repeat { condition, body } => {
@@ -825,7 +849,8 @@ fn stack_effect(op: &Op) -> isize {
         | Op::DefineProtocol { .. }
         | Op::AdoptProtocol { .. }
         | Op::DefineModule { .. }
-        | Op::Repeat { .. } => 1,
+        | Op::Repeat { .. }
+        | Op::Sample { .. } => 1,
         Op::Pop => -1,
         Op::Binary(_) | Op::Index => -1,
         Op::Call(arguments) | Op::PerformCall(arguments) => -(*arguments as isize),
@@ -876,6 +901,7 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::MakeArray(_) => "make_array",
             Op::MakeText(_) => "text",
             Op::DefinePattern { .. } => "define_pattern",
+            Op::Sample { .. } => "sample",
             Op::Index => "index",
             Op::Coalesce(_) => "coalesce",
             Op::Propagate => "propagate",
@@ -1075,6 +1101,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::Promise { span, .. }
+        | Stmt::Sample { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

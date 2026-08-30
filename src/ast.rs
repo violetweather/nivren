@@ -281,6 +281,15 @@ pub enum Stmt {
         clauses: Vec<PromiseClause>,
         span: Span,
     },
+    /// `sample "title" { … } shows "expected"`: a checked, hermetic example.
+    /// Quiet in ordinary runs; `niv test` executes it and compares the final
+    /// expression's display output when `shows` is present.
+    Sample {
+        title: String,
+        body: Vec<Stmt>,
+        shows: Option<String>,
+        span: Span,
+    },
     For {
         name: String,
         /// When present, each element destructures through this irrefutable

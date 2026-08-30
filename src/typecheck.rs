@@ -242,6 +242,7 @@ struct Checker {
     loop_depth: usize,
     loop_boundary: Option<&'static str>,
     active_promises: Vec<PromiseClause>,
+    sample_titles: HashSet<String>,
 }
 
 impl Checker {
@@ -1708,6 +1709,7 @@ impl Checker {
             loop_depth: 0,
             loop_boundary: None,
             active_promises: vec![],
+            sample_titles: HashSet::new(),
         }
     }
 
@@ -1925,6 +1927,45 @@ impl Checker {
                 }
                 let _ = span;
                 self.active_promises.extend(clauses.iter().cloned());
+            }
+            Stmt::Sample {
+                title,
+                body,
+                shows,
+                span,
+            } => {
+                if title.len() > 120 {
+                    self.errors.push(NivError::new(
+                        "a sample title stays under 120 bytes",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if !self.sample_titles.insert(title.clone()) {
+                    self.errors.push(NivError::new(
+                        format!("duplicate sample title '{title}'"),
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if shows.is_some() && !matches!(body.last(), Some(Stmt::Expression(_))) {
+                    self.errors.push(NivError::new(
+                        "a sample with 'shows' ends with one expression to display",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                self.in_scope(|checker| {
+                    for capability in CAPABILITY_VOCABULARY {
+                        checker.active_promises.push(PromiseClause {
+                            capability: capability.into(),
+                            never: true,
+                            boundaries: vec![],
+                            span: *span,
+                        });
+                    }
+                    checker.statements(body);
+                });
             }
             Stmt::Stop(span) | Stmt::Skip(span) => {
                 if self.loop_depth == 0 {
