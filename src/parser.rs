@@ -769,6 +769,17 @@ impl Parser {
         if let Some(statement) = self.sample_statement()? {
             return Ok(statement);
         }
+        if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "trusted")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
+        {
+            self.advance();
+            let span = self.previous_span();
+            let TokenKind::String(reason) = self.advance().kind.clone() else {
+                unreachable!("the peeked token is a string");
+            };
+            self.optional_semicolon();
+            return Ok(Stmt::Trusted { reason, span });
+        }
         if let Some(statement) = self.loop_exit_statement() {
             return Ok(statement);
         }

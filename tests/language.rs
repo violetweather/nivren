@@ -7193,6 +7193,38 @@ when std.gpu.available() {
 }
 
 #[test]
+fn modules_need_trusted_to_cross_the_systems_boundary() {
+    let span = nivren::ast::Span { line: 1, column: 1 };
+    let module = |source: &str| nivren::ast::Stmt::Module {
+        name: "bridge".into(),
+        body: nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap(),
+        exports: vec![],
+        span,
+    };
+    let errors =
+        nivren::typecheck::check(&[module(r#"std.host.invoke("nivren.echo", "{}")"#)]).unwrap_err();
+    assert!(errors[0].to_string().contains("trusted"));
+    assert!(
+        nivren::typecheck::check(&[module(
+            r#"
+trusted "wraps the demo host bridge"
+std.host.invoke("nivren.echo", "{}")
+"#
+        )])
+        .is_ok()
+    );
+    let errors = nivren::typecheck::check(&[module(
+        r#"
+trusted "   "
+std.host.invoke("nivren.echo", "{}")
+"#,
+    )])
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("states its reason"));
+    assert!(nivren::check(r#"std.host.invoke("nivren.echo", "{}")"#).is_ok());
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

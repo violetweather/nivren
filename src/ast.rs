@@ -281,6 +281,13 @@ pub enum Stmt {
         clauses: Vec<PromiseClause>,
         span: Span,
     },
+    /// `trusted "reason"`: marks the enclosing scope as a systems escape
+    /// hatch, unlocking `std.native` and `std.host` while the mandatory
+    /// reason travels into audits and documentation.
+    Trusted {
+        reason: String,
+        span: Span,
+    },
     /// `sample "title" { … } shows "expected"`: a checked, hermetic example.
     /// Quiet in ordinary runs; `niv test` executes it and compares the final
     /// expression's display output when `shows` is present.

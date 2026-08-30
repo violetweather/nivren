@@ -1585,7 +1585,7 @@ impl Interpreter {
             }
             Stmt::Stop(_) => Ok(Flow::Stop),
             Stmt::Skip(_) => Ok(Flow::Skip),
-            Stmt::Promise { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Promise { .. } | Stmt::Trusted { .. } => Ok(Flow::Continue(Value::Null)),
             Stmt::Sample {
                 title,
                 body,
@@ -13024,6 +13024,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::Promise { span, .. }
+        | Stmt::Trusted { span, .. }
         | Stmt::Sample { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }

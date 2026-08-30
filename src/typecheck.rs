@@ -243,6 +243,7 @@ struct Checker {
     loop_boundary: Option<&'static str>,
     active_promises: Vec<PromiseClause>,
     sample_titles: HashSet<String>,
+    trusted_scope: bool,
 }
 
 impl Checker {
@@ -251,6 +252,7 @@ impl Checker {
     }
 
     fn with_namespace(namespace: String) -> Self {
+        let namespace_is_root = namespace.is_empty();
         let unknown = Type::Unknown;
         let mut global = HashMap::new();
         let mut native = |name: &str, params: Vec<Type>, result: Type| {
@@ -1836,6 +1838,10 @@ impl Checker {
             loop_boundary: None,
             active_promises: vec![],
             sample_titles: HashSet::new(),
+            // Top-level scripts keep the historical grandfathered access to
+            // the systems boundary; module bodies check with their own
+            // namespaced Checker and must declare `trusted "reason"`.
+            trusted_scope: namespace_is_root,
         }
     }
 
@@ -2053,6 +2059,23 @@ impl Checker {
                 }
                 let _ = span;
                 self.active_promises.extend(clauses.iter().cloned());
+            }
+            Stmt::Trusted { reason, span } => {
+                if reason.len() > 200 {
+                    self.errors.push(NivError::new(
+                        "a trusted reason stays under 200 bytes of plain language",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if reason.trim().is_empty() {
+                    self.errors.push(NivError::new(
+                        "a trusted module states its reason in plain language",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                self.trusted_scope = true;
             }
             Stmt::Sample {
                 title,
@@ -3027,6 +3050,18 @@ impl Checker {
                 Type::Bool
             }
             Expr::Call(callee, arguments, labels, span) => {
+                if let Some(path) = callable_path(callee)
+                    && (path.starts_with("std.native.") || path.starts_with("std.host."))
+                    && !self.trusted_scope
+                {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "'{path}' crosses the systems boundary; only a module marked 'trusted \"reason\"' may call it"
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
                 if let Some(labels) = labels
                     && let Some(path) = callable_path(callee)
                 {
@@ -4209,7 +4244,9 @@ impl Checker {
     fn in_scope(&mut self, operation: impl FnOnce(&mut Self)) {
         self.scopes.push(HashMap::new());
         let promise_mark = self.active_promises.len();
+        let trusted_mark = self.trusted_scope;
         operation(self);
+        self.trusted_scope = trusted_mark;
         self.active_promises.truncate(promise_mark);
         self.scopes.pop();
     }
