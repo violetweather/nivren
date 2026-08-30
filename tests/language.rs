@@ -7123,6 +7123,76 @@ choose moment {
 }
 
 #[test]
+fn portable_plans_encode_and_decode_across_programs_in_both_engines() {
+    let source = r#"
+shape FetchPlan holds {
+    address is String
+    attempts is Int
+} with Json
+define round_trip takes { } gives String or String {
+    prepare request as FetchPlan with { address set "example.com", attempts set 3 }
+    keep encoded set std.plans.encode(request) or give
+    keep decoded set std.plans.decode(FetchPlan, encoded) or give
+    give ok(decoded.address)
+}
+choose round_trip with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("example.com".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn plan_decoding_rejects_mismatched_shapes() {
+    let source = r#"
+shape FetchPlan holds {
+    address is String
+} with Json
+shape OtherPlan holds {
+    address is String
+    extra is Int
+} with Json
+define attempt takes { } gives String or String {
+    prepare request as FetchPlan with { address set "example.com" }
+    keep encoded set std.plans.encode(request) or give
+    keep decoded set std.plans.decode(OtherPlan, encoded) or give
+    give ok("decoded")
+}
+choose attempt with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let tree = eval_tree(source);
+    let Value::String(message) = tree else {
+        panic!("expected a message");
+    };
+    assert!(message.contains("shape"));
+}
+
+#[test]
+fn the_gpu_stub_reports_visible_unavailability() {
+    let source = r#"
+when std.gpu.available() {
+    "available"
+} otherwise {
+    choose std.gpu.open("cpu") {
+        case Ok carries device => "opened"
+        case Err carries message => message
+    }
+}
+"#;
+    let tree = eval_tree(source);
+    let Value::String(message) = tree else {
+        panic!("expected a message");
+    };
+    assert!(message.contains("no GPU adapter"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

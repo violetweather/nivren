@@ -5267,6 +5267,22 @@ fn effect_value_to_json(value: &Value) -> Result<serde_json::Value, String> {
             }
             serde_json::json!({ "$map": pairs })
         }
+        Value::Record(record) => {
+            let mut fields = serde_json::Map::new();
+            for (name, field) in &record.fields {
+                fields.insert(name.clone(), effect_value_to_json(field)?);
+            }
+            serde_json::json!({ "$shape": record.type_name, "$fields": fields })
+        }
+        Value::Enum(subject) => serde_json::json!({
+            "$choice": subject.type_name,
+            "$case": subject.variant,
+            "$payload": subject
+                .payload
+                .as_ref()
+                .map(effect_value_to_json)
+                .transpose()?,
+        }),
         other => {
             return Err(format!(
                 "{} values hold live state a trace cannot carry",
@@ -5338,6 +5354,36 @@ fn effect_json_to_value(value: &serde_json::Value, span: Span) -> Result<Value, 
                     ));
                 }
                 Value::Map(Arc::new(entries))
+            } else if let (
+                Some(serde_json::Value::String(shape)),
+                Some(serde_json::Value::Object(fields)),
+            ) = (object.get("$shape"), object.get("$fields"))
+            {
+                let mut decoded = Vec::with_capacity(fields.len());
+                let mut indices = HashMap::with_capacity(fields.len());
+                for (index, (name, field)) in fields.iter().enumerate() {
+                    decoded.push((name.clone(), effect_json_to_value(field, span)?));
+                    indices.insert(name.clone(), index);
+                }
+                Value::Record(Arc::new(RecordValue {
+                    type_name: shape.clone(),
+                    fields: decoded,
+                    field_indices: Arc::new(indices),
+                }))
+            } else if let (
+                Some(serde_json::Value::String(choice)),
+                Some(serde_json::Value::String(case)),
+            ) = (object.get("$choice"), object.get("$case"))
+            {
+                let payload = match object.get("$payload") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(payload) => Some(effect_json_to_value(payload, span)?),
+                };
+                Value::Enum(Arc::new(EnumValue {
+                    type_name: choice.clone(),
+                    variant: case.clone(),
+                    payload,
+                }))
             } else {
                 return Err(invalid("unknown object marker"));
             }
@@ -6339,6 +6385,20 @@ fn standard_library() -> Value {
                 ("kind", 1, native_reflect_kind, None),
                 ("fields", 1, native_reflect_fields, None),
                 ("schema", 1, native_reflect_schema, None),
+            ]),
+        ),
+        (
+            "plans".into(),
+            native_module(&[
+                ("encode", 1, native_plans_encode, None),
+                ("decode", 2, native_plans_decode, None),
+            ]),
+        ),
+        (
+            "gpu".into(),
+            native_module(&[
+                ("available", 0, native_gpu_available, Some("Gpu")),
+                ("open", 1, native_gpu_open, Some("Gpu")),
             ]),
         ),
     ]);
@@ -10474,6 +10534,129 @@ portable_network_unavailable!(
     native_net_tls_write_ready,
     native_net_tls_close,
 );
+
+fn native_plans_encode(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Record(record) = &arguments[0] else {
+        return Err(NivError::new(
+            format!(
+                "std.plans.encode expects a prepared plan shape, found {}",
+                arguments[0].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    let mut fields = serde_json::Map::new();
+    for (name, field) in &record.fields {
+        match effect_value_to_json(field) {
+            Ok(json) => {
+                fields.insert(name.clone(), json);
+            }
+            Err(reason) => {
+                return Ok(result_error(format!(
+                    "this plan is not portable: field '{name}' holds {reason}"
+                )));
+            }
+        }
+    }
+    let envelope = serde_json::json!({
+        "schema": "org.nivren.portable-plan.v1",
+        "shape": record.type_name,
+        "fields": fields,
+    });
+    let bytes = serde_json::to_string(&envelope)
+        .expect("plan envelopes contain only serializable values")
+        .into_bytes();
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.plans.encode exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::Bytes(Arc::new(bytes)))))
+}
+
+fn native_plans_decode(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::RecordType(record_type) = &arguments[0] else {
+        return Err(NivError::new(
+            format!(
+                "std.plans.decode expects a plan shape constructor, found {}",
+                arguments[0].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    let Value::Bytes(bytes) = &arguments[1] else {
+        return Err(NivError::new(
+            format!(
+                "std.plans.decode expects plan Bytes, found {}",
+                arguments[1].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.plans.decode exceeds the 16777216 byte limit",
+        ));
+    }
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(result_error("these bytes are not a portable plan"));
+    };
+    if parsed.get("schema").and_then(serde_json::Value::as_str)
+        != Some("org.nivren.portable-plan.v1")
+    {
+        return Ok(result_error(
+            "these bytes carry an unknown plan format version",
+        ));
+    }
+    let shape = parsed.get("shape").and_then(serde_json::Value::as_str);
+    if shape != Some(record_type.name.as_str()) {
+        return Ok(result_error(format!(
+            "this plan carries shape '{}', expected '{}'",
+            shape.unwrap_or("<missing>"),
+            record_type.name
+        )));
+    }
+    let Some(serde_json::Value::Object(fields)) = parsed.get("fields") else {
+        return Ok(result_error("this plan is missing its fields"));
+    };
+    if fields.len() != record_type.fields.len() {
+        return Ok(result_error(format!(
+            "this plan carries {} field(s), '{}' declares {}",
+            fields.len(),
+            record_type.name,
+            record_type.fields.len()
+        )));
+    }
+    let mut decoded = Vec::with_capacity(record_type.fields.len());
+    for (name, _) in &record_type.fields {
+        let Some(field) = fields.get(name) else {
+            return Ok(result_error(format!("this plan is missing field '{name}'")));
+        };
+        match effect_json_to_value(field, span) {
+            Ok(value) => decoded.push((name.clone(), value)),
+            Err(error) => return Ok(result_error(error.message)),
+        }
+    }
+    Ok(Value::Ok(Arc::new(Value::Record(Arc::new(RecordValue {
+        type_name: record_type.name.clone(),
+        fields: decoded,
+        field_indices: record_type.field_indices.clone(),
+    })))))
+}
+
+fn native_gpu_available(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    Ok(Value::Bool(false))
+}
+
+fn native_gpu_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let adapter = expect_string(&arguments[0], "std.gpu.open", span)?;
+    Ok(result_error(format!(
+        "no GPU adapter '{adapter}' is available on this host"
+    )))
+}
 
 fn native_reflect_kind(arguments: Vec<Value>, _: Span) -> Result<Value, NivError> {
     Ok(Value::String(arguments[0].type_name().to_string()))

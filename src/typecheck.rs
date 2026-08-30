@@ -1660,6 +1660,39 @@ impl Checker {
                         ]),
                     ),
                     (
+                        "plans",
+                        module(vec![
+                            (
+                                "encode",
+                                function(
+                                    vec![Type::Unknown],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "decode",
+                                function(
+                                    vec![Type::Unknown, Type::Bytes],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "gpu",
+                        module(vec![
+                            ("available", effect(vec![], Type::Bool, "Gpu")),
+                            (
+                                "open",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Gpu",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
                         "compression",
                         module(vec![
                             (
