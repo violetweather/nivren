@@ -155,7 +155,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           targets: wasm32-wasip1, wasm32-unknown-unknown
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Build and verify reproducible WASI and browser modules
@@ -246,7 +246,7 @@ jobs:
           test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*.zip' | wc -l)" -eq 6
           test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*.wasm' | wc -l)" -eq 2
           test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*-browser.mjs' | wc -l)" -eq 1
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
