@@ -51,9 +51,9 @@ gives Bool
     give value % 2 == 0
 }
 
-keep values = [1, 2, 3, 4]
-    through std.list.transform(double)
-    through std.list.select(even)
+keep values set [1, 2, 3, 4]
+    through std.list.transform with { transform set double }
+    through std.list.select with { predicate set even }
 
 show(values)
 ```

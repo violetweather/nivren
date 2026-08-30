@@ -1,5 +1,10 @@
-define double(value: Int) gives Int {
+define double
+takes {
+    value is Int
+}
+gives Int
+{
     give value * 2
 }
 
-show(double(21))
+show(double with { value set 21 })

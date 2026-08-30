@@ -1,10 +1,17 @@
-define meeting_time(seconds: Int, zone: String) gives Result<String, String> {
-    keep instant = std.time.from_unix(seconds, "UTC") or give
-    keep local = std.time.in_zone(instant, zone) or give
-    give ok(std.time.format(local))
+define meeting_time
+takes {
+    seconds is Int
+    zone is String
+}
+gives String or String
+{
+    keep instant set std.time.from_unix with { seconds set seconds zone set "UTC" } or give
+    keep local set std.time.in_zone with { value set instant zone set zone } or give
+    give ok(std.time.format with { value set local })
 }
 
-choose meeting_time(0, "America/New_York") {
-    Ok(value) => value,
-    Err(problem) => problem
+keep scheduled set meeting_time with { seconds set 0 zone set "America/New_York" }
+choose scheduled {
+    case Ok carries value => value
+    case Err carries problem => problem
 }

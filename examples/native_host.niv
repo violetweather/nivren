@@ -1,10 +1,19 @@
 // An embedding host installs the callback. Handle identifiers stay opaque and
 // using asks the host to release the resource on every exit path.
-define query_database(request: String) gives Result<String, String> needs Native {
-    keep opened = std.host.open("database", "{\"url\":\"local\"}") or give
+define query_database
+takes {
+    request is String
+}
+gives String or String
+needs Native
+{
+    keep opened set std.host.open with {
+        kind set "database"
+        request set "{\"url\":\"local\"}"
+    } or give
     using database = opened {
-        give std.host.call(database, "query", request)
+        give std.host.call with { handle set database name set "query" request set request }
     }
 }
 
-query_database("{\"sql\":\"select 42\"}")
+query_database with { request set "{\"sql\":\"select 42\"}" }

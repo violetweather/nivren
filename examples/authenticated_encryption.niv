@@ -1,16 +1,41 @@
-shape Protected {
-    nonce: Bytes,
-    ciphertext: Bytes,
+shape Protected holds {
+    nonce is Bytes
+    ciphertext is Bytes
 }
 
-define protect(key: SecretKey, context: Bytes, plaintext: Bytes) gives Result<Protected, String> needs Random {
-    keep nonce = std.crypto.random_bytes(12) or give
-    keep ciphertext = std.crypto.encrypt(key, nonce, context, plaintext) or give
-    give ok(Protected(nonce, ciphertext))
+define protect
+takes {
+    key is SecretKey
+    context is Bytes
+    plaintext is Bytes
+}
+gives Protected or String
+needs Random
+{
+    keep nonce set std.crypto.random_bytes with { length set 12 } or give
+    keep ciphertext set std.crypto.encrypt with {
+        key set key
+        nonce set nonce
+        associated set context
+        plaintext set plaintext
+    } or give
+    give ok(Protected with { nonce set nonce ciphertext set ciphertext })
 }
 
-define reveal(key: SecretKey, context: Bytes, protected: Protected) gives Result<Bytes, String> {
-    give std.crypto.decrypt(key, protected.nonce, context, protected.ciphertext)
+define reveal
+takes {
+    key is SecretKey
+    context is Bytes
+    protected is Protected
+}
+gives Bytes or String
+{
+    give std.crypto.decrypt with {
+        key set key
+        nonce set protected.nonce
+        associated set context
+        ciphertext set protected.ciphertext
+    }
 }
 
 // A project calling protect grants Random in niv.toml. Context can bind the

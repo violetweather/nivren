@@ -1,7 +1,12 @@
-define message(name: String) gives String {
+define message
+takes {
+    name is String
+}
+gives String
+{
     give "Hello, " + name + "!"
 }
 
-keep internalPrefix = "private"
+keep internal_prefix set "private"
 
 expose { message }

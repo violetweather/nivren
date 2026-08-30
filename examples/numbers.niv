@@ -1,15 +1,22 @@
-define exact_total() gives Result<String, String> {
-    keep subtotal = std.decimal.parse("19.99") or give
-    keep tax = std.decimal.parse("1.60") or give
-    give ok(std.decimal.format(subtotal + tax))
+define exact_total
+gives String or String
+{
+    keep subtotal set std.decimal.parse with { source set "19.99" } or give
+    keep tax set std.decimal.parse with { source set "1.60" } or give
+    give ok(std.decimal.format with { value set subtotal + tax })
 }
 
-define beyond_machine_int() gives Result<String, String> {
-    keep huge = std.bigint.parse("1000000000000000000000000000000") or give
-    give ok(std.bigint.format(huge * std.bigint.from_int(2)))
+define beyond_machine_int
+gives String or String
+{
+    keep huge set std.bigint.parse with {
+        source set "1000000000000000000000000000000"
+    } or give
+    keep doubled set std.bigint.from_int with { value set 2 }
+    give ok(std.bigint.format with { value set huge * doubled })
 }
 
-choose exact_total() {
-    Ok(value) => value,
-    Err(problem) => problem
+choose exact_total with {} {
+    case Ok carries value => value
+    case Err carries problem => problem
 }

@@ -1,20 +1,28 @@
-define count() gives Result<Int, String> needs Task {
-    keep counter = std.atomics.create(0)
+define count
+gives Int or String
+needs Task
+{
+    keep counter set std.atomics.create with { value set 0 }
 
-    define increment() gives Result<Null, String> {
-        change index = 0
+    define increment
+    gives Null or String
+    {
+        change index set 0
         repeat index < 100 {
-            keep previous = std.atomics.add(counter, 1) or give
-            index = index + 1
+            keep previous set std.atomics.add with {
+                atomic set counter
+                amount set 1
+            } or give
+            change index to index + 1
         }
         give ok(none)
     }
 
-    keep completed = together [start increment, start increment] or give
-    give ok(std.atomics.load(counter))
+    keep completed set together [start increment, start increment] or give
+    give ok(std.atomics.load with { atomic set counter })
 }
 
-choose count() {
-    Ok(value) => value,
-    Err(problem) => -1,
+choose count with {} {
+    case Ok carries value => value
+    case Err carries problem => -1
 }

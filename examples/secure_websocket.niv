@@ -1,17 +1,58 @@
-define connect_secure(host: String, path: String) gives Result<WebSocket, String> needs Network {
-    keep policy = std.web.tls_options()
-    give std.web.websocket_secure_connect(host, 443, path, 10.0, policy)
+define connect_secure
+takes {
+    host is String
+    path is String
+}
+gives WebSocket or String
+needs Network
+{
+    keep policy set std.web.tls_options with {}
+    give std.web.websocket_secure_connect with {
+        host set host
+        port set 443
+        path set path
+        timeout set 10.0
+        options set policy
+    }
 }
 
-define connect_mutual(host: String, path: String, root_pem: String, certificate_pem: String, private_key_pem: String) gives Result<WebSocket, String> needs Network {
-    keep roots = std.map.set(std.web.tls_options(), "additional_root_pem", root_pem)
-    keep identity = std.map.set(roots, "client_certificate_pem", certificate_pem)
-    keep policy = std.map.set(identity, "client_private_key_pem", private_key_pem)
-    give std.web.websocket_secure_connect(host, 443, path, 10.0, policy)
+define connect_mutual
+takes {
+    host is String
+    path is String
+    root_pem is String
+    certificate_pem is String
+    private_key_pem is String
+}
+gives WebSocket or String
+needs Network
+{
+    keep roots set std.map.set with {
+        map set std.web.tls_options with {}
+        key set "additional_root_pem"
+        value set root_pem
+    }
+    keep identity set std.map.set with {
+        map set roots
+        key set "client_certificate_pem"
+        value set certificate_pem
+    }
+    keep policy set std.map.set with {
+        map set identity
+        key set "client_private_key_pem"
+        value set private_key_pem
+    }
+    give std.web.websocket_secure_connect with {
+        host set host
+        port set 443
+        path set path
+        timeout set 10.0
+        options set policy
+    }
 }
 
-keep connected = connect_secure("example.com", "/events")
+keep connected set connect_secure with { host set "example.com" path set "/events" }
 choose connected {
-    Ok(socket) => std.web.websocket_close(socket),
-    Err(problem) => err(problem),
+    case Ok carries socket => std.web.websocket_close with { websocket set socket }
+    case Err carries problem => err(problem)
 }
