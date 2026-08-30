@@ -7065,6 +7065,29 @@ second >= first
 }
 
 #[test]
+fn intent_stories_render_deterministic_plain_language() {
+    let source = r#"
+define fetch takes { path is String } gives String or String needs FileRead {
+    give perform std.files.read(path)
+}
+perform fetch with { path set "notes.txt" }
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let graph = nivren::intent::analyze(&program, nivren::intent::Optimization::Enabled);
+    graph.validate().unwrap();
+    let first = graph.story();
+    assert_eq!(first, graph.story());
+    assert!(first.contains("reads through std.files.read"));
+    assert!(first.contains("needs FileRead"));
+    assert!(first.contains("visible effect boundary"));
+    assert!(first.contains("required capabilities: FileRead"));
+    let pure = nivren::parser::parse(nivren::lexer::scan("1 + 2").unwrap()).unwrap();
+    let graph = nivren::intent::analyze(&pure, nivren::intent::Optimization::Enabled);
+    assert!(graph.story().contains("pure computation"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

@@ -92,6 +92,13 @@ Decision values: **Pending** (no decision yet), **Applied** (folded into the Edi
 | 42 | `std.files.exists` gives bare `Bool`, hiding permission errors | `docs/STANDARD_LIBRARY.md:39` | `gives Bool or Problem` | Pending |
 | 43 | `Null` doubles as the JSON variant name and the unit type | `proofs/edition4/cli_automation.niv:10` | Distinct unit type name (`Nothing`); `none` stays the absent value | Pending |
 
+## J. Found during implementation
+
+| # | Wart | Evidence | Recommendation | Decision |
+| --- | --- | --- | --- | --- |
+| 44 | `Iterate.advance` "takes no arguments and gives maybe Item" cannot thread iterator state through immutable values — the signature is unimplementable as specified | `spec/STANDARD-LIBRARY-5.md` §6, `LANGUAGE-5-DRAFT.md` §11 | Persistent unfold shape: `advance takes { state is Self } gives maybe Step` where the standard shape `Step<State, Item> holds { item, next }`; `each` threads `next` | Pending |
+| 45 | Variables named `start`/`wait`/`race`/`together` are rejected because the task words are globally reserved, unlike `set`/`from` | `src/lexer.rs` keyword table | Decide: keep reserved (document in spec §2) or make contextual like `set` | Pending |
+
 ## Cross-cutting fixes already proposed in earlier planning
 
 These predate the ledger sweep and are restated here so one document holds every open repair: typed problems replacing `Result<T, String>` throughout the library (the largest fix; overlaps #7, #36, #42), structured capability-scope grammar replacing the `"path:…"`/`"host:…"` string mini-language (overlaps #16), label and pattern punning (`with { x }` for `x set x`), and unifying the eight derives with `generate` so one generation mechanism remains (overlaps #11). All Pending.

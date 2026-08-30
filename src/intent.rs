@@ -72,6 +72,79 @@ impl IntentGraph {
         output
     }
 
+    /// Deterministic plain-language rendering of the same validated graph:
+    /// equal graphs produce equal stories, and every sentence comes from
+    /// graph data rather than heuristics.
+    pub fn story(&self) -> String {
+        if self.nodes.is_empty() {
+            return "This program declares no external intent: it is pure computation.\n".into();
+        }
+        let mut output = String::from("This program's intent, in source order:\n");
+        for node in &self.nodes {
+            let line = node.line;
+            let sentence = match node.kind.as_str() {
+                "effect" => {
+                    let verb = effect_verb(&node.capabilities);
+                    let needs = if node.capabilities.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (needs {})", node.capabilities.join(", "))
+                    };
+                    let order = node
+                        .effect_order
+                        .map(|order| format!(" as effect {order}"))
+                        .unwrap_or_default();
+                    format!(
+                        "- It {verb} {}{needs}{order} at line {line}.",
+                        node.operation
+                    )
+                }
+                "prepared-plan" => {
+                    let portability = if node.serializable {
+                        "the plan is portable data"
+                    } else {
+                        "the plan stays local because it holds authority, a handle, a callback, a secret, or an effect"
+                    };
+                    format!(
+                        "- It prepares one immutable {} plan at line {line}; {portability}.",
+                        node.operation
+                    )
+                }
+                "pipeline" => {
+                    let fusion = match node.fusion.as_str() {
+                        "verified-pure" => "pure and fused",
+                        "disabled" => "pure with fusion disabled",
+                        _ => "with effect stages kept in source order",
+                    };
+                    format!(
+                        "- It flows values through {} at line {line}, {fusion}.",
+                        node.operation
+                    )
+                }
+                "perform-boundary" => {
+                    format!("- It marks a visible effect boundary at line {line}.")
+                }
+                other => format!(
+                    "- It records {other} intent for {} at line {line}.",
+                    node.operation
+                ),
+            };
+            output.push_str(&sentence);
+            output.push('\n');
+        }
+        let summary = &self.summary;
+        let capabilities = if summary.required_capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            summary.required_capabilities.join(", ")
+        };
+        output.push_str(&format!(
+            "Altogether: {} effect(s), {} materialized plan(s), {} fused pipeline(s); required capabilities: {capabilities}.\n",
+            summary.effect_count, summary.materialized_plans, summary.fused_pipelines,
+        ));
+        output
+    }
+
     /// Rejects malformed graphs before they can reach optimization or tooling.
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA {
@@ -490,6 +563,24 @@ impl Analyzer {
         node.resources.dedup();
         self.nodes.push(node);
     }
+}
+
+fn effect_verb(capabilities: &[String]) -> &'static str {
+    for capability in capabilities {
+        match capability.as_str() {
+            "FileRead" => return "reads through",
+            "FileWrite" => return "writes through",
+            "Network" => return "talks to the network through",
+            "Process" => return "runs a process through",
+            "Time" => return "reads or waits on the clock through",
+            "Random" => return "draws randomness through",
+            "Environment" => return "reads the environment through",
+            "Log" => return "logs through",
+            "Native" => return "crosses the native boundary through",
+            _ => {}
+        }
+    }
+    "uses"
 }
 
 fn boundary_node(span: Span, capabilities: Vec<String>) -> IntentNode {
