@@ -2817,7 +2817,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
     nivren::bytecode::verify(&chunk).unwrap();
     let first = nivren::bytecode::disassemble(&chunk);
     assert_eq!(first, nivren::bytecode::disassemble(&chunk));
-    assert!(first.starts_with("NIVB 7\n"));
+    assert!(first.starts_with("NIVB 8\n"));
 
     let mut incompatible = chunk;
     incompatible.version += 1;
@@ -2840,7 +2840,7 @@ fn source_maps_are_stable_nested_and_exportable() {
     assert_eq!(first, second);
     let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(parsed["schema"], "org.nivren.sourcemap.v1");
-    assert_eq!(parsed["bytecodeVersion"], 7);
+    assert_eq!(parsed["bytecodeVersion"], 8);
     assert!(
         parsed["mappings"]
             .as_array()
@@ -6397,4 +6397,125 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
     );
     fs::remove_dir_all(registry).unwrap();
     fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn stop_ends_the_nearest_repeat_loop_in_both_engines() {
+    let source = r#"
+change total set 0
+change value set 0
+repeat while value < 10 {
+    change value to value + 1
+    when value == 4 { stop }
+    change total to total + value
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(6));
+    assert_eq!(eval_vm(source), Value::Int(6));
+}
+
+#[test]
+fn skip_ends_only_the_current_loop_pass_in_both_engines() {
+    let source = r#"
+change total set 0
+change value set 0
+repeat while value < 6 {
+    change value to value + 1
+    when value == 2 { skip }
+    change total to total + value
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(19));
+    assert_eq!(eval_vm(source), Value::Int(19));
+}
+
+#[test]
+fn stop_and_skip_control_each_loops_in_both_engines() {
+    let stop_source = r#"
+change total set 0
+each item in [1, 2, 3, 4, 5] {
+    when item == 4 { stop }
+    change total to total + item
+}
+total
+"#;
+    assert_eq!(eval_tree(stop_source), Value::Int(6));
+    assert_eq!(eval_vm(stop_source), Value::Int(6));
+    let skip_source = r#"
+change total set 0
+each item in [1, 2, 3, 4, 5] {
+    when item == 2 { skip }
+    change total to total + item
+}
+total
+"#;
+    assert_eq!(eval_tree(skip_source), Value::Int(13));
+    assert_eq!(eval_vm(skip_source), Value::Int(13));
+}
+
+#[test]
+fn stop_only_ends_the_innermost_loop() {
+    let source = r#"
+change total set 0
+each outer in [1, 2, 3] {
+    each inner in [1, 2, 3] {
+        when inner == 2 { stop }
+        change total to total + inner
+    }
+    change total to total + 10
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(33));
+    assert_eq!(eval_vm(source), Value::Int(33));
+}
+
+#[test]
+fn loop_exits_outside_a_loop_are_rejected() {
+    let errors = nivren::check("stop").unwrap_err();
+    assert!(errors[0].to_string().contains("no 'repeat' or 'each' loop"));
+    let errors = nivren::check("skip").unwrap_err();
+    assert!(errors[0].to_string().contains("no 'repeat' or 'each' loop"));
+}
+
+#[test]
+fn loop_exits_cannot_cross_function_or_using_boundaries() {
+    let function_source = r#"
+each item in [1] {
+    define helper {
+        skip
+    }
+}
+"#;
+    let errors = nivren::check(function_source).unwrap_err();
+    assert!(errors[0].to_string().contains("function boundary"));
+    let using_source = r#"
+each item in [1] {
+    using thing set append([], 1) {
+        stop
+    }
+}
+"#;
+    let errors = nivren::check(using_source).unwrap_err();
+    assert!(errors[0].to_string().contains("'using' scope"));
+}
+
+#[test]
+fn contextual_stop_and_skip_leave_library_names_untouched() {
+    let source = r#"
+keep source set std.iter.from([1, 2, 3, 4])
+keep advanced set std.iter.skip(source, 2)
+len(std.iter.collect(advanced))
+"#;
+    assert_eq!(eval_tree(source), Value::Int(2));
+    assert_eq!(eval_vm(source), Value::Int(2));
+}
+
+#[test]
+fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
+    let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
+    let error = nivren::bytecode::compile(&program).unwrap_err();
+    assert!(error[0].to_string().contains("outside a loop body"));
 }

@@ -182,6 +182,8 @@ struct Checker {
     dispatch_adoptions: HashSet<(String, String)>,
     callable_labels: HashMap<String, Vec<String>>,
     namespace: String,
+    loop_depth: usize,
+    loop_boundary: Option<&'static str>,
 }
 
 impl Checker {
@@ -1645,7 +1647,27 @@ impl Checker {
             dispatch_adoptions: HashSet::new(),
             callable_labels: crate::call_labels::owned(),
             namespace,
+            loop_depth: 0,
+            loop_boundary: None,
         }
+    }
+
+    /// Checks a region that a `stop`/`skip` may not escape: function bodies
+    /// and `using` scopes reset the loop context and record which boundary
+    /// separates the region from any enclosing loop.
+    fn outside_loops(&mut self, boundary: &'static str, check: impl FnOnce(&mut Self)) {
+        let saved_depth = std::mem::take(&mut self.loop_depth);
+        let saved_boundary = self.loop_boundary.take();
+        self.loop_boundary = (saved_depth > 0).then_some(boundary);
+        check(self);
+        self.loop_depth = saved_depth;
+        self.loop_boundary = saved_boundary;
+    }
+
+    fn inside_loop(&mut self, check: impl FnOnce(&mut Self)) {
+        self.loop_depth += 1;
+        check(self);
+        self.loop_depth -= 1;
     }
 
     fn statements(&mut self, statements: &[Stmt]) {
@@ -1727,7 +1749,26 @@ impl Checker {
                 condition, body, ..
             } => {
                 self.require_bool(condition);
-                self.statement(body);
+                self.inside_loop(|checker| checker.statement(body));
+            }
+            Stmt::Stop(span) | Stmt::Skip(span) => {
+                if self.loop_depth == 0 {
+                    let word = if matches!(statement, Stmt::Stop(_)) {
+                        "stop"
+                    } else {
+                        "skip"
+                    };
+                    let message = match self.loop_boundary {
+                        Some(boundary) => format!(
+                            "'{word}' attempted to end a loop across {boundary}; give a typed result from it instead"
+                        ),
+                        None => format!(
+                            "'{word}' attempted to end a loop, but no 'repeat' or 'each' loop encloses it; remove it or move this work into a loop"
+                        ),
+                    };
+                    self.errors
+                        .push(NivError::new(message, span.line, span.column));
+                }
             }
             Stmt::For {
                 name,
@@ -1759,7 +1800,7 @@ impl Checker {
                         },
                         *span,
                     );
-                    checker.statement(body);
+                    checker.inside_loop(|checker| checker.statement(body));
                 });
             }
             Stmt::Using {
@@ -1823,16 +1864,18 @@ impl Checker {
                                 span.column,
                             ));
                 }
-                self.in_scope(|checker| {
-                    checker.declare(
-                        name,
-                        Binding {
-                            ty: resource_type,
-                            mutable: false,
-                        },
-                        *span,
-                    );
-                    checker.statement(body);
+                self.outside_loops("the enclosing 'using' scope", |checker| {
+                    checker.in_scope(|checker| {
+                        checker.declare(
+                            name,
+                            Binding {
+                                ty: resource_type,
+                                mutable: false,
+                            },
+                            *span,
+                        );
+                        checker.statement(body);
+                    });
                 });
             }
             Stmt::Function {
@@ -1911,11 +1954,17 @@ impl Checker {
                 );
                 self.returns.push(result);
                 self.needs.push(needs.clone());
-                self.in_scope(|checker| {
-                    for (param, ty) in params.iter().zip(param_types) {
-                        checker.declare(&param.name, Binding { ty, mutable: false }, param.span);
-                    }
-                    checker.statements(body);
+                self.outside_loops("the enclosing function boundary", |checker| {
+                    checker.in_scope(|checker| {
+                        for (param, ty) in params.iter().zip(param_types) {
+                            checker.declare(
+                                &param.name,
+                                Binding { ty, mutable: false },
+                                param.span,
+                            );
+                        }
+                        checker.statements(body);
+                    });
                 });
                 self.needs.pop();
                 self.returns.pop();

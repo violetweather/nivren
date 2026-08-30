@@ -1015,16 +1015,24 @@ pub struct NativeStats {
 enum Flow {
     Continue(Value),
     Return(Value),
+    /// `stop`: unwind to the nearest enclosing loop and end it.
+    Stop,
+    /// `skip`: unwind to the nearest enclosing loop and begin its next pass.
+    Skip,
 }
 
 enum VmFlow {
     Continue(Value),
     Return(Value),
+    Stop,
+    Skip,
 }
 
 enum BytecodeStep {
     Next(usize),
     Return(Value),
+    Stop,
+    Skip,
 }
 
 impl Interpreter {
@@ -1187,6 +1195,9 @@ impl Interpreter {
                         statement_span(statement).column,
                     ));
                 }
+                Flow::Stop | Flow::Skip => {
+                    return Err(loop_exit_escape_error(statement_span(statement)));
+                }
             }
         }
         Ok(value)
@@ -1240,6 +1251,7 @@ impl Interpreter {
                 1,
                 1,
             )),
+            VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(Span { line: 1, column: 1 })),
         };
         self.collect(&[]);
         result
@@ -1268,6 +1280,7 @@ impl Interpreter {
                 1,
                 1,
             )),
+            VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(Span { line: 1, column: 1 })),
         };
         self.collect(&[]);
         result
@@ -1446,10 +1459,14 @@ impl Interpreter {
                     match self.execute(body)? {
                         Flow::Continue(value) => last = value,
                         returned @ Flow::Return(_) => return Ok(returned),
+                        Flow::Stop => break,
+                        Flow::Skip => {}
                     }
                 }
                 Ok(Flow::Continue(last))
             }
+            Stmt::Stop(_) => Ok(Flow::Stop),
+            Stmt::Skip(_) => Ok(Flow::Skip),
             Stmt::For {
                 name,
                 iterable,
@@ -1492,6 +1509,8 @@ impl Interpreter {
                     match self.execute_block(std::slice::from_ref(body.as_ref()), environment)? {
                         Flow::Continue(value) => last = value,
                         returned @ Flow::Return(_) => return Ok(returned),
+                        Flow::Stop => break,
+                        Flow::Skip => {}
                     }
                 }
                 Ok(Flow::Continue(last))
@@ -1685,6 +1704,9 @@ impl Interpreter {
                             span.column,
                         ));
                     }
+                    Flow::Stop | Flow::Skip => {
+                        return Err(loop_exit_escape_error(*span));
+                    }
                 }
                 let scope = module_environment.lock().unwrap();
                 let mut values = HashMap::new();
@@ -1719,7 +1741,7 @@ impl Interpreter {
             for statement in statements {
                 match self.execute(statement)? {
                     Flow::Continue(value) => last = value,
-                    returned @ Flow::Return(_) => return Ok(returned),
+                    other => return Ok(other),
                 }
             }
             Ok(Flow::Continue(last))
@@ -2259,8 +2281,9 @@ impl Interpreter {
                 self.roots.pop();
                 self.environment = previous;
                 self.fast_frames.pop();
-                execution.map(|flow| match flow {
-                    VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                execution.and_then(|flow| match flow {
+                    VmFlow::Continue(value) | VmFlow::Return(value) => Ok(value),
+                    VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(span)),
                 })
             } else {
                 let environment = self.child_scope(function.closure.clone());
@@ -2277,6 +2300,7 @@ impl Interpreter {
                     FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
                         Flow::Continue(_) => Ok(Value::Null),
                         Flow::Return(value) => Ok(value),
+                        Flow::Stop | Flow::Skip => Err(loop_exit_escape_error(span)),
                     },
                     FunctionBody::Bytecode(body) => {
                         let previous = std::mem::replace(&mut self.environment, environment);
@@ -2294,8 +2318,9 @@ impl Interpreter {
                         }
                         self.roots.pop();
                         self.environment = previous;
-                        execution.map(|flow| match flow {
-                            VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                        execution.and_then(|flow| match flow {
+                            VmFlow::Continue(value) | VmFlow::Return(value) => Ok(value),
+                            VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(span)),
                         })
                     }
                 })()
@@ -3307,6 +3332,8 @@ impl Interpreter {
                             BytecodeStep::Return(value) => {
                                 return Ok((-2, Some(VmFlow::Return(value))));
                             }
+                            BytecodeStep::Stop => return Ok((-2, Some(VmFlow::Stop))),
+                            BytecodeStep::Skip => return Ok((-2, Some(VmFlow::Skip))),
                         }
                     }
                     let next = i64::try_from(instruction)
@@ -3356,6 +3383,8 @@ impl Interpreter {
             match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
                 BytecodeStep::Next(next) => instruction = next,
                 BytecodeStep::Return(value) => return Ok(VmFlow::Return(value)),
+                BytecodeStep::Stop => return Ok(VmFlow::Stop),
+                BytecodeStep::Skip => return Ok(VmFlow::Skip),
             }
         }
         if self.is_cancelled() {
@@ -3688,6 +3717,9 @@ impl Interpreter {
                 match self.execute_bytecode_match(subject, arms, item.span)? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
                 }
             }
             Op::DefineModule {
@@ -3702,13 +3734,35 @@ impl Interpreter {
                 match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
                 }
+            }
+            Op::Repeat { condition, body } => {
+                match self.execute_bytecode_repeat(condition, body, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
+                }
+            }
+            Op::LoopExit { skip } => {
+                return Ok(if *skip {
+                    BytecodeStep::Skip
+                } else {
+                    BytecodeStep::Stop
+                });
             }
             Op::Using { name, body } => {
                 let resource = stack.pop().unwrap();
                 match self.execute_bytecode_using(name, resource, body, item.span)? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
                 }
             }
         }
@@ -3904,6 +3958,34 @@ impl Interpreter {
             match result? {
                 VmFlow::Continue(value) => last = value,
                 returned @ VmFlow::Return(_) => return Ok(returned),
+                VmFlow::Stop => break,
+                VmFlow::Skip => {}
+            }
+        }
+        Ok(VmFlow::Continue(last))
+    }
+
+    fn execute_bytecode_repeat(
+        &mut self,
+        condition: &Chunk,
+        body: &Chunk,
+        span: Span,
+    ) -> Result<VmFlow, NivError> {
+        let mut last = Value::Null;
+        loop {
+            let decision = match self.execute_chunk(condition)? {
+                VmFlow::Continue(value) => value,
+                returned @ VmFlow::Return(_) => return Ok(returned),
+                VmFlow::Stop | VmFlow::Skip => return Err(loop_exit_escape_error(span)),
+            };
+            if !expect_bool(decision, span)? {
+                break;
+            }
+            match self.execute_chunk(body)? {
+                VmFlow::Continue(value) => last = value,
+                returned @ VmFlow::Return(_) => return Ok(returned),
+                VmFlow::Stop => break,
+                VmFlow::Skip => {}
             }
         }
         Ok(VmFlow::Continue(last))
@@ -4566,8 +4648,19 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Match(_) => "choose",
         Op::DefineModule { .. } => "define_module",
         Op::Iterate { .. } => "iterate",
+        Op::Repeat { .. } => "repeat",
+        Op::LoopExit { skip: false } => "stop",
+        Op::LoopExit { skip: true } => "skip",
         Op::Using { .. } => "using",
     }
+}
+
+fn loop_exit_escape_error(span: Span) -> NivError {
+    NivError::new(
+        "a loop exit crossed a scope the checker should have rejected",
+        span.line,
+        span.column,
+    )
 }
 
 fn negate(value: Value, span: Span) -> Result<Value, NivError> {
@@ -11710,6 +11803,8 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::Stop(span)
+        | Stmt::Skip(span)
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

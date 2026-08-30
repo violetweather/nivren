@@ -744,9 +744,37 @@ impl Parser {
             let span = self.previous_span();
             return Ok(Stmt::Block(self.block_contents()?, span));
         }
+        if let Some(statement) = self.loop_exit_statement() {
+            return Ok(statement);
+        }
         let expression = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Expression(expression))
+    }
+
+    /// `stop` and `skip` are contextual statement keywords: they end or
+    /// advance the nearest loop only when the word stands alone, so member
+    /// access such as `std.iter.skip` keeps its ordinary meaning.
+    fn loop_exit_statement(&mut self) -> Option<Stmt> {
+        let TokenKind::Identifier(word) = &self.peek().kind else {
+            return None;
+        };
+        let stop = match word.as_str() {
+            "stop" => true,
+            "skip" => false,
+            _ => return None,
+        };
+        if expression_continues(&self.tokens[self.current + 1].kind) {
+            return None;
+        }
+        self.advance();
+        let span = self.previous_span();
+        self.optional_semicolon();
+        Some(if stop {
+            Stmt::Stop(span)
+        } else {
+            Stmt::Skip(span)
+        })
     }
 
     fn prepare_statement(&mut self) -> Result<Stmt, NivError> {
@@ -1433,4 +1461,39 @@ fn task_call(operation: &str, argument: Expr, span: Span) -> Expr {
 
 fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
+}
+
+/// Reports whether a token after an identifier keeps that identifier inside
+/// an ordinary expression, which disqualifies a contextual `stop`/`skip`.
+fn expression_continues(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::LeftParen
+            | TokenKind::LeftBracket
+            | TokenKind::Dot
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Question
+            | TokenKind::QuestionQuestion
+            | TokenKind::Equal
+            | TokenKind::FatArrow
+            | TokenKind::Through
+            | TokenKind::With
+            | TokenKind::Set
+            | TokenKind::To
+            | TokenKind::Is
+            | TokenKind::Colon
+            | TokenKind::Arrow
+    )
 }

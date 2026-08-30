@@ -195,6 +195,11 @@ pub enum Stmt {
         body: Box<Stmt>,
         span: Span,
     },
+    /// `stop` ends the nearest enclosing loop; `skip` ends only the current
+    /// pass. The checker guarantees both appear inside a loop without crossing
+    /// a function, task, or `using` boundary.
+    Stop(Span),
+    Skip(Span),
     For {
         name: String,
         iterable: Expr,

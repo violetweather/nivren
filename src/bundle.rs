@@ -190,6 +190,15 @@ impl Writer {
                 self.u8(30);
                 self.len(*arity)?;
             }
+            Op::Repeat { condition, body } => {
+                self.u8(31);
+                self.chunk(condition)?;
+                self.chunk(body)?;
+            }
+            Op::LoopExit { skip } => {
+                self.u8(32);
+                self.u8(u8::from(*skip));
+            }
         }
         Ok(())
     }
@@ -390,6 +399,13 @@ impl Reader<'_> {
             28 => Op::Prepare(self.string()?),
             29 => Op::Perform,
             30 => Op::PerformCall(self.count()?),
+            31 => Op::Repeat {
+                condition: self.chunk(depth + 1)?,
+                body: self.chunk(depth + 1)?,
+            },
+            32 => Op::LoopExit {
+                skip: self.u8()? != 0,
+            },
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };
         Ok(Instruction { op, span })

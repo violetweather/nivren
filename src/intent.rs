@@ -280,6 +280,7 @@ impl Analyzer {
                 self.expression(condition, false);
                 self.statement(body);
             }
+            Stmt::Stop(_) | Stmt::Skip(_) => {}
             Stmt::For { iterable, body, .. } => {
                 self.expression(iterable, false);
                 self.statement(body);

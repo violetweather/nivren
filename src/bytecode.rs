@@ -9,7 +9,7 @@ use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
-pub const BYTECODE_VERSION: u16 = 7;
+pub const BYTECODE_VERSION: u16 = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chunk {
@@ -74,6 +74,17 @@ pub enum Op {
     Iterate {
         name: String,
         body: Chunk,
+    },
+    /// A `repeat while` loop with its condition and body as nested chunks, so
+    /// loop-exit signals unwind scopes safely instead of jumping across them.
+    Repeat {
+        condition: Chunk,
+        body: Chunk,
+    },
+    /// `stop` (skip = false) or `skip` (skip = true); valid only inside a
+    /// loop body chunk, which the verifier enforces.
+    LoopExit {
+        skip: bool,
     },
     Using {
         name: String,
@@ -241,16 +252,19 @@ impl Compiler {
                 body,
                 span,
             } => {
-                self.emit(Op::Constant(Literal::Null), *span);
-                let start = self.code.len();
-                self.expression(condition);
-                let end = self.emit(Op::JumpIfFalse(usize::MAX), *span);
-                self.emit(Op::Pop, *span);
-                self.emit(Op::Pop, *span);
-                self.statement(body);
-                self.emit(Op::Jump(start), *span);
-                self.patch(end, self.code.len());
-                self.emit(Op::Pop, *span);
+                self.emit(
+                    Op::Repeat {
+                        condition: compile_expression(condition),
+                        body: compile_statement(body),
+                    },
+                    *span,
+                );
+            }
+            Stmt::Stop(span) => {
+                self.emit(Op::LoopExit { skip: false }, *span);
+            }
+            Stmt::Skip(span) => {
+                self.emit(Op::LoopExit { skip: true }, *span);
             }
             Stmt::For {
                 name,
@@ -556,6 +570,15 @@ fn compile_statement(statement: &Stmt) -> Chunk {
     compile_statements(std::slice::from_ref(statement))
 }
 
+fn compile_expression(expression: &Expr) -> Chunk {
+    let mut compiler = Compiler { code: vec![] };
+    compiler.expression(expression);
+    Chunk {
+        version: BYTECODE_VERSION,
+        code: compiler.code,
+    }
+}
+
 fn compile_arm(arm: &MatchArm) -> BytecodeArm {
     let mut compiler = Compiler { code: vec![] };
     compiler.expression(&arm.value);
@@ -571,6 +594,10 @@ fn compile_arm(arm: &MatchArm) -> BytecodeArm {
 }
 
 pub fn verify(chunk: &Chunk) -> Result<(), NivError> {
+    verify_in_context(chunk, false)
+}
+
+fn verify_in_context(chunk: &Chunk, in_loop: bool) -> Result<(), NivError> {
     if chunk.version != BYTECODE_VERSION {
         return Err(NivError::new(
             format!("unsupported bytecode version {}", chunk.version),
@@ -583,11 +610,25 @@ pub fn verify(chunk: &Chunk) -> Result<(), NivError> {
         match &instruction.op {
             Op::MakeFunction { body, .. }
             | Op::DefineModule { body, .. }
-            | Op::Iterate { body, .. }
-            | Op::Using { body, .. } => verify(body)?,
+            | Op::Using { body, .. } => verify_in_context(body, false)?,
+            Op::Iterate { body, .. } => verify_in_context(body, true)?,
+            Op::Repeat { condition, body } => {
+                verify_in_context(condition, false)?;
+                verify_in_context(body, true)?;
+            }
+            Op::LoopExit { skip } => {
+                if !in_loop {
+                    let word = if *skip { "skip" } else { "stop" };
+                    return Err(NivError::new(
+                        format!("'{word}' bytecode outside a loop body"),
+                        instruction.span.line,
+                        instruction.span.column,
+                    ));
+                }
+            }
             Op::Match(arms) => {
                 for arm in arms {
-                    verify(&arm.body)?;
+                    verify_in_context(&arm.body, false)?;
                 }
             }
             _ => {}
@@ -685,7 +726,7 @@ fn verify_stack(chunk: &Chunk) -> Result<(), NivError> {
                 queue.push_back((target, next_depth, next_scope));
                 queue.push_back((index + 1, next_depth, next_scope));
             }
-            Op::Return => {}
+            Op::Return | Op::LoopExit { .. } => {}
             _ => queue.push_back((index + 1, next_depth, next_scope)),
         }
     }
@@ -701,7 +742,8 @@ fn stack_effect(op: &Op) -> isize {
         | Op::DefineEnum { .. }
         | Op::DefineProtocol { .. }
         | Op::AdoptProtocol { .. }
-        | Op::DefineModule { .. } => 1,
+        | Op::DefineModule { .. }
+        | Op::Repeat { .. } => 1,
         Op::Pop => -1,
         Op::Binary(_) | Op::Index => -1,
         Op::Call(arguments) | Op::PerformCall(arguments) => -(*arguments as isize),
@@ -720,6 +762,7 @@ fn stack_effect(op: &Op) -> isize {
         | Op::Return
         | Op::Match(_)
         | Op::Iterate { .. }
+        | Op::LoopExit { .. }
         | Op::Using { .. } => 0,
         Op::Prepare(_) | Op::Perform => 0,
     }
@@ -761,6 +804,9 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Match(_) => "choose",
             Op::DefineModule { .. } => "define_module",
             Op::Iterate { .. } => "iterate",
+            Op::Repeat { .. } => "repeat",
+            Op::LoopExit { skip: false } => "stop",
+            Op::LoopExit { skip: true } => "skip",
             Op::Using { .. } => "using",
             Op::DefineProtocol { .. } => "define_protocol",
             Op::AdoptProtocol { .. } => "adopt_protocol",
@@ -786,6 +832,10 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
                 | Op::DefineModule { body, .. }
                 | Op::Iterate { body, .. }
                 | Op::Using { body, .. } => walk(body, &path, mappings),
+                Op::Repeat { condition, body } => {
+                    walk(condition, &format!("{path}.condition"), mappings);
+                    walk(body, &format!("{path}.body"), mappings);
+                }
                 Op::Match(arms) => {
                     for (arm, value) in arms.iter().enumerate() {
                         walk(&value.body, &format!("{path}.arm{arm}"), mappings);
@@ -839,6 +889,13 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
                 disassemble_chunk(body, indent + 1, output);
                 output.push_str(&format!("{}END_ITERATE\n", "  ".repeat(indent)));
             }
+            Op::Repeat { condition, body } => {
+                output.push_str(&format!("{prefix}REPEAT\n"));
+                disassemble_chunk(condition, indent + 1, output);
+                output.push_str(&format!("{}DO\n", "  ".repeat(indent)));
+                disassemble_chunk(body, indent + 1, output);
+                output.push_str(&format!("{}END_REPEAT\n", "  ".repeat(indent)));
+            }
             Op::Match(arms) => {
                 output.push_str(&format!("{prefix}MATCH\n"));
                 for arm in arms {
@@ -868,6 +925,8 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::Stop(span)
+        | Stmt::Skip(span)
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }
