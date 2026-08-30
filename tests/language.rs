@@ -7026,6 +7026,45 @@ passes
 }
 
 #[test]
+fn calendar_fields_and_difference_read_datetimes_in_both_engines() {
+    let source = r#"
+define inspect takes { } gives String or String {
+    keep opening set std.time.from_unix(0, "UTC") or give
+    keep later set std.time.add_seconds(opening, 90061) or give
+    keep difference set std.time.difference_seconds(later, opening) or give
+    give std.text.join([
+        std.int.format(std.time.year(opening)),
+        std.int.format(std.time.month(opening)),
+        std.int.format(std.time.day(opening)),
+        std.int.format(std.time.weekday(opening)),
+        std.int.format(std.time.hour(later)),
+        std.int.format(std.time.minute(later)),
+        std.int.format(std.time.second(later)),
+        std.int.format(difference)
+    ], ":")
+}
+choose inspect with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("1970:1:1:4:1:1:1:90061".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn monotonic_time_never_goes_backward() {
+    let source = r#"
+keep first set std.time.monotonic()
+keep second set std.time.monotonic()
+second >= first
+"#;
+    assert_eq!(eval_tree(source), Value::Bool(true));
+    assert_eq!(eval_vm(source), Value::Bool(true));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

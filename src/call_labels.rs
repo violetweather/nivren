@@ -159,7 +159,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.time",
-        "now:;sleep:seconds;now_zoned:zone;from_unix:seconds,zone;parse:source;format:value;in_zone:value,zone;unix:value;add_seconds:value,seconds",
+        "now:;sleep:seconds;now_zoned:zone;from_unix:seconds,zone;parse:source;format:value;in_zone:value,zone;unix:value;add_seconds:value,seconds;monotonic:;year:value;month:value;day:value;hour:value;minute:value;second:value;weekday:value;difference_seconds:left,right",
     );
     add(
         &mut labels,

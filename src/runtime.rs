@@ -5520,6 +5520,20 @@ fn standard_library() -> Value {
                 ("unix", 1, native_time_unix, None),
                 ("add_seconds", 2, native_time_add_seconds, None),
                 ("now_zoned", 1, native_time_now_zoned, Some("Time")),
+                ("monotonic", 0, native_time_monotonic, Some("Time")),
+                ("year", 1, native_time_year, None),
+                ("month", 1, native_time_month, None),
+                ("day", 1, native_time_day, None),
+                ("hour", 1, native_time_hour, None),
+                ("minute", 1, native_time_minute, None),
+                ("second", 1, native_time_second, None),
+                ("weekday", 1, native_time_weekday, None),
+                (
+                    "difference_seconds",
+                    2,
+                    native_time_difference_seconds,
+                    None,
+                ),
             ]),
         ),
         (
@@ -6483,6 +6497,79 @@ fn native_time_add_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, N
                 value.time_zone().clone(),
             ))))),
             Err(error) => result_error(error),
+        },
+    )
+}
+
+fn native_time_monotonic(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    static ORIGIN: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
+    Ok(Value::Float(ORIGIN.elapsed().as_secs_f64()))
+}
+
+fn native_time_field(
+    arguments: &[Value],
+    operation: &str,
+    span: Span,
+    field: impl Fn(&jiff::Zoned) -> i64,
+) -> Result<Value, NivError> {
+    let value = expect_datetime(&arguments[0], operation, span)?;
+    Ok(Value::Int(field(value)))
+}
+
+fn native_time_year(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.year", span, |value| {
+        i64::from(value.year())
+    })
+}
+
+fn native_time_month(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.month", span, |value| {
+        i64::from(value.month())
+    })
+}
+
+fn native_time_day(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.day", span, |value| {
+        i64::from(value.day())
+    })
+}
+
+fn native_time_hour(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.hour", span, |value| {
+        i64::from(value.hour())
+    })
+}
+
+fn native_time_minute(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.minute", span, |value| {
+        i64::from(value.minute())
+    })
+}
+
+fn native_time_second(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.second", span, |value| {
+        i64::from(value.second())
+    })
+}
+
+fn native_time_weekday(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.weekday", span, |value| {
+        i64::from(value.weekday().to_monday_one_offset())
+    })
+}
+
+fn native_time_difference_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let left = expect_datetime(&arguments[0], "std.time.difference_seconds", span)?;
+    let right = expect_datetime(&arguments[1], "std.time.difference_seconds", span)?;
+    Ok(
+        match left
+            .timestamp()
+            .as_second()
+            .checked_sub(right.timestamp().as_second())
+        {
+            Some(difference) => Value::Ok(Arc::new(Value::Int(difference))),
+            None => result_error("date/time arithmetic overflow"),
         },
     )
 }

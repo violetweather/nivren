@@ -504,6 +504,21 @@ impl Checker {
                                     "Time",
                                 ),
                             ),
+                            ("monotonic", effect(vec![], Type::Float, "Time")),
+                            ("year", function(vec![Type::DateTime], Type::Int)),
+                            ("month", function(vec![Type::DateTime], Type::Int)),
+                            ("day", function(vec![Type::DateTime], Type::Int)),
+                            ("hour", function(vec![Type::DateTime], Type::Int)),
+                            ("minute", function(vec![Type::DateTime], Type::Int)),
+                            ("second", function(vec![Type::DateTime], Type::Int)),
+                            ("weekday", function(vec![Type::DateTime], Type::Int)),
+                            (
+                                "difference_seconds",
+                                function(
+                                    vec![Type::DateTime, Type::DateTime],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (
