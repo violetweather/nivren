@@ -34,6 +34,7 @@ enum Coverage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Type {
     Int,
+    UInt,
     Float,
     String,
     Bytes,
@@ -84,6 +85,7 @@ impl Type {
     fn name(&self) -> String {
         match self {
             Self::Int => "Int".into(),
+            Self::UInt => "UInt".into(),
             Self::Float => "Float".into(),
             Self::String => "String".into(),
             Self::Bytes => "Bytes".into(),
@@ -751,6 +753,47 @@ impl Checker {
                                 ),
                             ),
                             ("format", function(vec![Type::Int], Type::String)),
+                        ]),
+                    ),
+                    (
+                        "uint",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::UInt), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("format", function(vec![Type::UInt], Type::String)),
+                            (
+                                "from_int",
+                                function(
+                                    vec![Type::Int],
+                                    Type::Result(Box::new(Type::UInt), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_int",
+                                function(
+                                    vec![Type::UInt],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "wrapping_add",
+                                function(vec![Type::UInt, Type::UInt], Type::UInt),
+                            ),
+                            (
+                                "wrapping_sub",
+                                function(vec![Type::UInt, Type::UInt], Type::UInt),
+                            ),
+                            (
+                                "wrapping_mul",
+                                function(vec![Type::UInt, Type::UInt], Type::UInt),
+                            ),
+                            ("min", function(vec![], Type::UInt)),
+                            ("max", function(vec![], Type::UInt)),
                         ]),
                     ),
                     (
@@ -2912,7 +2955,12 @@ impl Checker {
                         let found = self.expression(hole);
                         if !matches!(
                             found,
-                            Type::String | Type::Int | Type::Float | Type::Bool | Type::Unknown
+                            Type::String
+                                | Type::Int
+                                | Type::UInt
+                                | Type::Float
+                                | Type::Bool
+                                | Type::Unknown
                         ) {
                             self.errors.push(NivError::new(
                                 format!(
@@ -3976,6 +4024,7 @@ impl Checker {
             }
             TypeRef::Named(name, span) => match name.as_str() {
                 "Int" | "Number" => Type::Int,
+                "UInt" => Type::UInt,
                 "Float" => Type::Float,
                 "String" => Type::String,
                 "Bytes" => Type::Bytes,
@@ -4043,6 +4092,7 @@ impl Checker {
     fn numeric_pair(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         match (left, right) {
             (Type::Int, Type::Int) => Type::Int,
+            (Type::UInt, Type::UInt) => Type::UInt,
             (Type::Float, Type::Float) => Type::Float,
             (Type::BigInt, Type::BigInt) => Type::BigInt,
             (Type::Decimal, Type::Decimal) => Type::Decimal,
@@ -4084,7 +4134,12 @@ impl Checker {
         match ty {
             Type::Generic(_) => unreachable!("generic constraints are handled above"),
             Type::Unknown => true,
-            Type::Int | Type::Float | Type::BigInt | Type::Decimal | Type::Fixed(_) => {
+            Type::Int
+            | Type::UInt
+            | Type::Float
+            | Type::BigInt
+            | Type::Decimal
+            | Type::Fixed(_) => {
                 matches!(protocol, "Comparable" | "Number" | "Ordered" | "Sendable")
             }
             Type::String | Type::Bytes => {
@@ -4342,6 +4397,7 @@ fn derive_data_type_at(
     }
     match ty {
         Type::Int
+        | Type::UInt
         | Type::Float
         | Type::String
         | Type::Bytes

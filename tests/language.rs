@@ -7249,6 +7249,57 @@ choose std.reflect.schema(add) {
 }
 
 #[test]
+fn uint_arithmetic_is_checked_wrapping_is_explicit_and_dual_engine() {
+    let source = r#"
+define compute takes { } gives String or String {
+    keep small set std.uint.from_int(7) or give
+    keep large set std.uint.from_int(6) or give
+    keep sum set small + large
+    keep product set small * large
+    keep wrapped set std.uint.wrapping_sub(std.uint.min(), small)
+    keep back set std.uint.to_int(sum) or give
+    give ok(text "{std.uint.format(sum)} {std.uint.format(product)} {std.uint.format(wrapped)} {back} {small < large}")
+}
+choose compute with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("13 42 18446744073709551609 13 no".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn uint_overflow_and_negation_are_typed_runtime_errors() {
+    let overflow = r#"
+define boom takes { } gives UInt or String {
+    keep one set std.uint.from_int(1) or give
+    give ok(std.uint.max() + one)
+}
+boom with {}
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(error.to_string().contains("unsigned integer overflow"));
+    let negation = r#"
+define flip takes { } gives UInt or String {
+    keep one set std.uint.from_int(1) or give
+    give ok(-one)
+}
+flip with {}
+"#;
+    let errors = nivren::check(negation).unwrap_err();
+    assert!(errors[0].to_string().contains("UInt"));
+    let mixed = nivren::check("std.uint.max() + 1").unwrap_err();
+    assert!(mixed[0].to_string().contains("same type"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

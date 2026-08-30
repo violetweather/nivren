@@ -179,6 +179,7 @@ macro_rules! evaluate_part {
 #[derive(Clone)]
 pub enum Value {
     Int(i64),
+    UInt(u64),
     Float(f64),
     String(String),
     Bytes(Arc<Vec<u8>>),
@@ -227,6 +228,7 @@ impl Value {
     pub fn type_name(&self) -> &str {
         match self {
             Self::Int(_) => "Int",
+            Self::UInt(_) => "UInt",
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::Bytes(_) => "Bytes",
@@ -274,6 +276,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::UInt(a), Self::UInt(b)) => a == b,
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
@@ -334,6 +337,7 @@ impl Display for Value {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Int(number) => write!(formatter, "{number}"),
+            Self::UInt(number) => write!(formatter, "{number}"),
             Self::Float(number) => write!(formatter, "{number}"),
             Self::String(string) => write!(formatter, "{string}"),
             Self::Bytes(bytes) => write!(formatter, "<{} bytes>", bytes.len()),
@@ -2336,6 +2340,7 @@ impl Interpreter {
             TokenKind::BangEqual => Ok(Value::Bool(left != right)),
             TokenKind::Plus => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => checked_int(a.checked_add(b), span),
+                (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     Ok(Value::BigInt(Arc::new(a.as_ref() + b.as_ref())))
@@ -2356,6 +2361,7 @@ impl Interpreter {
             TokenKind::Minus | TokenKind::Star | TokenKind::Slash | TokenKind::Percent => {
                 match (left, right) {
                     (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
+                    (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
                     (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                     (Value::BigInt(a), Value::BigInt(b)) => {
                         bigint_binary(a.as_ref(), operator, b.as_ref(), span)
@@ -2375,6 +2381,7 @@ impl Interpreter {
             | TokenKind::Less
             | TokenKind::LessEqual => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
+                (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
                 (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     bigint_binary(a.as_ref(), operator, b.as_ref(), span)
@@ -4944,6 +4951,7 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
         Value::Lock(lock) => mark_value(&lock.value.lock().unwrap(), marked),
         Value::LockGuard(guard) => mark_value(&guard.lock.value.lock().unwrap(), marked),
         Value::Int(_)
+        | Value::UInt(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -5399,7 +5407,7 @@ const MAX_TEXT_LITERAL_BYTES: usize = 16 * 1024 * 1024;
 fn text_hole_string(value: &Value, span: Span) -> Result<String, NivError> {
     match value {
         Value::String(text) => Ok(text.clone()),
-        Value::Int(_) | Value::Bool(_) => Ok(value.to_string()),
+        Value::Int(_) | Value::UInt(_) | Value::Bool(_) => Ok(value.to_string()),
         Value::Float(number) if number.is_finite() => Ok(value.to_string()),
         Value::Float(_) => Err(NivError::new(
             "a text hole attempted to render a float that is not finite; handle NaN or infinity before formatting",
@@ -5442,6 +5450,11 @@ fn negate(value: Value, span: Span) -> Result<Value, NivError> {
             .checked_sub(number)
             .map(Value::Decimal)
             .ok_or_else(|| NivError::new("decimal overflow", span.line, span.column)),
+        Value::UInt(_) => Err(NivError::new(
+            "unsigned values have no negation; convert with std.uint.to_int first",
+            span.line,
+            span.column,
+        )),
         Value::FixedInt(number) if number.kind.signed() => number
             .value
             .checked_neg()
@@ -5481,6 +5494,109 @@ fn int_binary(a: i64, operator: &TokenKind, b: i64, span: Span) -> Result<Value,
         TokenKind::Less => Ok(Value::Bool(a < b)),
         TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
         _ => unreachable!(),
+    }
+}
+
+fn uint_binary(a: u64, operator: &TokenKind, b: u64, span: Span) -> Result<Value, NivError> {
+    let checked = |value: Option<u64>| {
+        value
+            .map(Value::UInt)
+            .ok_or_else(|| NivError::new("unsigned integer overflow", span.line, span.column))
+    };
+    match operator {
+        TokenKind::Plus => checked(a.checked_add(b)),
+        TokenKind::Minus => checked(a.checked_sub(b)),
+        TokenKind::Star => checked(a.checked_mul(b)),
+        TokenKind::Slash if b == 0 => {
+            Err(NivError::new("division by zero", span.line, span.column))
+        }
+        TokenKind::Slash => checked(a.checked_div(b)),
+        TokenKind::Percent if b == 0 => {
+            Err(NivError::new("remainder by zero", span.line, span.column))
+        }
+        TokenKind::Percent => checked(a.checked_rem(b)),
+        TokenKind::Greater => Ok(Value::Bool(a > b)),
+        TokenKind::GreaterEqual => Ok(Value::Bool(a >= b)),
+        TokenKind::Less => Ok(Value::Bool(a < b)),
+        TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
+        _ => unreachable!(),
+    }
+}
+
+fn native_uint_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let source = expect_string(&arguments[0], "std.uint.parse", span)?;
+    if source.len() > 20 {
+        return Ok(result_error("UInt text exceeds 20 bytes"));
+    }
+    Ok(match source.parse::<u64>() {
+        Ok(value) => Value::Ok(Arc::new(Value::UInt(value))),
+        Err(_) => result_error("invalid or out-of-range UInt"),
+    })
+}
+
+fn native_uint_format(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_uint(&arguments[0], "std.uint.format", span)?;
+    Ok(Value::String(value.to_string()))
+}
+
+fn native_uint_from_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Int(value) = arguments[0] else {
+        return Err(expected_value(
+            "std.uint.from_int",
+            "Int",
+            &arguments[0],
+            span,
+        ));
+    };
+    Ok(match u64::try_from(value) {
+        Ok(value) => Value::Ok(Arc::new(Value::UInt(value))),
+        Err(_) => result_error("negative Int cannot become UInt"),
+    })
+}
+
+fn native_uint_to_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_uint(&arguments[0], "std.uint.to_int", span)?;
+    Ok(match i64::try_from(value) {
+        Ok(value) => Value::Ok(Arc::new(Value::Int(value))),
+        Err(_) => result_error("UInt exceeds the Int range"),
+    })
+}
+
+fn native_uint_wrapping(
+    arguments: &[Value],
+    operation: &str,
+    span: Span,
+    wrap: impl Fn(u64, u64) -> u64,
+) -> Result<Value, NivError> {
+    let left = expect_uint(&arguments[0], operation, span)?;
+    let right = expect_uint(&arguments[1], operation, span)?;
+    Ok(Value::UInt(wrap(left, right)))
+}
+
+fn native_uint_wrapping_add(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_uint_wrapping(&arguments, "std.uint.wrapping_add", span, u64::wrapping_add)
+}
+
+fn native_uint_wrapping_sub(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_uint_wrapping(&arguments, "std.uint.wrapping_sub", span, u64::wrapping_sub)
+}
+
+fn native_uint_wrapping_mul(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_uint_wrapping(&arguments, "std.uint.wrapping_mul", span, u64::wrapping_mul)
+}
+
+fn native_uint_min(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    Ok(Value::UInt(u64::MIN))
+}
+
+fn native_uint_max(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    Ok(Value::UInt(u64::MAX))
+}
+
+fn expect_uint(value: &Value, operation: &str, span: Span) -> Result<u64, NivError> {
+    match value {
+        Value::UInt(value) => Ok(*value),
+        other => Err(expected_value(operation, "UInt", other, span)),
     }
 }
 
@@ -5875,6 +5991,20 @@ fn standard_library() -> Value {
             native_module(&[
                 ("parse", 1, native_int_parse, None),
                 ("format", 1, native_int_format, None),
+            ]),
+        ),
+        (
+            "uint".into(),
+            native_module(&[
+                ("parse", 1, native_uint_parse, None),
+                ("format", 1, native_uint_format, None),
+                ("from_int", 1, native_uint_from_int, None),
+                ("to_int", 1, native_uint_to_int, None),
+                ("wrapping_add", 2, native_uint_wrapping_add, None),
+                ("wrapping_sub", 2, native_uint_wrapping_sub, None),
+                ("wrapping_mul", 2, native_uint_wrapping_mul, None),
+                ("min", 0, native_uint_min, None),
+                ("max", 0, native_uint_max, None),
             ]),
         ),
         (
@@ -12439,6 +12569,7 @@ fn join_task(handle: TaskHandle) -> Value {
 fn transferable(value: &Value) -> bool {
     match value {
         Value::Int(_)
+        | Value::UInt(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -12726,6 +12857,7 @@ fn process_scope_allows(scope: &str, command: &str, first_argument: Option<&str>
 fn stable_key(value: &Value) -> bool {
     match value {
         Value::Int(_)
+        | Value::UInt(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -12774,7 +12906,7 @@ fn stable_key(value: &Value) -> bool {
 fn estimated_value_bytes(value: &Value) -> u64 {
     const HANDLE_BYTES: u64 = 64;
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => 16,
+        Value::Int(_) | Value::UInt(_) | Value::Float(_) | Value::Bool(_) | Value::Null => 16,
         Value::Enum(value) => value.payload.as_ref().map_or(16, |payload| {
             16u64.saturating_add(estimated_value_bytes(payload))
         }),
