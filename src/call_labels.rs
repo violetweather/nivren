@@ -154,7 +154,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.text",
-        "concat:left,right;split:value,separator,maximum;split_last:value,separator;starts_with:value,prefix",
+        "concat:left,right;split:value,separator,maximum;split_last:value,separator;starts_with:value,prefix;contains:value,needle;ends_with:value,suffix;index_of:value,needle;slice:value,start,end;replace:value,needle,replacement,maximum;trim:value;trim_start:value;trim_end:value;to_upper:value;to_lower:value;join:parts,separator;lines:value;repeat:value,count;pad_start:value,width,pad;pad_end:value,width,pad",
     );
     add(
         &mut labels,

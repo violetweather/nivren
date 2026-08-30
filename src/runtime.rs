@@ -5562,6 +5562,21 @@ fn standard_library() -> Value {
                 ("split", 3, native_text_split, None),
                 ("split_last", 2, native_text_split_last, None),
                 ("starts_with", 2, native_text_starts_with, None),
+                ("contains", 2, native_text_contains, None),
+                ("ends_with", 2, native_text_ends_with, None),
+                ("index_of", 2, native_text_index_of, None),
+                ("slice", 3, native_text_slice, None),
+                ("replace", 4, native_text_replace, None),
+                ("trim", 1, native_text_trim, None),
+                ("trim_start", 1, native_text_trim_start, None),
+                ("trim_end", 1, native_text_trim_end, None),
+                ("to_upper", 1, native_text_to_upper, None),
+                ("to_lower", 1, native_text_to_lower, None),
+                ("join", 2, native_text_join, None),
+                ("lines", 1, native_text_lines, None),
+                ("repeat", 2, native_text_repeat, None),
+                ("pad_start", 3, native_text_pad_start, None),
+                ("pad_end", 3, native_text_pad_end, None),
             ]),
         ),
         (
@@ -7436,6 +7451,213 @@ fn native_text_split_last(arguments: Vec<Value>, span: Span) -> Result<Value, Ni
         ])))),
         None => result_error("std.text.split_last separator was not found"),
     })
+}
+
+fn expect_needle<'a>(
+    arguments: &'a [Value],
+    operation: &str,
+    span: Span,
+) -> Result<(&'a str, &'a str), NivError> {
+    let value = expect_string(&arguments[0], operation, span)?;
+    let needle = expect_string(&arguments[1], operation, span)?;
+    if needle.is_empty() {
+        return Err(NivError::new(
+            format!("{operation} needle cannot be empty"),
+            span.line,
+            span.column,
+        ));
+    }
+    Ok((value, needle))
+}
+
+fn native_text_contains(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let (value, needle) = expect_needle(&arguments, "std.text.contains", span)?;
+    Ok(Value::Bool(value.contains(needle)))
+}
+
+fn native_text_ends_with(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.ends_with", span)?;
+    let suffix = expect_string(&arguments[1], "std.text.ends_with", span)?;
+    Ok(Value::Bool(value.ends_with(suffix)))
+}
+
+fn native_text_index_of(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let (value, needle) = expect_needle(&arguments, "std.text.index_of", span)?;
+    Ok(match value.find(needle) {
+        Some(byte_position) => {
+            let scalar_position = value[..byte_position].chars().count();
+            Value::Int(scalar_position as i64)
+        }
+        None => Value::Null,
+    })
+}
+
+fn native_text_slice(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.slice", span)?;
+    let start = expect_nonnegative(&arguments[1], "std.text.slice", span)?;
+    let end = expect_nonnegative(&arguments[2], "std.text.slice", span)?;
+    let length = value.chars().count();
+    if start > end || end > length {
+        return Ok(result_error(
+            "std.text.slice range must be start-inclusive, end-exclusive, and in bounds",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(
+        value.chars().skip(start).take(end - start).collect(),
+    ))))
+}
+
+fn native_text_replace(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let (value, needle) = expect_needle(&arguments[..2], "std.text.replace", span)?;
+    let replacement = expect_string(&arguments[2], "std.text.replace", span)?;
+    let maximum = expect_nonnegative(&arguments[3], "std.text.replace", span)?;
+    if maximum == 0 || maximum > 1_000_000 {
+        return Ok(result_error(
+            "std.text.replace maximum must be from 1 through 1000000",
+        ));
+    }
+    let output = value.replacen(needle, replacement, maximum);
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.replace exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_trim(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.trim", span)?;
+    Ok(Value::String(value.trim().to_string()))
+}
+
+fn native_text_trim_start(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.trim_start", span)?;
+    Ok(Value::String(value.trim_start().to_string()))
+}
+
+fn native_text_trim_end(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.trim_end", span)?;
+    Ok(Value::String(value.trim_end().to_string()))
+}
+
+fn native_text_to_upper(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.to_upper", span)?;
+    let output = value.to_uppercase();
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.to_upper exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_to_lower(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.to_lower", span)?;
+    let output = value.to_lowercase();
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.to_lower exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_join(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Array(parts) = &arguments[0] else {
+        return Err(NivError::new(
+            format!(
+                "std.text.join expects [String], found {}",
+                arguments[0].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    let separator = expect_string(&arguments[1], "std.text.join", span)?;
+    let mut pieces = Vec::with_capacity(parts.len());
+    for part in parts.iter() {
+        pieces.push(expect_string(part, "std.text.join", span)?);
+    }
+    let output = pieces.join(separator);
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.join exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_lines(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.lines", span)?;
+    let normalized = value.replace("\r\n", "\n");
+    let lines: Vec<Value> = normalized
+        .split('\n')
+        .map(|line| Value::String(line.to_string()))
+        .collect();
+    if lines.len() > 1_000_000 {
+        return Err(NivError::new(
+            "std.text.lines caps at 1000000 lines",
+            span.line,
+            span.column,
+        ));
+    }
+    Ok(Value::Array(Arc::new(lines)))
+}
+
+fn native_text_repeat(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.repeat", span)?;
+    let count = expect_nonnegative(&arguments[1], "std.text.repeat", span)?;
+    let Some(length) = value.len().checked_mul(count) else {
+        return Ok(result_error(
+            "std.text.repeat exceeds the 16777216 byte limit",
+        ));
+    };
+    if length > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.repeat exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(value.repeat(count)))))
+}
+
+fn native_text_pad(
+    arguments: &[Value],
+    operation: &str,
+    at_start: bool,
+    span: Span,
+) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], operation, span)?;
+    let width = expect_nonnegative(&arguments[1], operation, span)?;
+    let pad = expect_string(&arguments[2], operation, span)?;
+    if pad.chars().count() != 1 {
+        return Ok(result_error(
+            "a pad unit is exactly one Unicode scalar value",
+        ));
+    }
+    let current = value.chars().count();
+    if current >= width {
+        return Ok(Value::Ok(Arc::new(Value::String(value.to_string()))));
+    }
+    let padding: String = pad.chars().cycle().take(width - current).collect();
+    let output = if at_start {
+        format!("{padding}{value}")
+    } else {
+        format!("{value}{padding}")
+    };
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(format!(
+            "{operation} exceeds the 16777216 byte limit"
+        )));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_pad_start(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_text_pad(&arguments, "std.text.pad_start", true, span)
+}
+
+fn native_text_pad_end(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_text_pad(&arguments, "std.text.pad_end", false, span)
 }
 
 fn native_int_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {

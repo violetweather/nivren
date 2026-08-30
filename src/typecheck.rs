@@ -643,6 +643,84 @@ impl Checker {
                                     ),
                                 ),
                             ),
+                            (
+                                "contains",
+                                function(vec![Type::String, Type::String], Type::Bool),
+                            ),
+                            (
+                                "ends_with",
+                                function(vec![Type::String, Type::String], Type::Bool),
+                            ),
+                            (
+                                "index_of",
+                                function(
+                                    vec![Type::String, Type::String],
+                                    Type::Nullable(Box::new(Type::Int)),
+                                ),
+                            ),
+                            (
+                                "slice",
+                                function(
+                                    vec![Type::String, Type::Int, Type::Int],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "replace",
+                                function(
+                                    vec![Type::String, Type::String, Type::String, Type::Int],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("trim", function(vec![Type::String], Type::String)),
+                            ("trim_start", function(vec![Type::String], Type::String)),
+                            ("trim_end", function(vec![Type::String], Type::String)),
+                            (
+                                "to_upper",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_lower",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "join",
+                                function(
+                                    vec![Type::Array(Box::new(Type::String)), Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "lines",
+                                function(vec![Type::String], Type::Array(Box::new(Type::String))),
+                            ),
+                            (
+                                "repeat",
+                                function(
+                                    vec![Type::String, Type::Int],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "pad_start",
+                                function(
+                                    vec![Type::String, Type::Int, Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "pad_end",
+                                function(
+                                    vec![Type::String, Type::Int, Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (

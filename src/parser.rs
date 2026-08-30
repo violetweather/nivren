@@ -1329,7 +1329,14 @@ impl Parser {
                 expression = Expr::Index(Box::new(expression), Box::new(index), span);
             } else if self.matches(&[TokenKind::Dot]) {
                 let span = self.previous_span();
-                let name = self.consume_identifier("expected field name after '.'")?;
+                // Member names may spell word keywords such as `repeat`
+                // (`std.text.repeat`); after '.', a word is always a name.
+                let name = if matches!(self.peek().kind, TokenKind::While) {
+                    self.advance();
+                    "repeat".to_string()
+                } else {
+                    self.consume_identifier("expected field name after '.'")?
+                };
                 expression = Expr::Get(Box::new(expression), name, span);
             } else {
                 break;

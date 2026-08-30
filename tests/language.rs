@@ -6984,6 +6984,48 @@ fn samples_are_checked_hermetic_and_uniquely_titled() {
 }
 
 #[test]
+fn the_grown_text_library_builds_and_transforms_in_both_engines() {
+    let source = r#"
+define build takes { } gives String or String {
+    keep sliced set std.text.slice("hello", 1, 3) or give
+    keep replaced set std.text.replace("a-b-a", "a", "x", 2) or give
+    keep upper set std.text.to_upper("up") or give
+    keep padded set std.text.pad_start("7", 3, "0") or give
+    keep repeated set std.text.repeat("ab", 2) or give
+    give std.text.join([sliced, replaced, upper, padded, repeated], "|")
+}
+choose build with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("el|x-b-x|UP|007|abab".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn the_grown_text_library_tests_and_measures_in_both_engines() {
+    let source = r#"
+change passes set 0
+each fact in [
+    std.text.contains("hello", "ell"),
+    std.text.ends_with("hello", "lo"),
+    (std.text.index_of("hello", "l") ?? 0) == 2,
+    len(std.text.lines("a\nb\r\nc")) == 3,
+    std.text.trim_start("  x") == "x",
+    std.text.trim_end("x  ") == "x",
+    std.text.trim("  mid  ") == "mid"
+] {
+    when fact { change passes to passes + 1 }
+}
+passes
+"#;
+    assert_eq!(eval_tree(source), Value::Int(7));
+    assert_eq!(eval_vm(source), Value::Int(7));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
