@@ -228,6 +228,14 @@ pub enum Stmt {
         initializer: Expr,
         span: Span,
     },
+    /// `keep Shape holds { field set pattern } set expression`: destructures
+    /// an irrefutable shape pattern into immutable bindings in the current
+    /// scope.
+    LetPattern {
+        pattern: Pattern,
+        initializer: Expr,
+        span: Span,
+    },
     Expression(Expr),
     Print(Expr, Span),
     Block(Vec<Stmt>, Span),
@@ -258,6 +266,9 @@ pub enum Stmt {
     Skip(Span),
     For {
         name: String,
+        /// When present, each element destructures through this irrefutable
+        /// pattern instead of binding `name` directly.
+        pattern: Option<Pattern>,
         iterable: Expr,
         body: Box<Stmt>,
         span: Span,

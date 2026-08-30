@@ -1770,6 +1770,25 @@ impl Checker {
                     *span,
                 );
             }
+            Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            } => {
+                let inferred = self.expression(initializer);
+                let mut bindings = BTreeMap::new();
+                let coverage = self.check_pattern(pattern, &inferred, &mut bindings);
+                if !matches!(coverage, Coverage::Full) {
+                    self.errors.push(NivError::new(
+                        "a binding pattern never fails; refutable patterns belong in 'choose' or 'when … carries'",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                for (name, ty) in bindings {
+                    self.declare(&name, Binding { ty, mutable: false }, *span);
+                }
+            }
             Stmt::Expression(expression) | Stmt::Print(expression, _) => {
                 self.expression(expression);
             }
@@ -1850,6 +1869,7 @@ impl Checker {
             }
             Stmt::For {
                 name,
+                pattern,
                 iterable,
                 body,
                 span,
@@ -1870,14 +1890,30 @@ impl Checker {
                     }
                 };
                 self.in_scope(|checker| {
-                    checker.declare(
-                        name,
-                        Binding {
-                            ty: element,
-                            mutable: false,
-                        },
-                        *span,
-                    );
+                    match pattern {
+                        Some(pattern) => {
+                            let mut bindings = BTreeMap::new();
+                            let coverage = checker.check_pattern(pattern, &element, &mut bindings);
+                            if !matches!(coverage, Coverage::Full) {
+                                checker.errors.push(NivError::new(
+                                    "a binding pattern never fails; refutable patterns belong in 'choose' or 'when … carries'",
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                            for (bound, ty) in bindings {
+                                checker.declare(&bound, Binding { ty, mutable: false }, *span);
+                            }
+                        }
+                        None => checker.declare(
+                            name,
+                            Binding {
+                                ty: element,
+                                mutable: false,
+                            },
+                            *span,
+                        ),
+                    }
                     checker.inside_loop(|checker| checker.statement(body));
                 });
             }

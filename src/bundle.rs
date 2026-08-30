@@ -151,9 +151,20 @@ impl Writer {
                 self.chunk(body)?;
                 self.strings(exports)?;
             }
-            Op::Iterate { name, body } => {
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
                 self.u8(23);
                 self.string(name)?;
+                match pattern {
+                    Some(pattern) => {
+                        self.u8(1);
+                        self.pattern(pattern)?;
+                    }
+                    None => self.u8(0),
+                }
                 self.chunk(body)?;
             }
             Op::Using { name, body } => {
@@ -218,6 +229,10 @@ impl Writer {
             Op::MakeText(length) => {
                 self.u8(34);
                 self.len(*length)?;
+            }
+            Op::DefinePattern { pattern } => {
+                self.u8(35);
+                self.pattern(pattern)?;
             }
         }
         Ok(())
@@ -437,6 +452,11 @@ impl Reader<'_> {
             },
             23 => Op::Iterate {
                 name: self.string()?,
+                pattern: match self.u8()? {
+                    0 => None,
+                    1 => Some(self.pattern(depth + 1)?),
+                    _ => return Err(bundle_error("invalid optional pattern")),
+                },
                 body: self.chunk(depth + 1)?,
             },
             24 => Op::Using {
@@ -480,6 +500,9 @@ impl Reader<'_> {
                 },
             },
             34 => Op::MakeText(self.count()?),
+            35 => Op::DefinePattern {
+                pattern: self.pattern(depth + 1)?,
+            },
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };
         Ok(Instruction { op, span })

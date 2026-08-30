@@ -257,7 +257,9 @@ impl Analyzer {
                 }
                 self.expression(initializer, false);
             }
-            Stmt::Let { initializer, .. } => self.expression(initializer, false),
+            Stmt::Let { initializer, .. } | Stmt::LetPattern { initializer, .. } => {
+                self.expression(initializer, false)
+            }
             Stmt::Expression(expression) | Stmt::Print(expression, _) => {
                 self.expression(expression, false);
             }

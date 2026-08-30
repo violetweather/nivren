@@ -89,6 +89,24 @@ impl Parser {
     fn binding(&mut self, mutable: bool) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected a name after binding keyword")?;
+        if self.matches(&[TokenKind::Holds]) {
+            if mutable {
+                return Err(NivError::new(
+                    "'change' binds one name; destructuring patterns use 'keep'",
+                    span.line,
+                    span.column,
+                ));
+            }
+            let pattern = Pattern::Shape(name, self.shape_pattern_fields()?, span);
+            self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
+            let initializer = self.expression()?;
+            self.optional_semicolon();
+            return Ok(Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            });
+        }
         let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
         let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
             Some(self.type_ref()?)
@@ -924,7 +942,16 @@ impl Parser {
         let span = self.previous_span();
         let parenthesized = self.matches(&[TokenKind::LeftParen]);
         let name = self.consume_identifier("expected iteration binding")?;
-        self.consume(&TokenKind::In, "expected 'within' after iteration binding")?;
+        let pattern = if self.matches(&[TokenKind::Holds]) {
+            Some(Pattern::Shape(
+                name.clone(),
+                self.shape_pattern_fields()?,
+                span,
+            ))
+        } else {
+            None
+        };
+        self.consume(&TokenKind::In, "expected 'in' after iteration binding")?;
         let iterable = self.expression()?;
         if parenthesized {
             self.consume(&TokenKind::RightParen, "expected ')' after iterable")?;
@@ -932,6 +959,7 @@ impl Parser {
         let body = Box::new(self.statement()?);
         Ok(Stmt::For {
             name,
+            pattern,
             iterable,
             body,
             span,
@@ -1413,6 +1441,19 @@ impl Parser {
         Ok(Expr::Match(Box::new(subject), arms, span))
     }
 
+    fn shape_pattern_fields(&mut self) -> Result<Vec<(String, Pattern)>, NivError> {
+        self.consume(&TokenKind::LeftBrace, "expected '{' after 'holds'")?;
+        let mut fields = vec![];
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            let field = self.consume_identifier("expected a field name")?;
+            self.consume(&TokenKind::Set, "a field pattern uses 'set'")?;
+            fields.push((field, self.arm_pattern()?));
+            self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+        }
+        self.consume(&TokenKind::RightBrace, "expected '}' after field patterns")?;
+        Ok(fields)
+    }
+
     fn arm_pattern(&mut self) -> Result<Pattern, NivError> {
         let token = self.peek().clone();
         let span = Span {
@@ -1454,16 +1495,7 @@ impl Parser {
                     return Ok(Pattern::Carries(name, Box::new(inner), span));
                 }
                 if self.matches(&[TokenKind::Holds]) {
-                    self.consume(&TokenKind::LeftBrace, "expected '{' after 'holds'")?;
-                    let mut fields = vec![];
-                    while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
-                        let field = self.consume_identifier("expected a field name")?;
-                        self.consume(&TokenKind::Set, "a field pattern uses 'set'")?;
-                        fields.push((field, self.arm_pattern()?));
-                        self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
-                    }
-                    self.consume(&TokenKind::RightBrace, "expected '}' after field patterns")?;
-                    return Ok(Pattern::Shape(name, fields, span));
+                    return Ok(Pattern::Shape(name, self.shape_pattern_fields()?, span));
                 }
                 if self.matches(&[TokenKind::LeftParen]) {
                     let binding = self.consume_identifier("expected payload binding")?;

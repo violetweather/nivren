@@ -76,7 +76,16 @@ pub enum Op {
     },
     Iterate {
         name: String,
+        /// When present, each element destructures through this irrefutable
+        /// pattern instead of binding `name`.
+        pattern: Option<Pattern>,
         body: Chunk,
+    },
+    /// Destructures the value at the top of the stack through an irrefutable
+    /// pattern, declaring each bound name immutably in the current scope.
+    /// The value stays on the stack as the statement result.
+    DefinePattern {
+        pattern: Pattern,
     },
     /// A `repeat while` loop with its condition and body as nested chunks, so
     /// loop-exit signals unwind scopes safely instead of jumping across them.
@@ -298,6 +307,7 @@ impl Compiler {
             }
             Stmt::For {
                 name,
+                pattern,
                 iterable,
                 body,
                 span,
@@ -306,7 +316,21 @@ impl Compiler {
                 self.emit(
                     Op::Iterate {
                         name: name.clone(),
+                        pattern: pattern.clone(),
                         body: compile_statement(body),
+                    },
+                    *span,
+                );
+            }
+            Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            } => {
+                self.expression(initializer);
+                self.emit(
+                    Op::DefinePattern {
+                        pattern: pattern.clone(),
                     },
                     *span,
                 );
@@ -818,6 +842,7 @@ fn stack_effect(op: &Op) -> isize {
         | Op::Iterate { .. }
         | Op::LoopExit { .. }
         | Op::IfCarries { .. }
+        | Op::DefinePattern { .. }
         | Op::Using { .. } => 0,
         Op::Prepare(_) | Op::Perform => 0,
     }
@@ -846,6 +871,7 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::PerformCall(_) => "perform_call",
             Op::MakeArray(_) => "make_array",
             Op::MakeText(_) => "text",
+            Op::DefinePattern { .. } => "define_pattern",
             Op::Index => "index",
             Op::Coalesce(_) => "coalesce",
             Op::Propagate => "propagate",
@@ -954,8 +980,16 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
                 disassemble_chunk(body, indent + 1, output);
                 output.push_str(&format!("{}END_MODULE\n", "  ".repeat(indent)));
             }
-            Op::Iterate { name, body } => {
-                output.push_str(&format!("{prefix}ITERATE {name}\n"));
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
+                let target = pattern
+                    .as_ref()
+                    .map(pattern_text)
+                    .unwrap_or_else(|| name.clone());
+                output.push_str(&format!("{prefix}ITERATE {target}\n"));
                 disassemble_chunk(body, indent + 1, output);
                 output.push_str(&format!("{}END_ITERATE\n", "  ".repeat(indent)));
             }
@@ -1028,6 +1062,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
         | Stmt::IfCarries { span, .. }
+        | Stmt::LetPattern { span, .. }
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::For { span, .. }

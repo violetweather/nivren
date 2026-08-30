@@ -1407,6 +1407,42 @@ impl Interpreter {
                 );
                 Ok(Flow::Continue(value))
             }
+            Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            } => {
+                let value = self.evaluate(initializer)?;
+                if let Value::EarlyReturn(value) = value {
+                    return Ok(Flow::Return(value.as_ref().clone()));
+                }
+                let bindings = self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                    NivError::new(
+                        "this value did not match the binding pattern",
+                        span.line,
+                        span.column,
+                    )
+                })?;
+                let mut scope = self.environment.lock().unwrap();
+                for (name, bound) in bindings {
+                    if scope.values.contains_key(&name) {
+                        return Err(NivError::new(
+                            format!("'{name}' is already declared in this scope"),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value: bound,
+                            mutable: false,
+                        },
+                    );
+                }
+                drop(scope);
+                Ok(Flow::Continue(value))
+            }
             Stmt::Expression(expression) => {
                 let value = self.evaluate(expression)?;
                 Ok(match value {
@@ -1498,6 +1534,7 @@ impl Interpreter {
             Stmt::Skip(_) => Ok(Flow::Skip),
             Stmt::For {
                 name,
+                pattern,
                 iterable,
                 body,
                 span,
@@ -1528,13 +1565,39 @@ impl Interpreter {
                 let mut last = Value::Null;
                 for value in values {
                     let environment = self.child_scope(self.environment.clone());
-                    environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: false,
-                        },
-                    );
+                    {
+                        let mut scope = environment.lock().unwrap();
+                        match pattern {
+                            Some(pattern) => {
+                                let bindings =
+                                    self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                                        NivError::new(
+                                            "this element did not match the iteration pattern",
+                                            span.line,
+                                            span.column,
+                                        )
+                                    })?;
+                                for (bound, bound_value) in bindings {
+                                    scope.values.insert(
+                                        bound,
+                                        Binding {
+                                            value: bound_value,
+                                            mutable: false,
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                scope.values.insert(
+                                    name.clone(),
+                                    Binding {
+                                        value,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     match self.execute_block(std::slice::from_ref(body.as_ref()), environment)? {
                         Flow::Continue(value) => last = value,
                         returned @ Flow::Return(_) => return Ok(returned),
@@ -3901,9 +3964,46 @@ impl Interpreter {
             } => {
                 stack.push(self.execute_bytecode_module(name, body, exports, item.span)?);
             }
-            Op::Iterate { name, body } => {
+            Op::DefinePattern { pattern } => {
+                let value = stack.last().cloned().unwrap();
+                let bindings = self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                    NivError::new(
+                        "this value did not match the binding pattern",
+                        item.span.line,
+                        item.span.column,
+                    )
+                })?;
+                let mut scope = self.environment.lock().unwrap();
+                for (name, bound) in bindings {
+                    if scope.values.contains_key(&name) {
+                        return Err(NivError::new(
+                            format!("'{name}' is already declared in this scope"),
+                            item.span.line,
+                            item.span.column,
+                        ));
+                    }
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value: bound,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
                 let iterable = stack.pop().unwrap();
-                match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
+                match self.execute_bytecode_iteration(
+                    name,
+                    pattern.as_ref(),
+                    iterable,
+                    body,
+                    item.span,
+                )? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
                     VmFlow::Stop | VmFlow::Skip => {
@@ -4137,6 +4237,7 @@ impl Interpreter {
     fn execute_bytecode_iteration(
         &mut self,
         name: &str,
+        pattern: Option<&Pattern>,
         iterable: Value,
         body: &Chunk,
         span: Span,
@@ -4163,13 +4264,38 @@ impl Interpreter {
             let previous = self.environment.clone();
             self.roots.push(previous.clone());
             let child = self.child_scope(previous.clone());
-            child.lock().unwrap().values.insert(
-                name.to_string(),
-                Binding {
-                    value,
-                    mutable: false,
-                },
-            );
+            {
+                let mut scope = child.lock().unwrap();
+                match pattern {
+                    Some(pattern) => {
+                        let bindings = self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                            NivError::new(
+                                "this element did not match the iteration pattern",
+                                span.line,
+                                span.column,
+                            )
+                        })?;
+                        for (bound, bound_value) in bindings {
+                            scope.values.insert(
+                                bound,
+                                Binding {
+                                    value: bound_value,
+                                    mutable: false,
+                                },
+                            );
+                        }
+                    }
+                    None => {
+                        scope.values.insert(
+                            name.to_string(),
+                            Binding {
+                                value,
+                                mutable: false,
+                            },
+                        );
+                    }
+                }
+            }
             self.environment = child;
             let result = self.execute_chunk(body);
             self.roots.pop();
@@ -4872,6 +4998,7 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::LoopExit { skip: true } => "skip",
         Op::IfCarries { .. } => "when_carries",
         Op::MakeText(_) => "text",
+        Op::DefinePattern { .. } => "define_pattern",
         Op::Using { .. } => "using",
     }
 }
@@ -12059,6 +12186,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
         | Stmt::IfCarries { span, .. }
+        | Stmt::LetPattern { span, .. }
         | Stmt::Stop(span)
         | Stmt::Skip(span)
         | Stmt::For { span, .. }

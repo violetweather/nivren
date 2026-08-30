@@ -6807,6 +6807,53 @@ choose Size.Small {
 }
 
 #[test]
+fn keep_destructures_shape_patterns_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+keep Point holds { x set x, y set y } set Point with { x set 3, y set 4 }
+x * 10 + y
+"#;
+    assert_eq!(eval_tree(source), Value::Int(34));
+    assert_eq!(eval_vm(source), Value::Int(34));
+}
+
+#[test]
+fn each_destructures_shape_patterns_in_both_engines() {
+    let source = r#"
+shape Row holds {
+    id is Int
+    label is String
+}
+change total set 0
+each Row holds { id set id } in [
+    Row with { id set 1, label set "one" },
+    Row with { id set 2, label set "two" }
+] {
+    change total to total + id
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(3));
+    assert_eq!(eval_vm(source), Value::Int(3));
+}
+
+#[test]
+fn binding_patterns_must_be_irrefutable() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+keep Point holds { x set 0 } set Point with { x set 1, y set 2 }
+"#;
+    let errors = nivren::check(source).unwrap_err();
+    assert!(errors[0].to_string().contains("never fails"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
