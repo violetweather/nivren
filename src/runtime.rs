@@ -2,7 +2,7 @@
 use rustls::pki_types::pem::PemObject;
 #[cfg(feature = "host-runtime")]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -950,6 +950,12 @@ pub struct Interpreter {
     /// Whether `sample` declarations execute; `niv test` turns this on and
     /// every other entry point leaves samples quiet.
     run_samples: bool,
+    /// When present, every authorized effect appends an
+    /// `org.nivren.effects.v1` record after it completes.
+    effect_recorder: Option<Arc<Mutex<Vec<EffectRecord>>>>,
+    /// When present, authorized effects are satisfied from the recorded
+    /// trace instead of touching the outside world.
+    effect_replay: Option<Arc<Mutex<VecDeque<EffectRecord>>>>,
     native_execution_depth: usize,
     native_compilations: usize,
     native_executions: usize,
@@ -1131,6 +1137,8 @@ impl Interpreter {
             protocol_dispatch: HashMap::new(),
             fast_frames: Vec::new(),
             run_samples: false,
+            effect_recorder: None,
+            effect_replay: None,
             native_execution_depth: 0,
             native_compilations: 0,
             native_executions: 0,
@@ -1190,6 +1198,27 @@ impl Interpreter {
     /// Executes `sample` declarations instead of leaving them quiet.
     pub fn enable_samples(&mut self) {
         self.run_samples = true;
+    }
+
+    /// Starts recording every authorized effect; the caller reads the shared
+    /// list after the run to write an `org.nivren.effects.v1` trace.
+    pub fn record_effects(&mut self) -> Arc<Mutex<Vec<EffectRecord>>> {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        self.effect_recorder = Some(recorder.clone());
+        recorder
+    }
+
+    /// Satisfies every authorized effect from the recorded trace, in order,
+    /// instead of touching the outside world.
+    pub fn replay_effects(&mut self, entries: Vec<EffectRecord>) {
+        self.effect_replay = Some(Arc::new(Mutex::new(entries.into())));
+    }
+
+    /// Trace entries a replay has not consumed yet.
+    pub fn replay_remaining(&self) -> usize {
+        self.effect_replay
+            .as_ref()
+            .map_or(0, |replay| replay.lock().unwrap().len())
     }
 
     pub fn run(&mut self, statements: &[Stmt]) -> Result<Value, NivError> {
@@ -2379,7 +2408,49 @@ impl Interpreter {
         match callee {
             Value::Native(function) => {
                 check_arity(function.name, function.arity, arguments.len(), span)?;
+                let effect_digest = function
+                    .capability
+                    .filter(|_| self.effect_recorder.is_some() || self.effect_replay.is_some())
+                    .map(|_| effect_arguments_digest(&arguments));
                 if let Some(capability) = function.capability {
+                    if let Some(replay) = &self.effect_replay {
+                        let entry = replay.lock().unwrap().pop_front();
+                        let Some(entry) = entry else {
+                            return Err(NivError::new(
+                                format!(
+                                    "replay diverged: the trace holds no entry for {capability}:{}",
+                                    function.name
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                        };
+                        let digest = effect_digest.clone().unwrap_or_default();
+                        if entry.operation != function.name
+                            || entry.capability != capability
+                            || entry.arguments != digest
+                        {
+                            return Err(NivError::new(
+                                format!(
+                                    "replay diverged: the trace expected {}:{} with argument digest {}, the program performed {capability}:{} with argument digest {digest}",
+                                    entry.capability,
+                                    entry.operation,
+                                    entry.arguments,
+                                    function.name
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        if let Some(metrics) = &self.metrics {
+                            metrics
+                                .lock()
+                                .unwrap()
+                                .effect_sequence
+                                .push(format!("{capability}:{}", function.name));
+                        }
+                        return effect_json_to_value(&entry.result, span);
+                    }
                     if self
                         .capabilities
                         .as_ref()
@@ -2402,7 +2473,7 @@ impl Interpreter {
                             .push(format!("{capability}:{}", function.name));
                     }
                 }
-                match function.name {
+                let result = match function.name {
                     "spawn" => self.task_spawn(arguments, span),
                     "await" => self.task_await(arguments, span),
                     "await_for" => self.task_await_for(arguments, span),
@@ -2439,7 +2510,29 @@ impl Interpreter {
                     "call_handle" => self.host_call_handle(arguments, span),
                     "close_handle" => self.host_close_handle(arguments, span),
                     _ => (function.call)(arguments, span),
+                };
+                if let (Some(capability), Some(digest)) = (function.capability, effect_digest)
+                    && let Some(recorder) = &self.effect_recorder
+                    && let Ok(value) = &result
+                {
+                    let json = effect_value_to_json(value).map_err(|reason| {
+                        NivError::new(
+                            format!(
+                                "niv record cannot capture the {capability}:{} result: {reason}",
+                                function.name
+                            ),
+                            span.line,
+                            span.column,
+                        )
+                    })?;
+                    recorder.lock().unwrap().push(EffectRecord {
+                        operation: function.name.to_string(),
+                        capability: capability.to_string(),
+                        arguments: digest,
+                        result: json,
+                    });
                 }
+                result
             }
             Value::Function(function) => self.call_function(&function, &arguments, span),
             Value::RecordType(record) => {
@@ -5112,6 +5205,144 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Sample { .. } => "sample",
         Op::Using { .. } => "using",
     }
+}
+
+/// One recorded authorized effect in an `org.nivren.effects.v1` trace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectRecord {
+    pub operation: String,
+    pub capability: String,
+    pub arguments: String,
+    pub result: serde_json::Value,
+}
+
+fn effect_arguments_digest(arguments: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    for argument in arguments {
+        hasher.update(argument.to_string().as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+/// Serializes an effect result for a trace. Live state — handles, tasks,
+/// channels, functions, secrets — has no trace form and fails recording.
+fn effect_value_to_json(value: &Value) -> Result<serde_json::Value, String> {
+    Ok(match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(inner) => serde_json::Value::Bool(*inner),
+        Value::Int(inner) => serde_json::Value::Number((*inner).into()),
+        Value::Float(inner) => serde_json::Number::from_f64(*inner)
+            .map(serde_json::Value::Number)
+            .ok_or("a non-finite float has no trace form")?,
+        Value::String(inner) => serde_json::Value::String(inner.clone()),
+        Value::Bytes(bytes) => {
+            let mut hex = String::with_capacity(bytes.len() * 2);
+            for byte in bytes.iter() {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            serde_json::json!({ "$bytes": hex })
+        }
+        Value::DateTime(zoned) => serde_json::json!({ "$datetime": zoned.to_string() }),
+        Value::Ok(inner) => serde_json::json!({ "$ok": effect_value_to_json(inner)? }),
+        Value::Err(inner) => serde_json::json!({ "$err": effect_value_to_json(inner)? }),
+        Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(effect_value_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Value::Map(entries) => {
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (key, entry) in entries.iter() {
+                pairs.push(serde_json::Value::Array(vec![
+                    effect_value_to_json(key)?,
+                    effect_value_to_json(entry)?,
+                ]));
+            }
+            serde_json::json!({ "$map": pairs })
+        }
+        other => {
+            return Err(format!(
+                "{} values hold live state a trace cannot carry",
+                other.type_name()
+            ));
+        }
+    })
+}
+
+fn effect_json_to_value(value: &serde_json::Value, span: Span) -> Result<Value, NivError> {
+    let invalid = |reason: &str| {
+        NivError::new(
+            format!("invalid trace entry: {reason}"),
+            span.line,
+            span.column,
+        )
+    };
+    Ok(match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(inner) => Value::Bool(*inner),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Value::Int(integer)
+            } else if let Some(float) = number.as_f64() {
+                Value::Float(float)
+            } else {
+                return Err(invalid("number outside the supported range"));
+            }
+        }
+        serde_json::Value::String(inner) => Value::String(inner.clone()),
+        serde_json::Value::Array(values) => Value::Array(Arc::new(
+            values
+                .iter()
+                .map(|entry| effect_json_to_value(entry, span))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        serde_json::Value::Object(object) => {
+            if let Some(inner) = object.get("$ok") {
+                Value::Ok(Arc::new(effect_json_to_value(inner, span)?))
+            } else if let Some(inner) = object.get("$err") {
+                Value::Err(Arc::new(effect_json_to_value(inner, span)?))
+            } else if let Some(serde_json::Value::String(hex)) = object.get("$bytes") {
+                if hex.len() % 2 != 0 {
+                    return Err(invalid("odd byte text"));
+                }
+                let mut bytes = Vec::with_capacity(hex.len() / 2);
+                for index in (0..hex.len()).step_by(2) {
+                    let byte = u8::from_str_radix(&hex[index..index + 2], 16)
+                        .map_err(|_| invalid("non-hex byte text"))?;
+                    bytes.push(byte);
+                }
+                Value::Bytes(Arc::new(bytes))
+            } else if let Some(serde_json::Value::String(text)) = object.get("$datetime") {
+                let zoned: jiff::Zoned =
+                    text.parse().map_err(|_| invalid("unparseable date/time"))?;
+                Value::DateTime(Arc::new(zoned))
+            } else if let Some(serde_json::Value::Array(pairs)) = object.get("$map") {
+                let mut entries = Vec::with_capacity(pairs.len());
+                for pair in pairs {
+                    let serde_json::Value::Array(pair) = pair else {
+                        return Err(invalid("map entry is not a pair"));
+                    };
+                    if pair.len() != 2 {
+                        return Err(invalid("map entry is not a pair"));
+                    }
+                    entries.push((
+                        effect_json_to_value(&pair[0], span)?,
+                        effect_json_to_value(&pair[1], span)?,
+                    ));
+                }
+                Value::Map(Arc::new(entries))
+            } else {
+                return Err(invalid("unknown object marker"));
+            }
+        }
+    })
 }
 
 const MAX_TEXT_LITERAL_BYTES: usize = 16 * 1024 * 1024;

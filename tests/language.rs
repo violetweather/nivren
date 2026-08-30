@@ -7088,6 +7088,41 @@ perform fetch with { path set "notes.txt" }
 }
 
 #[test]
+fn effects_record_and_replay_byte_identically() {
+    let source = r#"
+keep moment set std.time.now_zoned("UTC")
+choose moment {
+    case Ok carries value => std.time.format(value)
+    case Err carries message => message
+}
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut recording = nivren::runtime::Interpreter::new();
+    let recorder = recording.record_effects();
+    let first = recording.run_bytecode(&chunk).unwrap();
+    let entries = recorder.lock().unwrap().clone();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].capability, "Time");
+    let mut replaying = nivren::runtime::Interpreter::new();
+    replaying.replay_effects(entries.clone());
+    assert_eq!(replaying.run_bytecode(&chunk).unwrap(), first);
+    assert_eq!(replaying.replay_remaining(), 0);
+    let mut replaying_tree = nivren::runtime::Interpreter::new();
+    replaying_tree.replay_effects(entries.clone());
+    assert_eq!(replaying_tree.run(&program).unwrap(), first);
+    let divergent = r#"std.env.get("NIVREN_REPLAY_TEST")"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(divergent).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut replaying = nivren::runtime::Interpreter::new();
+    replaying.replay_effects(entries);
+    let error = replaying.run_bytecode(&chunk).unwrap_err();
+    assert!(error.to_string().contains("replay diverged"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
