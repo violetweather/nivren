@@ -897,9 +897,12 @@ impl Parser {
     fn if_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let condition = self.control_condition("when")?;
-        let carries = self.matches(&[TokenKind::Carries]);
-        let binding = if carries {
-            Some(self.consume_identifier("expected a binding name after 'carries'")?)
+        let patterns = if self.matches(&[TokenKind::Carries]) {
+            let mut patterns = vec![self.arm_pattern()?];
+            while self.matches(&[TokenKind::Or]) {
+                patterns.push(self.arm_pattern()?);
+            }
+            Some(patterns)
         } else {
             None
         };
@@ -909,10 +912,10 @@ impl Parser {
         } else {
             None
         };
-        Ok(match binding {
-            Some(binding) => Stmt::IfCarries {
+        Ok(match patterns {
+            Some(patterns) => Stmt::IfCarries {
                 subject: condition,
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
                 span,

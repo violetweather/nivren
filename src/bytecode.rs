@@ -98,11 +98,12 @@ pub enum Op {
     LoopExit {
         skip: bool,
     },
-    /// `when subject carries binding`: consumes the subject; a present value
-    /// binds and runs the then chunk, `none` runs the else chunk. Both
-    /// chunks are transparent to loop-exit signals.
+    /// `when subject carries pattern`: consumes the subject; a matching
+    /// non-`none` value binds its pattern names and runs the then chunk,
+    /// anything else runs the else chunk. Both chunks are transparent to
+    /// loop-exit signals.
     IfCarries {
-        binding: String,
+        patterns: Vec<Pattern>,
         then_branch: Chunk,
         else_branch: Option<Chunk>,
     },
@@ -284,7 +285,7 @@ impl Compiler {
             }
             Stmt::IfCarries {
                 subject,
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
                 span,
@@ -292,7 +293,7 @@ impl Compiler {
                 self.expression(subject);
                 self.emit(
                     Op::IfCarries {
-                        binding: binding.clone(),
+                        patterns: patterns.clone(),
                         then_branch: compile_statement(then_branch),
                         else_branch: else_branch.as_ref().map(|branch| compile_statement(branch)),
                     },
@@ -1001,11 +1002,16 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
                 output.push_str(&format!("{}END_REPEAT\n", "  ".repeat(indent)));
             }
             Op::IfCarries {
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
             } => {
-                output.push_str(&format!("{prefix}WHEN_CARRIES {binding}\n"));
+                let rendered = patterns
+                    .iter()
+                    .map(pattern_text)
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                output.push_str(&format!("{prefix}WHEN_CARRIES {rendered}\n"));
                 disassemble_chunk(then_branch, indent + 1, output);
                 if let Some(branch) = else_branch {
                     output.push_str(&format!("{}OTHERWISE\n", "  ".repeat(indent)));

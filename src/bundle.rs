@@ -211,12 +211,15 @@ impl Writer {
                 self.u8(u8::from(*skip));
             }
             Op::IfCarries {
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
             } => {
                 self.u8(33);
-                self.string(binding)?;
+                self.len(patterns.len())?;
+                for pattern in patterns {
+                    self.pattern(pattern)?;
+                }
                 self.chunk(then_branch)?;
                 match else_branch {
                     Some(branch) => {
@@ -491,7 +494,17 @@ impl Reader<'_> {
                 skip: self.u8()? != 0,
             },
             33 => Op::IfCarries {
-                binding: self.string()?,
+                patterns: {
+                    let count = self.count()?;
+                    if count == 0 {
+                        return Err(bundle_error("'when … carries' needs at least one pattern"));
+                    }
+                    let mut patterns = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        patterns.push(self.pattern(depth + 1)?);
+                    }
+                    patterns
+                },
                 then_branch: self.chunk(depth + 1)?,
                 else_branch: if self.u8()? != 0 {
                     Some(self.chunk(depth + 1)?)

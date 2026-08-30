@@ -245,11 +245,12 @@ pub enum Stmt {
         else_branch: Option<Box<Stmt>>,
         span: Span,
     },
-    /// `when subject carries name { … } otherwise { … }`: tests a `maybe`
-    /// value once, binding the present value immutably in the matched branch.
+    /// `when subject carries pattern { … } otherwise { … }`: tests one
+    /// pattern against a `maybe` value's present payload or a choice value,
+    /// binding pattern names immutably in the matched branch only.
     IfCarries {
         subject: Expr,
-        binding: String,
+        patterns: Vec<Pattern>,
         then_branch: Box<Stmt>,
         else_branch: Option<Box<Stmt>>,
         span: Span,

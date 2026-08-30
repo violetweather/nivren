@@ -1807,18 +1807,20 @@ impl Checker {
             }
             Stmt::IfCarries {
                 subject,
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
                 span,
             } => {
-                let inner = match self.expression(subject) {
-                    Type::Nullable(inner) => *inner,
+                let subject_type = self.expression(subject);
+                let target = match &subject_type {
+                    Type::Nullable(inner) => inner.as_ref().clone(),
+                    Type::Enum(_, _) | Type::Result(_, _) => subject_type.clone(),
                     Type::Unknown => Type::Unknown,
                     other => {
                         self.errors.push(NivError::new(
                             format!(
-                                "'when … carries' attempted to unwrap a maybe value, found {}; test a Bool with plain 'when' or handle a choice with 'choose'",
+                                "'when … carries' tests a maybe value or a choice case, found {}; test a Bool with plain 'when'",
                                 other.name()
                             ),
                             span.line,
@@ -1827,15 +1829,33 @@ impl Checker {
                         Type::Unknown
                     }
                 };
+                let mut alternatives = vec![];
+                for pattern in patterns {
+                    let mut bindings = BTreeMap::new();
+                    self.check_pattern(pattern, &target, &mut bindings);
+                    alternatives.push(bindings);
+                }
+                let bindings = alternatives.first().cloned().unwrap_or_default();
+                for alternative in alternatives.iter().skip(1) {
+                    if alternative != &bindings {
+                        self.errors.push(NivError::new(
+                            "every 'or' alternative binds the same names at the same types",
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                }
                 self.in_scope(|checker| {
-                    checker.declare(
-                        binding,
-                        Binding {
-                            ty: inner,
-                            mutable: false,
-                        },
-                        *span,
-                    );
+                    for (name, ty) in &bindings {
+                        checker.declare(
+                            name,
+                            Binding {
+                                ty: ty.clone(),
+                                mutable: false,
+                            },
+                            *span,
+                        );
+                    }
                     checker.statement(then_branch);
                 });
                 if let Some(branch) = else_branch {

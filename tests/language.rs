@@ -6854,6 +6854,33 @@ keep Point holds { x set 0 } set Point with { x set 1, y set 2 }
 }
 
 #[test]
+fn when_carries_tests_choice_cases_with_patterns_in_both_engines() {
+    let source = r#"
+choice Signal holds {
+    case Quit
+    case Retry carries Int
+    case Note carries String
+}
+define describe takes { value is Signal } gives String {
+    when value carries Retry carries delay {
+        give text "retry {delay}"
+    }
+    when value carries Quit or Note carries any {
+        give "handled"
+    }
+    give "other"
+}
+keep first set describe with { value set Signal.Retry(3) }
+keep second set describe with { value set Signal.Quit }
+keep third set describe with { value set Signal.Note("hi") }
+text "{first} {second} {third}"
+"#;
+    let expected = Value::String("retry 3 handled handled".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

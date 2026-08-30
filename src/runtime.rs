@@ -1482,7 +1482,7 @@ impl Interpreter {
             }
             Stmt::IfCarries {
                 subject,
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
                 ..
@@ -1491,22 +1491,37 @@ impl Interpreter {
                 if let Value::EarlyReturn(value) = value {
                     return Ok(Flow::Return(value.as_ref().clone()));
                 }
-                if matches!(value, Value::Null) {
-                    if let Some(branch) = else_branch {
-                        self.execute(branch)
-                    } else {
-                        Ok(Flow::Continue(Value::Null))
-                    }
+                let matched = if matches!(value, Value::Null) {
+                    None
                 } else {
-                    let environment = self.child_scope(self.environment.clone());
-                    environment.lock().unwrap().values.insert(
-                        binding.clone(),
-                        Binding {
-                            value,
-                            mutable: false,
-                        },
-                    );
-                    self.execute_block(std::slice::from_ref(then_branch.as_ref()), environment)
+                    patterns
+                        .iter()
+                        .find_map(|pattern| self.pattern_bindings(pattern, &value))
+                };
+                match matched {
+                    Some(bindings) => {
+                        let environment = self.child_scope(self.environment.clone());
+                        {
+                            let mut scope = environment.lock().unwrap();
+                            for (name, bound) in bindings {
+                                scope.values.insert(
+                                    name,
+                                    Binding {
+                                        value: bound,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                        self.execute_block(std::slice::from_ref(then_branch.as_ref()), environment)
+                    }
+                    None => {
+                        if let Some(branch) = else_branch {
+                            self.execute(branch)
+                        } else {
+                            Ok(Flow::Continue(Value::Null))
+                        }
+                    }
                 }
             }
             Stmt::While {
@@ -4028,32 +4043,45 @@ impl Interpreter {
                 });
             }
             Op::IfCarries {
-                binding,
+                patterns,
                 then_branch,
                 else_branch,
             } => {
                 let subject = stack.pop().unwrap();
-                let flow = if matches!(subject, Value::Null) {
-                    match else_branch {
+                let matched = if matches!(subject, Value::Null) {
+                    None
+                } else {
+                    patterns
+                        .iter()
+                        .find_map(|pattern| self.pattern_bindings(pattern, &subject))
+                };
+                let flow = match matched {
+                    None => match else_branch {
                         Some(branch) => self.execute_chunk(branch)?,
                         None => VmFlow::Continue(Value::Null),
+                    },
+                    Some(bindings) => {
+                        let previous = self.environment.clone();
+                        self.roots.push(previous.clone());
+                        let child = self.child_scope(previous.clone());
+                        {
+                            let mut scope = child.lock().unwrap();
+                            for (name, bound) in bindings {
+                                scope.values.insert(
+                                    name,
+                                    Binding {
+                                        value: bound,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                        self.environment = child;
+                        let result = self.execute_chunk(then_branch);
+                        self.roots.pop();
+                        self.environment = previous;
+                        result?
                     }
-                } else {
-                    let previous = self.environment.clone();
-                    self.roots.push(previous.clone());
-                    let child = self.child_scope(previous.clone());
-                    child.lock().unwrap().values.insert(
-                        binding.clone(),
-                        Binding {
-                            value: subject,
-                            mutable: false,
-                        },
-                    );
-                    self.environment = child;
-                    let result = self.execute_chunk(then_branch);
-                    self.roots.pop();
-                    self.environment = previous;
-                    result?
                 };
                 match flow {
                     VmFlow::Continue(value) => stack.push(value),
