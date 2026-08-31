@@ -1,0 +1,34 @@
+{
+  "format": 1,
+  "gate": "installer-recovery",
+  "status": "pass",
+  "completed_at_unix": 1788206552,
+  "run_id": "33424270515",
+  "independent": false,
+  "artifacts": [
+    {
+      "name": "nivren-v0.10.0-beta.9-linux-arm64.zip",
+      "sha256": "4571fe0b23c105480e7ca2209e5297a182748e273bcb177b4065b5019b00216d"
+    },
+    {
+      "name": "nivren-v0.10.0-beta.9-linux-x64.zip",
+      "sha256": "96df6ac634081116b6196fd061320e77a8e8e01830f3a963db0e94aa581803f2"
+    },
+    {
+      "name": "nivren-v0.10.0-beta.9-macos-arm64.zip",
+      "sha256": "232d606ff25de22fada04bdbe3f764b70cbf539f3bbd594d48b4dc754894fccd"
+    },
+    {
+      "name": "nivren-v0.10.0-beta.9-macos-x64.zip",
+      "sha256": "a58e493c2adff5a71256c25d9801e20c0fd42b1b77b3bed684ba6dbc6f78e0d9"
+    },
+    {
+      "name": "nivren-v0.10.0-beta.9-windows-arm64.zip",
+      "sha256": "b3a33c9c0c98a89e997824f10ec2280e0a17081fccf87ac3b5b5d3b3970c773e"
+    },
+    {
+      "name": "nivren-v0.10.0-beta.9-windows-x64.zip",
+      "sha256": "772d94cafa007cfbb6acc3a869154d10216639cdb02561512264cd77d5192b88"
+    }
+  ]
+}

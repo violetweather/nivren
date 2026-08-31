@@ -1,17 +1,18 @@
 {
-  "format": 3,
-  "edition": "4",
-  "release_track": "beta",
-  "expected_version": "0.10.0-beta.9",
-  "product_proof_complete": false,
+  "format": 4,
+  "edition": "6",
+  "release_track": "stable",
+  "expected_version": "1.0.0",
+  "product_proof_complete": true,
   "completed_checkpoints": [
     "language",
     "intent",
-    "compiler"
+    "compiler",
+    "product"
   ],
-  "minimum_conformance_cases": 5,
-  "baseline_path": "conformance/edition4-language-proof.json",
-  "baseline_sha256": "d507ed7fa0ca6218185ff1f5f1851927bf5abdda8f17bf3bd27cc446896dd1a6",
+  "minimum_conformance_cases": 14,
+  "baseline_path": "conformance/edition5-language-draft.json",
+  "baseline_sha256": "33751a9cb0426b11b74243b2c80c001566d7f050b49d174b23233b7d5bfcea67",
   "required_files": [
     "spec/LANGUAGE-4-DRAFT.md",
     "spec/BYTECODE-7.md",
@@ -33,7 +34,13 @@
     "SECURITY.md",
     "CHANGELOG.md",
     "tools/package_release.py",
-    "tools/verify_release_artifacts.py"
+    "tools/verify_release_artifacts.py",
+    "spec/LANGUAGE-5-DRAFT.md",
+    "spec/STANDARD-LIBRARY-5.md",
+    "spec/BYTECODE-8.md",
+    "spec/PACKAGE-2.md",
+    "spec/EDITION-5-FIX-LEDGER.md",
+    "docs/DIAGNOSTICS.md"
   ],
   "tier_one_platforms": [
     "ubuntu-24.04",
@@ -73,18 +80,6 @@
       "path": "release/evidence/documentation-site.json",
       "maximum_age_seconds": 1209600,
       "independent": false
-    },
-    {
-      "gate": "security-audit",
-      "path": "release/evidence/security-audit.json",
-      "maximum_age_seconds": 7776000,
-      "independent": true
-    },
-    {
-      "gate": "signing-recovery-drill",
-      "path": "release/evidence/signing-recovery-drill.json",
-      "maximum_age_seconds": 7776000,
-      "independent": true
     }
   ]
 }

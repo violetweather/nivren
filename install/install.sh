@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="0.10.0-beta.7"
+VERSION="1.0.0"
 INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/nivren"
 BIN_DIR="$HOME/.local/bin"
 ADD_PATH=ask
@@ -17,7 +17,7 @@ usage() {
 Nivren installer
 
 Usage: install.sh [options]
-  --version VERSION       Install a specific release (default: 0.10.0-beta.7)
+  --version VERSION       Install a specific release (default: 1.0.0)
   --channel CHANNEL       Update from stable, beta, or nightly using a signed manifest
   --channel-key PATH      Trust this separately obtained Ed25519 channel public key
   --uninstall             Remove a Nivren installation owned by this installer

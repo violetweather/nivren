@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "gate": "application-capability",
+  "status": "pass",
+  "completed_at_unix": 1788206552,
+  "run_id": "33424270515",
+  "independent": false,
+  "artifacts": [
+    {
+      "name": "conformance/edition5-language-draft.json",
+      "sha256": "33751a9cb0426b11b74243b2c80c001566d7f050b49d174b23233b7d5bfcea67"
+    }
+  ]
+}

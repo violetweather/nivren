@@ -224,7 +224,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
-      - name: Enforce Edition 4 Product Proof for stable releases
+      - name: Enforce the stable release policy
         if: ${{ !contains(github.ref_name, '-') }}
         run: cargo run --locked -- release check .
       - name: Verify beta release disclosure
