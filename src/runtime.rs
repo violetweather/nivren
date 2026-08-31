@@ -6650,6 +6650,7 @@ fn standard_library() -> Value {
             native_module(&[
                 ("shape", 3, native_source_shape, None),
                 ("choice", 2, native_source_choice, None),
+                ("binding", 2, native_source_binding, None),
             ]),
         ),
     ]);
@@ -11042,6 +11043,35 @@ fn native_source_choice(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
             name: name.to_string(),
             type_params: vec![],
             variants,
+            span,
+        },
+    )))))
+}
+
+fn native_source_binding(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.binding", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let literal = match &arguments[1] {
+        Value::Int(value) => Literal::Int(*value),
+        Value::Float(value) => Literal::Float(*value),
+        Value::String(value) => Literal::String(value.clone()),
+        Value::Bool(value) => Literal::Bool(*value),
+        Value::Null => Literal::Null,
+        other => {
+            return Ok(result_error(format!(
+                "a generated binding holds literal data; found {}",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Let {
+            name: name.to_string(),
+            mutable: false,
+            annotation: None,
+            initializer: Expr::Literal(literal, span),
             span,
         },
     )))))

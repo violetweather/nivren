@@ -1748,6 +1748,13 @@ impl Checker {
                                     Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
                                 ),
                             ),
+                            (
+                                "binding",
+                                function(
+                                    vec![Type::String, Type::Unknown],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (

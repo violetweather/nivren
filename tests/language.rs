@@ -7521,6 +7521,22 @@ fn published_diagnostics_carry_stable_catalog_codes() {
 }
 
 #[test]
+fn generated_bindings_declare_literal_constants() {
+    let source = r#"
+generate constants {
+    keep limit set choose std.source.binding("answer", 42) {
+        case Ok carries declaration => declaration
+        otherwise as problem => problem
+    }
+    give [limit]
+}
+expand constants
+answer
+"#;
+    assert_eq!(nivren::run(source).unwrap(), Value::Int(42));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
