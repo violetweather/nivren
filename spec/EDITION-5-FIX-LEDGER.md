@@ -46,7 +46,7 @@ Decision values: **Applied** (implemented on this branch), **Accepted** (decided
 | --- | --- | --- | --- | --- |
 | 17 | `use "pkg/main.niv"` names every package module `main`; two packages collide | `proofs/edition4/database_driver.niv:1` | `use "…" as name`; `as` required when stems collide or are unhelpful | Applied — `use "…" as name` sets the module namespace; the dependency name is the default for package uses |
 | 18 | Package names allow `-` but namespaces must be identifiers, so `my-lib` is unimportable | `spec/PACKAGE-1.md:5` | Forbid `-` in package names or mandate `as` | Applied — package uses import under the manifest identifier, so `-` names need `as`; the parser enforces identifier namespaces |
-| 19 | `expose { a, b }` lives away from the declarations it affects | `examples/project/src/greetings.niv:12` | `expose` becomes a declaration modifier | Amended — block `expose { … }` is retained: generated declarations (`generate`) need an exposure site that does not live on a declaration the author wrote, so the modifier-only form cannot cover the language |
+| 19 | `expose { a, b }` lives away from the declarations it affects | `examples/project/src/greetings.niv:12` | `expose` becomes a declaration modifier | Amended — the `expose` declaration modifier is applied (freeze pass batch 7), and block `expose { … }` is retained beside it: generated declarations (`generate`) need an exposure site that does not live on a declaration the author wrote, so the modifier-only form cannot cover the language |
 
 ## F. Literals and lexis
 
