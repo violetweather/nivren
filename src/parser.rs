@@ -139,19 +139,12 @@ impl Parser {
                 span,
             });
         }
-        let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
-        let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+        let annotation = if self.matches(&[TokenKind::Is]) {
             Some(self.type_ref()?)
         } else {
             None
         };
-        if edition_four {
-            if !self.matches(&[TokenKind::Set]) {
-                self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
-            }
-        } else {
-            self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
-        }
+        self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
         let initializer = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Let {
@@ -171,22 +164,15 @@ impl Parser {
             self.optional_semicolon();
             return Ok(Stmt::Expression(Expr::Assign(name, Box::new(value), span)));
         }
-        let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
-        let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+        let annotation = if self.matches(&[TokenKind::Is]) {
             Some(self.type_ref()?)
         } else {
             None
         };
-        if edition_four {
-            if !self.matches(&[TokenKind::Set]) {
-                self.consume(
-                    &TokenKind::Set,
-                    "a mutable binding uses 'set' for its initial value",
-                )?;
-            }
-        } else {
-            self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
-        }
+        self.consume(
+            &TokenKind::Set,
+            "a mutable binding uses 'set' for its initial value",
+        )?;
         let initializer = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Let {
@@ -341,7 +327,7 @@ impl Parser {
                 column: self.peek().column,
             };
             let field_name = self.consume_identifier("expected field name")?;
-            if !self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+            if !self.matches(&[TokenKind::Is]) {
                 return Err(self.error_here("a shape field states its type with 'is'"));
             }
             let ty = self.type_ref()?;
@@ -1616,7 +1602,10 @@ impl Parser {
                 self.matches(&[TokenKind::Comma]);
                 continue;
             }
-            let edition_four = self.matches(&[TokenKind::Case]);
+            self.consume(
+                &TokenKind::Case,
+                "a choose arm opens with 'case' or 'otherwise'",
+            )?;
             let mut patterns = vec![self.arm_pattern()?];
             while self.matches(&[TokenKind::Or]) {
                 patterns.push(self.arm_pattern()?);
@@ -1634,12 +1623,7 @@ impl Parser {
                 value,
                 span: arm_span,
             });
-            if !edition_four
-                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
-                && !self.check(&TokenKind::RightBrace)
-            {
-                return Err(self.error_here("expected ',' or '}' after choose arm"));
-            }
+            self.matches(&[TokenKind::Comma]);
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after choose")?;
         Ok(Expr::Match(Box::new(subject), arms, span))
@@ -1700,16 +1684,6 @@ impl Parser {
                 }
                 if self.matches(&[TokenKind::Holds]) {
                     return Ok(Pattern::Shape(name, self.shape_pattern_fields()?, span));
-                }
-                if self.matches(&[TokenKind::LeftParen]) {
-                    let binding = self.consume_identifier("expected payload binding")?;
-                    let binding_span = self.previous_span();
-                    self.consume(&TokenKind::RightParen, "expected ')' after payload binding")?;
-                    return Ok(Pattern::Carries(
-                        name,
-                        Box::new(Pattern::Binding(binding, binding_span)),
-                        span,
-                    ));
                 }
                 Ok(Pattern::Name(name, span))
             }

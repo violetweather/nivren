@@ -44,7 +44,7 @@ protocol Named {
     define name takes { value is Self } gives String
 }
 
-shape Person { name: String }
+shape Person { name is String }
 define person_name takes { value is Person } gives String {
     give value.name
 }
@@ -58,9 +58,9 @@ define outer takes { value is Int } {
     give multiply
 }
 
-keep values = [1, 2, 3]
-keep times_twenty = outer(20)
-keep label = present(Person("Nivren"))
+keep values set [1, 2, 3]
+keep times_twenty set outer(20)
+keep label set present(Person("Nivren"))
 times_twenty(values[1])
 "#;
     assert_eq!(assert_vm_native_equivalent(source), Value::Int(40));
@@ -131,7 +131,7 @@ fn native_using_cleanup_closes_owned_foreign_handles_once() {
     let chunk = compile(
         r#"
 define query takes { } gives Result<String, String> needs Native {
-    keep opened = std.host.open("database", "configuration") or give
+    keep opened set std.host.open("database", "configuration") or give
     using handle set opened {
         give std.host.call(handle, "query", "select 42")
     }

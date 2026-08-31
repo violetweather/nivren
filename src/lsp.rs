@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn rename_ignores_strings_comments_and_tracks_utf16() {
-        let source = "keep café = 1 // café\nshow(\"café\")\nshow(café)";
+        let source = "keep café set 1 // café\nshow(\"café\")\nshow(café)";
         let ranges = super::identifier_occurrences(source, "café");
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[1]["start"]["line"], 2);
@@ -760,8 +760,8 @@ mod tests {
         let messages = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/greetings.niv","text":"define message takes { name is String } gives String { give name }\nexpose { message }"}}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/main.niv","text":"use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))\nkeep message = \"local\""}}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/other.niv","text":"keep message = \"unrelated\""}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/main.niv","text":"use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))\nkeep message set \"local\""}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/other.niv","text":"keep message set \"unrelated\""}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///project/main.niv"},"position":{"line":1,"character":18},"newName":"welcome"}}),
             json!({"jsonrpc":"2.0","method":"exit","params":null}),
         ];

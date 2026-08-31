@@ -12,8 +12,8 @@ niv bindgen c messages.niv generated/messages.h
 
 ```nivren
 choice Role { Admin, Member }
-shape Address { city: String, postal: U32 }
-shape User { name: String, role: Role, address: Address?, tags: [String] }
+shape Address { city is String, postal is U32 }
+shape User { name is String, role is Role, address is Address?, tags is [String] }
 ```
 
 The header uses fixed-width C integers, `(pointer, length)` borrowed views for strings and bytes, typed enums for choices, forward-declared immutable pointers for nested shapes, explicit `has_value` fields for nullable values, and `(pointer, length)` array views. `BigInt`, `Decimal`, and `DateTime` remain lossless string views. Shapes that cannot have a direct C layout use an explicit JSON view rather than an implicit or platform-dependent representation.

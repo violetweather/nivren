@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use nivren::runtime::{Interpreter, Value};
 
 fn main() {
-    let source = "define kernel takes { a is Int, b is Int } gives Int { give (a + b) * 2; } change index = 0; change result = 0; repeat (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
+    let source = "define kernel takes { a is Int, b is Int } gives Int { give (a + b) * 2; } change index set 0; change result set 0; repeat (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
     let tokens = nivren::lexer::scan(source).unwrap();
     let program = nivren::parser::parse(tokens).unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -82,7 +82,7 @@ fn main() {
     );
     println!("nivren_benchmark_recursive_speedup {recursive_speedup:.3}");
 
-    let record_source = "shape Sample { alpha: Int, beta: Int, gamma: Int, delta: Int, epsilon: Int, zeta: Int, eta: Int, theta: Int } define checksum takes { sample is Sample } gives Int { give sample.theta + sample.alpha; } change index = 0; change result = 0; repeat (index < 100000) { result = checksum(Sample(index, 2, 3, 4, 5, 6, 7, 8)); index = index + 1; } result";
+    let record_source = "shape Sample { alpha is Int, beta is Int, gamma is Int, delta is Int, epsilon is Int, zeta is Int, eta is Int, theta is Int } define checksum takes { sample is Sample } gives Int { give sample.theta + sample.alpha; } change index set 0; change result set 0; repeat (index < 100000) { result = checksum(Sample(index, 2, 3, 4, 5, 6, 7, 8)); index = index + 1; } result";
     let record_tokens = nivren::lexer::scan(record_source).unwrap();
     let record_program = nivren::parser::parse(record_tokens).unwrap();
     nivren::typecheck::check(&record_program).unwrap();

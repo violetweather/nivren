@@ -1,6 +1,6 @@
 define sum takes { values is [Int] } gives Int {
-    change total: Int = 0
-    change index: Int = 0
+    change total is Int set 0
+    change index is Int set 0
     repeat index < len(values) {
         total = total + values[index]
         index = index + 1
@@ -12,21 +12,21 @@ assert(sum([1, 2, 3, 4]) == 10, "sum should add every array element")
 assert("Nivren"[0] == "N", "string indexing should use Unicode characters")
 assert(len(append([1, 2], 3)) == 3, "append should return a longer immutable array")
 
-shape Point { x: Int, y: Int }
-keep origin: Point = Point(0, 0)
+shape Point { x is Int, y is Int }
+keep origin is Point set Point(0, 0)
 assert(origin.x == 0 and origin.y == 0, "shape fields should retain constructor values")
 
 choice Direction { North, South, East, West }
-keep direction: Direction = Direction.East
-keep directionName: String = choose direction {
-    North => "north",
-    South => "south",
-    East => "east",
-    West => "west"
+keep direction is Direction set Direction.East
+keep directionName is String set choose direction {
+    case North => "north",
+    case South => "south",
+    case East => "east",
+    case West => "west"
 }
 assert(directionName == "east", "exhaustive choose should select the active choice variant")
 
-change iteratedTotal: Int = 0
+change iteratedTotal is Int set 0
 each value within [2, 4, 6] {
     iteratedTotal = iteratedTotal + value
 }
@@ -37,9 +37,9 @@ define checkedValue takes { valid is Bool } gives Result<Int, String> {
     when valid { give ok(42) }
     give err("invalid")
 }
-keep checked: Result<Int, String> = checkedValue(yes)
-keep checkedNumber: Int = choose checked {
-    Ok(value) => value,
-    Err(message) => 0
+keep checked is Result<Int, String> set checkedValue(yes)
+keep checkedNumber is Int set choose checked {
+    case Ok carries value => value,
+    case Err carries message => 0
 }
 assert(checkedNumber == 42, "Result choosing should bind the successful payload")

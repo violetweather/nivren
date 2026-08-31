@@ -216,8 +216,8 @@ mod tests {
     fn c_bindings_are_deterministic_and_typed() {
         let source = r#"
 choice Role { Admin, Member }
-shape Address { city: String, postal: U32 }
-shape User { name: String, role: Role, address: Address?, tags: [String] }
+shape Address { city is String, postal is U32 }
+shape User { name is String, role is Role, address is Address?, tags is [String] }
 "#;
         let program = crate::parser::parse(crate::lexer::scan(source).unwrap()).unwrap();
         crate::typecheck::check(&program).unwrap();
