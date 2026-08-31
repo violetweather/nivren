@@ -1,7 +1,7 @@
 use "../src/main.niv"
 
 define verify
-gives Bool or String
+gives Bool or Problem
 {
 
 keep plan set main.AddPlan with {
@@ -25,7 +25,7 @@ keep mismatched set main.AddPlan with {
         workgroup_size set 4
     }
 }
-assert(main.validate_plan with { plan set mismatched } == err("GPU vector inputs must have equal lengths"), "reject mismatched vectors")
+assert(main.validate_plan with { plan set mismatched } == err(std.problems.create("gpu", "GPU vector inputs must have equal lengths")), "reject mismatched vectors")
 give ok(yes)
 }
 

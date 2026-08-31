@@ -3,7 +3,7 @@ takes {
     header is String
     payload is String
 }
-gives String or String
+gives String or Problem
 {
     keep prefix set std.text.concat with { left set header right set "." } or give
     give std.text.concat with { left set prefix right set payload }
@@ -14,7 +14,7 @@ takes {
     payload_json is String
     secret is Bytes
 }
-gives String or String
+gives String or Problem
 {
     keep payload set std.json.compact with { source set payload_json } or give
     keep header set std.encoding.base64url_encode with {
@@ -44,6 +44,6 @@ keep secret set std.bytes.from_string with {
 keep result set issue with { payload_json set "{\"sub\":\"user-42\"}" secret set secret }
 keep message set choose result {
     case Ok carries token => token
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }
 show(message)

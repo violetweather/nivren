@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define works
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep verifier set "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
     keep challenge set main.pkce_challenge with { verifier set verifier } or give

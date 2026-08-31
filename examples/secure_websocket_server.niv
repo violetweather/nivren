@@ -3,7 +3,7 @@ takes {
     certificate_pem is String
     private_key_pem is String
 }
-gives String or String
+gives String or Problem
 needs Network
 {
     keep policy set std.web.tls_options with {}
@@ -39,7 +39,7 @@ takes {
     private_key_pem is String
     client_ca_pem is String
 }
-gives String or String
+gives String or Problem
 needs Network
 {
     keep auth set std.map.set with {

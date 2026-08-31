@@ -1,5 +1,5 @@
 define protocol_id
-gives Int or String
+gives Int or Problem
 {
     keep magic set std.u16.from_int with { value set 20054 } or give
     keep version set std.u16.from_int with { value set 3 } or give

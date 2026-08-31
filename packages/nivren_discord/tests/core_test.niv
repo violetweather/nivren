@@ -1,7 +1,7 @@
 use "../src/main.niv"
 
 define verify
-gives Bool or String
+gives Bool or Problem
 {
     keep body set main.message_body with { content set "hello \"Nivren\"" }
     assert(body == ok("{\"content\":\"hello \\\"Nivren\\\"\"}"), "message JSON should escape content")

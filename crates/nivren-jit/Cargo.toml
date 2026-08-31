@@ -1,6 +1,6 @@
 [package]
 name = "nivren-jit"
-version = "0.10.0-beta.8"
+version = "0.10.0-beta.9"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0 WITH LLVM-exception"

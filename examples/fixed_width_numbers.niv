@@ -1,5 +1,5 @@
 define packet_fields
-gives String or String
+gives String or Problem
 {
     keep version is U8 set std.u8.from_int with { value set 3 } or give
     keep port is U16 set std.u16.from_int with { value set 8080 } or give
@@ -15,5 +15,5 @@ gives String or String
 
 choose packet_fields with {} {
     case Ok carries value => value
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }

@@ -103,11 +103,11 @@ fn runtime_effect_sequence_matches_source_and_excludes_unauthorized_calls() {
 fn explain_reports_file_http_database_and_concurrency_resources() {
     let sources = [
         (
-            "define file takes {} gives Bool or String needs FileRead { give perform std.files.exists with { path set \"/tmp/nivren-intent\" } }",
+            "define file takes {} gives Bool or Problem needs FileRead { give perform std.files.exists with { path set \"/tmp/nivren-intent\" } }",
             "filesystem",
         ),
         (
-            "define web takes {} gives String or String needs Network { give perform std.web.get with { url set \"http://127.0.0.1/\" timeout set 1.0 } }",
+            "define web takes {} gives String or Problem needs Network { give perform std.web.get with { url set \"http://127.0.0.1/\" timeout set 1.0 } }",
             "network-socket",
         ),
         (
@@ -136,7 +136,7 @@ fn explain_reports_file_http_database_and_concurrency_resources() {
 
 #[test]
 fn through_batches_and_parallel_task_plans_remain_bounded() {
-    let batching = "define batches takes {} gives [[Int]] or String { give [1, 2, 3, 4, 5] through std.list.batch with { count set 2 } }\nbatches with {}";
+    let batching = "define batches takes {} gives [[Int]] or Problem { give [1, 2, 3, 4, 5] through std.list.batch with { count set 2 } }\nbatches with {}";
     let chunk = compiled(batching);
     assert_eq!(
         Interpreter::new().run_bytecode(&chunk).unwrap().to_string(),
@@ -147,7 +147,7 @@ fn through_batches_and_parallel_task_plans_remain_bounded() {
     assert_eq!(graph.summary.fused_pipelines, 1);
     graph.validate().unwrap();
 
-    let parallel = "define one takes {} gives Int { give 1 }\ndefine many takes {} gives [Int] or String needs Task { keep first set perform std.tasks.spawn with { operation set one }\nkeep second set perform std.tasks.spawn with { operation set one }\ngive perform std.tasks.all with { tasks set [first, second] } }";
+    let parallel = "define one takes {} gives Int { give 1 }\ndefine many takes {} gives [Int] or Problem needs Task { keep first set perform std.tasks.spawn with { operation set one }\nkeep second set perform std.tasks.spawn with { operation set one }\ngive perform std.tasks.all with { tasks set [first, second] } }";
     let graph = analyze(&checked(parallel), Optimization::Enabled);
     assert!(
         graph

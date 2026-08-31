@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define works
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep source set main.Audio(48000, 2, [0, 32767, -32768, 42])
     keep encoded set main.encode_pcm16 with { value set source } or give

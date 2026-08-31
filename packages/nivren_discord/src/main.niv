@@ -42,10 +42,10 @@ define message_body
 takes {
     content is String
 }
-gives String or String
+gives String or Problem
 {
     when len(content) < 1 or len(content) > 2000 {
-        give err("Discord message content must contain 1 through 2000 characters")
+        give err(std.problems.create("discord", "Discord message content must contain 1 through 2000 characters"))
     }
     give Message.to_json with { value set Message with { content set content } }
 }
@@ -64,13 +64,13 @@ define validate_command
 takes {
     command is Command
 }
-gives Command or String
+gives Command or Problem
 {
     when len(command.name) < 1 or len(command.name) > 32 {
-        give err("Discord command name must contain 1 through 32 characters")
+        give err(std.problems.create("discord", "Discord command name must contain 1 through 32 characters"))
     }
     when len(command.description) < 1 or len(command.description) > 100 {
-        give err("Discord command description must contain 1 through 100 characters")
+        give err(std.problems.create("discord", "Discord command description must contain 1 through 100 characters"))
     }
     give ok(command)
 }
@@ -79,7 +79,7 @@ define command_body
 takes {
     command is Command
 }
-gives String or String
+gives String or Problem
 {
     keep checked set validate_command with { command set command } or give
     give Command.to_json with { value set checked }
@@ -89,13 +89,13 @@ define validate_retry_policy
 takes {
     policy is RetryPolicy
 }
-gives RetryPolicy or String
+gives RetryPolicy or Problem
 {
     when policy.maximum_attempts < 0 or policy.maximum_attempts > 16 {
-        give err("Discord retry maximum_attempts must be from 0 through 16")
+        give err(std.problems.create("discord", "Discord retry maximum_attempts must be from 0 through 16"))
     }
     when policy.base_delay < 0.0 or policy.base_delay > 60.0 or policy.maximum_delay < policy.base_delay or policy.maximum_delay > 300.0 {
-        give err("Discord retry delays are outside the supported bounds")
+        give err(std.problems.create("discord", "Discord retry delays are outside the supported bounds"))
     }
     give ok(policy)
 }
@@ -107,18 +107,18 @@ takes {
     retry_after is Float
     policy is RetryPolicy
 }
-gives RetryDecision or String
+gives RetryDecision or Problem
 {
     keep checked set validate_retry_policy with { policy set policy } or give
     when attempt < 0 {
-        give err("Discord retry attempt must not be negative")
+        give err(std.problems.create("discord", "Discord retry attempt must not be negative"))
     }
     when attempt >= checked.maximum_attempts {
         give ok(RetryDecision with { retry set no delay set 0.0 reason set "attempt limit" })
     }
     when status == 429 {
         when retry_after < 0.0 or retry_after > checked.maximum_delay {
-            give err("Discord retry_after is outside the policy ceiling")
+            give err(std.problems.create("discord", "Discord retry_after is outside the policy ceiling"))
         }
         give ok(RetryDecision with { retry set yes delay set retry_after reason set "rate limited" })
     }
@@ -141,16 +141,16 @@ define validate_gateway
 takes {
     plan is GatewayPlan
 }
-gives GatewayPlan or String
+gives GatewayPlan or Problem
 {
     when not std.text.starts_with with { value set plan.endpoint prefix set "wss://" } {
-        give err("Discord Gateway endpoint must use wss://")
+        give err(std.problems.create("discord", "Discord Gateway endpoint must use wss://"))
     }
     when plan.intents < 0 or plan.intents > 2147483647 {
-        give err("Discord Gateway intents are outside the supported bit range")
+        give err(std.problems.create("discord", "Discord Gateway intents are outside the supported bit range"))
     }
     when plan.timeout <= 0.0 or plan.timeout > 300.0 or plan.maximum_message < 1 or plan.maximum_message > 16777216 {
-        give err("Discord Gateway timeout or message ceiling is invalid")
+        give err(std.problems.create("discord", "Discord Gateway timeout or message ceiling is invalid"))
     }
     give ok(plan)
 }
@@ -160,10 +160,10 @@ takes {
     token is String
     intents is Int
 }
-gives String or String
+gives String or Problem
 {
     when len(token) < 1 or len(token) > 4096 or intents < 0 or intents > 2147483647 {
-        give err("Discord identify token or intents are invalid")
+        give err(std.problems.create("discord", "Discord identify token or intents are invalid"))
     }
     give Identify.to_json with { value set Identify with { token set token intents set intents } }
 }
@@ -172,10 +172,10 @@ define decode_event
 takes {
     source is String
 }
-gives GatewayEvent or String
+gives GatewayEvent or Problem
 {
     when len(source) > 16777216 {
-        give err("Discord Gateway event exceeds 16 MiB")
+        give err(std.problems.create("discord", "Discord Gateway event exceeds 16 MiB"))
     }
     give GatewayEvent.from_json with { source set source }
 }
@@ -186,7 +186,7 @@ takes {
     channel_id is String
     content is String
 }
-gives String or String
+gives String or Problem
 needs Network within "discord.com"
 {
     keep body set message_body with { content set content } or give

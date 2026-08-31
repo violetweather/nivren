@@ -1,7 +1,7 @@
 use "../../packages/nivren_database/src/main.niv"
 
 define run_sqlite
-gives Int or String
+gives Int or Problem
 needs Native within "database"
 {
     keep opened set perform main.open_driver with { configuration set "memory://product-proof" } or give

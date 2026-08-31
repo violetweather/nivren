@@ -3,7 +3,7 @@ takes {
     seconds is Int
     zone is String
 }
-gives String or String
+gives String or Problem
 {
     keep instant set std.time.from_unix with { seconds set seconds zone set "UTC" } or give
     keep local set std.time.in_zone with { value set instant zone set zone } or give
@@ -13,5 +13,5 @@ gives String or String
 keep scheduled set meeting_time with { seconds set 0 zone set "America/New_York" }
 choose scheduled {
     case Ok carries value => value
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }

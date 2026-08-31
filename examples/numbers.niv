@@ -1,5 +1,5 @@
 define exact_total
-gives String or String
+gives String or Problem
 {
     keep subtotal set std.decimal.parse with { source set "19.99" } or give
     keep tax set std.decimal.parse with { source set "1.60" } or give
@@ -7,7 +7,7 @@ gives String or String
 }
 
 define beyond_machine_int
-gives String or String
+gives String or Problem
 {
     keep huge set std.bigint.parse with {
         source set "1000000000000000000000000000000"
@@ -18,5 +18,5 @@ gives String or String
 
 choose exact_total with {} {
     case Ok carries value => value
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }

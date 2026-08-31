@@ -11,10 +11,10 @@ shape OtlpExportRequest holds { resourceSpans is [OtlpResourceSpans] }
 
 define validate_hex
 takes { value is String bytes is Int label is String }
-gives String or String
+gives String or Problem
 {
     keep decoded set std.encoding.hex_decode with { source set value } or give
-    when std.bytes.length with { bytes set decoded } != bytes { give err(label + " has the wrong width") }
+    when std.bytes.length with { bytes set decoded } != bytes { give err(std.problems.create("trace", label + " has the wrong width")) }
     change nonzero set no
     change index set 0
     repeat index < std.bytes.length with { bytes set decoded } {
@@ -22,13 +22,13 @@ gives String or String
         when byte != 0 { change nonzero to yes }
         change index to index + 1
     }
-    when not nonzero { give err(label + " must not be all zero") }
+    when not nonzero { give err(std.problems.create("trace", label + " must not be all zero")) }
     give ok(value)
 }
 
 define context
 takes { trace_id is String span_id is String sampled is Bool }
-gives Context or String
+gives Context or Problem
 {
     keep trace set validate_hex with { value set trace_id bytes set 16 label set "trace id" } or give
     keep span set validate_hex with { value set span_id bytes set 8 label set "span id" } or give
@@ -39,7 +39,7 @@ gives Context or String
 
 define fresh
 takes { sampled is Bool }
-gives Context or String
+gives Context or Problem
 needs Random
 {
     keep trace_id set std.encoding.hex_encode with { bytes set perform std.crypto.random_bytes with { length set 16 } or give } or give
@@ -49,7 +49,7 @@ needs Random
 
 define child
 takes { parent is Context }
-gives Context or String
+gives Context or Problem
 needs Random
 {
     keep span_id set std.encoding.hex_encode with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
@@ -58,18 +58,18 @@ needs Random
 
 define parse
 takes { value is String }
-gives Context or String
+gives Context or Problem
 {
     keep parts set std.text.split with { value set value separator set "-" maximum set 5 } or give
-    when len(parts) != 4 or parts[0] != "00" { give err("traceparent must use W3C version 00") }
-    when parts[3] != "00" and parts[3] != "01" { give err("trace flags must be 00 or 01") }
+    when len(parts) != 4 or parts[0] != "00" { give err(std.problems.create("trace", "traceparent must use W3C version 00")) }
+    when parts[3] != "00" and parts[3] != "01" { give err(std.problems.create("trace", "trace flags must be 00 or 01")) }
     keep parsed set context with { trace_id set parts[1] span_id set parts[2] sampled set parts[3] == "01" } or give
     give ok(parsed)
 }
 
 define traceparent
 takes { value is Context }
-gives String or String
+gives String or Problem
 {
     keep prefix set std.text.concat with { left set "00-" right set value.trace_id } or give
     keep middle set std.text.concat with { left set prefix right set "-" } or give
@@ -80,46 +80,46 @@ gives String or String
 
 define headers
 takes { value is Context }
-gives Map<String, String> or String
+gives Map<String, String> or Problem
 { give ok(std.map.of with { key set "traceparent" value set traceparent with { value set value } or give }) }
 
 define otlp_attribute
 takes { key is String value is String }
-gives OtlpAttribute or String
+gives OtlpAttribute or Problem
 {
-    when len(key) == 0 or len(key) > 256 { give err("OTLP attribute key must use 1 through 256 bytes") }
-    when len(value) > 4096 { give err("OTLP string attribute exceeds 4096 bytes") }
+    when len(key) == 0 or len(key) > 256 { give err(std.problems.create("trace", "OTLP attribute key must use 1 through 256 bytes")) }
+    when len(value) > 4096 { give err(std.problems.create("trace", "OTLP string attribute exceeds 4096 bytes")) }
     give ok(OtlpAttribute(key, OtlpValue(value)))
 }
 
 define canonical_unix_nanos
 takes { value is String }
-gives String or String
+gives String or Problem
 {
     when len(value) == 0 or len(value) > 19 or std.text.starts_with with { value set value prefix set "-" } {
-        give err("OTLP timestamp must be a nonnegative canonical Int64 decimal string")
+        give err(std.problems.create("trace", "OTLP timestamp must be a nonnegative canonical Int64 decimal string"))
     }
     keep parsed set std.bigint.parse with { source set value } or give
     when std.bigint.format with { value set parsed } != value {
-        give err("OTLP timestamp must be a nonnegative canonical Int64 decimal string")
+        give err(std.problems.create("trace", "OTLP timestamp must be a nonnegative canonical Int64 decimal string"))
     }
     give ok(value)
 }
 
 define otlp_span
 takes { value is Context name is String start_unix_nano is String end_unix_nano is String attributes is [OtlpAttribute] }
-gives OtlpSpan or String
+gives OtlpSpan or Problem
 {
-    when len(name) == 0 or len(name) > 256 { give err("OTLP span name must use 1 through 256 bytes") }
-    when len(attributes) > 128 { give err("OTLP span supports at most 128 attributes") }
+    when len(name) == 0 or len(name) > 256 { give err(std.problems.create("trace", "OTLP span name must use 1 through 256 bytes")) }
+    when len(attributes) > 128 { give err(std.problems.create("trace", "OTLP span supports at most 128 attributes")) }
     keep started_at set canonical_unix_nanos with { value set start_unix_nano } or give
     keep ended_at set canonical_unix_nanos with { value set end_unix_nano } or give
     keep started_number set std.bigint.parse with { source set started_at } or give
     keep ended_number set std.bigint.parse with { source set ended_at } or give
-    when ended_number < started_number { give err("OTLP span end must not precede its start") }
+    when ended_number < started_number { give err(std.problems.create("trace", "OTLP span end must not precede its start")) }
     each attribute within attributes {
-        when len(attribute.key) == 0 or len(attribute.key) > 256 { give err("OTLP attribute key must use 1 through 256 bytes") }
-        when len(attribute.value.stringValue) > 4096 { give err("OTLP string attribute exceeds 4096 bytes") }
+        when len(attribute.key) == 0 or len(attribute.key) > 256 { give err(std.problems.create("trace", "OTLP attribute key must use 1 through 256 bytes")) }
+        when len(attribute.value.stringValue) > 4096 { give err(std.problems.create("trace", "OTLP string attribute exceeds 4096 bytes")) }
     }
     change flags set 0
     when value.flags == "01" { change flags to 1 }
@@ -128,7 +128,7 @@ gives OtlpSpan or String
 
 define encode_otlp_json
 takes { span is OtlpSpan }
-gives String or String
+gives String or Problem
 {
     keep scope set OtlpScopeSpans([span])
     keep resource set OtlpResourceSpans([scope])
@@ -137,10 +137,10 @@ gives String or String
 
 define export_otlp_json
 takes { endpoint is String request_headers is Map<String, String> span is OtlpSpan timeout is Float }
-gives String or String
+gives String or Problem
 needs Network
 {
-    when len(endpoint) == 0 or len(endpoint) > 4096 { give err("OTLP endpoint must use 1 through 4096 bytes") }
+    when len(endpoint) == 0 or len(endpoint) > 4096 { give err(std.problems.create("trace", "OTLP endpoint must use 1 through 4096 bytes")) }
     keep body set encode_otlp_json with { span set span } or give
     keep typed set std.map.set with { map set request_headers key set "Content-Type" value set "application/json" }
     keep response set perform std.web.request with { method set "POST" url set endpoint headers set typed body set body timeout set timeout maximum set 1048576 } or give

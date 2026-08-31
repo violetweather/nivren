@@ -1656,6 +1656,13 @@ impl Checker {
                         ]),
                     ),
                     (
+                        "problems",
+                        module(vec![(
+                            "create",
+                            function(vec![Type::String, Type::String], problem_type()),
+                        )]),
+                    ),
+                    (
                         "source",
                         module(vec![
                             (
@@ -1871,6 +1878,9 @@ impl Checker {
                 mutable: false,
             },
         );
+        if let Some(binding) = global.get_mut("std") {
+            binding.ty = problematize(&binding.ty);
+        }
         let mut records = HashMap::new();
         let text_map = Type::Map(Box::new(Type::String), Box::new(Type::String));
         records.insert(
@@ -1879,6 +1889,13 @@ impl Checker {
                 ("status".to_string(), Type::Int),
                 ("body".to_string(), Type::String),
                 ("headers".to_string(), text_map.clone()),
+            ]),
+        );
+        records.insert(
+            "Problem".to_string(),
+            HashMap::from([
+                ("kind".to_string(), Type::String),
+                ("message".to_string(), Type::String),
             ]),
         );
         records.insert(
@@ -1915,6 +1932,7 @@ impl Checker {
                 ("Response".to_string(), "Response".to_string()),
                 ("Request".to_string(), "Request".to_string()),
                 ("Interest".to_string(), "Interest".to_string()),
+                ("Problem".to_string(), "Problem".to_string()),
             ]),
             protocols: HashSet::new(),
             protocol_members: HashMap::new(),
@@ -3250,7 +3268,7 @@ impl Checker {
                                             record
                                         },
                                     ),
-                                    Box::new(Type::String),
+                                    Box::new(problem_type()),
                                 ))
                             }
                             _ => None,
@@ -4313,8 +4331,8 @@ impl Checker {
             return None;
         }
         let value = Type::Record(record.to_string(), arguments.to_vec());
-        let string_result = || Type::Result(Box::new(Type::String), Box::new(Type::String));
-        let record_result = || Type::Result(Box::new(value.clone()), Box::new(Type::String));
+        let string_result = || Type::Result(Box::new(Type::String), Box::new(problem_type()));
+        let record_result = || Type::Result(Box::new(value.clone()), Box::new(problem_type()));
         let (parameters, result) = match method_name {
             "to_json" => (vec![value], string_result()),
             "from_json" => (vec![Type::String], record_result()),
@@ -4323,11 +4341,11 @@ impl Checker {
             "key" => (vec![value], string_result()),
             "validate" => (
                 vec![value],
-                Type::Result(Box::new(Type::Null), Box::new(Type::String)),
+                Type::Result(Box::new(Type::Null), Box::new(problem_type())),
             ),
             "to_binary" => (
                 vec![value],
-                Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                Type::Result(Box::new(Type::Bytes), Box::new(problem_type())),
             ),
             "from_binary" => (vec![Type::Bytes], record_result()),
             "from_row" => (vec![Type::String], record_result()),
@@ -4425,10 +4443,62 @@ fn declared_name(statement: &Stmt) -> Option<&str> {
     }
 }
 
+/// The builtin `Problem` failure type every standard-library typed failure
+/// carries.
+fn problem_type() -> Type {
+    Type::Record("Problem".into(), vec![])
+}
+
+/// Rewrites every string-typed failure slot in the standard library's type
+/// tree to the builtin `Problem` shape, recursing through modules and
+/// function types so parameters, results, and callbacks stay consistent.
+fn problematize(ty: &Type) -> Type {
+    match ty {
+        Type::Result(ok, error) => {
+            let error = if matches!(error.as_ref(), Type::String) {
+                problem_type()
+            } else {
+                problematize(error)
+            };
+            Type::Result(Box::new(problematize(ok)), Box::new(error))
+        }
+        Type::Module(members) => Type::Module(
+            members
+                .iter()
+                .map(|(name, member)| (name.clone(), problematize(member)))
+                .collect(),
+        ),
+        Type::Function(generics, constraints, params, result, needs) => Type::Function(
+            generics.clone(),
+            constraints.clone(),
+            params.iter().map(problematize).collect(),
+            Box::new(problematize(result)),
+            needs.clone(),
+        ),
+        Type::Array(element) => Type::Array(Box::new(problematize(element))),
+        Type::Iterator(element) => Type::Iterator(Box::new(problematize(element))),
+        Type::Set(element) => Type::Set(Box::new(problematize(element))),
+        Type::Nullable(inner) => Type::Nullable(Box::new(problematize(inner))),
+        Type::Map(key, value) => {
+            Type::Map(Box::new(problematize(key)), Box::new(problematize(value)))
+        }
+        Type::Transaction(key, value) => {
+            Type::Transaction(Box::new(problematize(key)), Box::new(problematize(value)))
+        }
+        Type::Record(name, arguments) => {
+            Type::Record(name.clone(), arguments.iter().map(problematize).collect())
+        }
+        Type::Enum(name, arguments) => {
+            Type::Enum(name.clone(), arguments.iter().map(problematize).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// The builtin web/net defaults: a user declaration of the same name
 /// shadows them instead of colliding.
 fn builtin_default_type(name: &str) -> bool {
-    matches!(name, "Response" | "Request" | "Interest")
+    matches!(name, "Response" | "Request" | "Interest" | "Problem")
 }
 
 fn known_builtin_protocol(name: &str) -> bool {

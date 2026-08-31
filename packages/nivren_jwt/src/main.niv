@@ -1,6 +1,6 @@
 define signing_input
 takes { header is String payload is String }
-gives String or String
+gives String or Problem
 {
     keep first set std.text.concat with { left set header right set "." } or give
     give std.text.concat with { left set first right set payload }
@@ -8,18 +8,18 @@ gives String or String
 
 define require_header
 takes { encoded is String expected is String }
-gives Nothing or String
+gives Nothing or Problem
 {
     keep bytes set std.encoding.base64url_decode with { source set encoded } or give
     keep text set std.bytes.to_string with { bytes set bytes } or give
     keep compact set std.json.compact with { source set text } or give
-    when compact != expected { give err("JWT algorithm header does not match the verifier") }
+    when compact != expected { give err(std.problems.create("jwt", "JWT algorithm header does not match the verifier")) }
     give ok(none)
 }
 
 define sign_hs256
 takes { payload_json is String secret is Bytes }
-gives String or String
+gives String or Problem
 {
     keep payload set std.json.compact with { source set payload_json } or give
     keep header_bytes set std.bytes.from_string with { value set "{\"alg\":\"HS256\",\"typ\":\"JWT\"}" }
@@ -34,15 +34,15 @@ gives String or String
 
 define verify_hs256
 takes { token is String secret is Bytes }
-gives String or String
+gives String or Problem
 {
     keep parts set std.text.split with { value set token separator set "." maximum set 4 } or give
-    when len(parts) != 3 { give err("JWT must contain exactly three segments") }
+    when len(parts) != 3 { give err(std.problems.create("jwt", "JWT must contain exactly three segments")) }
     require_header with { encoded set parts[0] expected set "{\"alg\":\"HS256\",\"typ\":\"JWT\"}" } or give
     keep message set signing_input with { header set parts[0] payload set parts[1] } or give
     keep tag set std.encoding.base64url_decode with { source set parts[2] } or give
     keep valid set std.crypto.hmac_sha256_verify with { key set secret message set std.bytes.from_string with { value set message } expected set tag } or give
-    when not valid { give err("JWT signature is invalid") }
+    when not valid { give err(std.problems.create("jwt", "JWT signature is invalid")) }
     keep payload_bytes set std.encoding.base64url_decode with { source set parts[1] } or give
     keep payload set std.bytes.to_string with { bytes set payload_bytes } or give
     give std.json.compact with { source set payload }
@@ -50,7 +50,7 @@ gives String or String
 
 define sign_eddsa
 takes { payload_json is String key is SecretKey }
-gives String or String
+gives String or Problem
 {
     keep payload set std.json.compact with { source set payload_json } or give
     keep header set std.encoding.base64url_encode with { bytes set std.bytes.from_string with { value set "{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}" } } or give
@@ -64,15 +64,15 @@ gives String or String
 
 define verify_eddsa
 takes { token is String public_key is Bytes }
-gives String or String
+gives String or Problem
 {
     keep parts set std.text.split with { value set token separator set "." maximum set 4 } or give
-    when len(parts) != 3 { give err("JWT must contain exactly three segments") }
+    when len(parts) != 3 { give err(std.problems.create("jwt", "JWT must contain exactly three segments")) }
     require_header with { encoded set parts[0] expected set "{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}" } or give
     keep message set signing_input with { header set parts[0] payload set parts[1] } or give
     keep signature set std.encoding.base64url_decode with { source set parts[2] } or give
     keep valid set std.crypto.ed25519_verify with { public_key set public_key message set std.bytes.from_string with { value set message } signature set signature } or give
-    when not valid { give err("JWT signature is invalid") }
+    when not valid { give err(std.problems.create("jwt", "JWT signature is invalid")) }
     keep payload_bytes set std.encoding.base64url_decode with { source set parts[1] } or give
     keep payload set std.bytes.to_string with { bytes set payload_bytes } or give
     give std.json.compact with { source set payload }

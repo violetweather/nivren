@@ -30,13 +30,13 @@ define validate_pool
 takes {
     config is PoolConfig
 }
-gives PoolConfig or String
+gives PoolConfig or Problem
 {
     when config.minimum < 0 or config.maximum < 1 or config.minimum > config.maximum or config.maximum > 1024 {
-        give err("database pool bounds are invalid")
+        give err(std.problems.create("database", "database pool bounds are invalid"))
     }
     when config.connect_timeout <= 0.0 or config.connect_timeout > 300.0 or config.idle_timeout < 0.0 or config.idle_timeout > 86400.0 {
-        give err("database pool timeout is outside the supported bounds")
+        give err(std.problems.create("database", "database pool timeout is outside the supported bounds"))
     }
     give ok(config)
 }
@@ -45,19 +45,19 @@ define validate_request
 takes {
     request is DriverRequest
 }
-gives DriverRequest or String
+gives DriverRequest or Problem
 {
     when request.operation != "query" and request.operation != "execute" and request.operation != "begin" and request.operation != "commit" and request.operation != "rollback" {
-        give err("database driver operation is not supported")
+        give err(std.problems.create("database", "database driver operation is not supported"))
     }
     when len(request.statement) > 1048576 or len(request.parameters) > 65536 {
-        give err("database request exceeds a bounded field limit")
+        give err(std.problems.create("database", "database request exceeds a bounded field limit"))
     }
     when request.maximum_rows < 0 or request.maximum_rows > 1000000 {
-        give err("database maximum_rows is outside the supported bounds")
+        give err(std.problems.create("database", "database maximum_rows is outside the supported bounds"))
     }
     when request.timeout <= 0.0 or request.timeout > 300.0 {
-        give err("database timeout must be greater than zero and at most 300 seconds")
+        give err(std.problems.create("database", "database timeout must be greater than zero and at most 300 seconds"))
     }
     give ok(request)
 }
@@ -66,15 +66,15 @@ define validate_migrations
 takes {
     migrations is [Migration]
 }
-gives [Migration] or String
+gives [Migration] or Problem
 {
     change previous set -1
     each migration in migrations {
         when migration.version <= previous {
-            give err("database migrations must use strictly increasing versions")
+            give err(std.problems.create("database", "database migrations must use strictly increasing versions"))
         }
         when len(migration.name) < 1 or len(migration.name) > 128 or len(migration.statement) < 1 or len(migration.statement) > 1048576 {
-            give err("database migration has an invalid name or statement length")
+            give err(std.problems.create("database", "database migration has an invalid name or statement length"))
         }
         change previous to migration.version
     }
@@ -85,7 +85,7 @@ define encode_request
 takes {
     request is DriverRequest
 }
-gives String or String
+gives String or Problem
 {
     keep checked set validate_request with { request set request } or give
     give DriverRequest.to_json with { value set checked }
@@ -95,7 +95,7 @@ define decode_page
 takes {
     source is String
 }
-gives QueryPage or String
+gives QueryPage or Problem
 {
     give QueryPage.from_json with { source set source }
 }
@@ -104,11 +104,11 @@ define open_driver
 takes {
     configuration is String
 }
-gives NativeHandle or String
+gives NativeHandle or Problem
 needs Native within "database"
 {
     when len(configuration) < 1 or len(configuration) > 1048576 {
-        give err("database driver configuration must contain 1 through 1048576 characters")
+        give err(std.problems.create("database", "database driver configuration must contain 1 through 1048576 characters"))
     }
     give perform std.host.open with { kind set "database" request set configuration }
 }
@@ -118,7 +118,7 @@ takes {
     handle is NativeHandle
     request is DriverRequest
 }
-gives QueryPage or String
+gives QueryPage or Problem
 needs Native within "database"
 {
     keep encoded set encode_request with { request set request } or give
@@ -131,12 +131,12 @@ takes {
     handle is NativeHandle
     request is DriverRequest
 }
-gives String or String
+gives String or Problem
 needs Native within "database"
 {
     keep checked set validate_request with { request set request } or give
     when checked.operation != "execute" and checked.operation != "begin" and checked.operation != "commit" and checked.operation != "rollback" {
-        give err("database execute_driver requires an execute or transaction operation")
+        give err(std.problems.create("database", "database execute_driver requires an execute or transaction operation"))
     }
     keep encoded set DriverRequest.to_json with { value set checked } or give
     give perform std.host.call with { handle set handle name set checked.operation request set encoded }

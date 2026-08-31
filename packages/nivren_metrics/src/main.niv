@@ -2,14 +2,14 @@ shape Sample holds { name is String help is String kind is String value is Float
 
 define join
 takes { left is String right is String }
-gives String or String
+gives String or Problem
 { give std.text.concat with { left set left right set right } }
 
 define escape
 takes { value is String help is Bool }
-gives String or String
+gives String or Problem
 {
-    when len(value) > 65536 { give err("metric text exceeds 64 KiB") }
+    when len(value) > 65536 { give err(std.problems.create("metrics", "metric text exceeds 64 KiB")) }
     change output set ""
     each character within value {
         change escaped set character
@@ -23,19 +23,19 @@ gives String or String
 
 define sample
 takes { name is String help is String kind is String value is Float labels is Map<String, String> }
-gives Sample or String
+gives Sample or Problem
 {
-    when name == "" or len(name) > 1024 { give err("metric name must contain 1 through 1024 characters") }
-    when kind != "counter" and kind != "gauge" { give err("metric kind must be counter or gauge") }
-    when std.map.length with { map set labels } > 128 { give err("metric sample exceeds 128 labels") }
+    when name == "" or len(name) > 1024 { give err(std.problems.create("metrics", "metric name must contain 1 through 1024 characters")) }
+    when kind != "counter" and kind != "gauge" { give err(std.problems.create("metrics", "metric kind must be counter or gauge")) }
+    when std.map.length with { map set labels } > 128 { give err(std.problems.create("metrics", "metric sample exceeds 128 labels")) }
     give ok(Sample(name, help, kind, value, labels))
 }
 
 define encode
 takes { samples is [Sample] }
-gives String or String
+gives String or Problem
 {
-    when len(samples) > 100000 { give err("metric export exceeds 100000 samples") }
+    when len(samples) > 100000 { give err(std.problems.create("metrics", "metric export exceeds 100000 samples")) }
     change output set ""
     each item within samples {
         keep safe_help set escape with { value set item.help help set yes } or give

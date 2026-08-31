@@ -2,7 +2,7 @@ define fetch_status
 takes {
     url is String
 }
-gives String or String
+gives String or Problem
 needs Network
 {
     keep response set std.web.request with {

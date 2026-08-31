@@ -101,7 +101,7 @@
   },
   {
     "name": "uint-checked-arithmetic",
-    "source": "define compute takes { } gives String or String {\n    keep small set std.uint.from_int(7) or give\n    keep large set std.uint.from_int(6) or give\n    give ok(std.uint.format(small + large))\n}\nshow(choose compute with {} {\n    case Ok carries value => value\n    case Err carries message => message\n})",
+    "source": "define compute takes { } gives String or Problem {\n    keep small set std.uint.from_int(7) or give\n    keep large set std.uint.from_int(6) or give\n    give ok(std.uint.format(small + large))\n}\nshow(choose compute with {} {\n    case Ok carries value => value\n    case Err carries problem => problem.message\n})",
     "arguments": [
       "run",
       "{source}"
@@ -121,7 +121,7 @@
   },
   {
     "name": "portable-plan-round-trip",
-    "source": "shape FetchPlan holds {\n    address is String\n    attempts is Int\n} derives Json\ndefine round_trip takes { } gives String or String {\n    prepare request as FetchPlan with { address set \"example.com\", attempts set 3 }\n    keep encoded set std.plans.encode(request) or give\n    keep decoded set std.plans.decode(FetchPlan, encoded) or give\n    give ok(decoded.address)\n}\nshow(choose round_trip with {} {\n    case Ok carries value => value\n    case Err carries message => message\n})",
+    "source": "shape FetchPlan holds {\n    address is String\n    attempts is Int\n} derives Json\ndefine round_trip takes { } gives String or Problem {\n    prepare request as FetchPlan with { address set \"example.com\", attempts set 3 }\n    keep encoded set std.plans.encode(request) or give\n    keep decoded set std.plans.decode(FetchPlan, encoded) or give\n    give ok(decoded.address)\n}\nshow(choose round_trip with {} {\n    case Ok carries value => value\n    case Err carries problem => problem.message\n})",
     "arguments": [
       "run",
       "{source}"

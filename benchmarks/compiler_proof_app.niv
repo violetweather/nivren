@@ -2,7 +2,7 @@ define load_payload
 takes {
     path is String
 }
-gives String or String
+gives String or Problem
 needs FileRead
 {
     keep contents set perform std.files.read with {

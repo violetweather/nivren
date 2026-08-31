@@ -2,7 +2,7 @@ define add_with_library
 takes {
     path is String
 }
-gives Int or String
+gives Int or Problem
 needs Native
 {
     keep opened set std.native.open with { path set path } or give

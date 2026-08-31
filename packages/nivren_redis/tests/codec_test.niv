@@ -5,15 +5,15 @@ assert with {
     condition set main.command with { parts set ["SET", "greeting", "hello"] } == ok("*3\r\n$3\r\nSET\r\n$8\r\ngreeting\r\n$5\r\nhello\r\n")
     message set "RESP command"
 }
-assert with { condition set main.command with { parts set [] } == err("Redis command requires at least one part") message set "empty command" }
+assert with { condition set main.command with { parts set [] } == err(std.problems.create("redis", "Redis command requires at least one part")) message set "empty command" }
 assert with {
     condition set main.redirect with { message set "MOVED 42 [::1]:6379" } == ok(main.Redirect("MOVED", 42, "::1", 6379))
     message set "cluster redirect"
 }
-assert with { condition set main.pool with { maximum set 0 } == err("Redis pool size must be from 1 through 1024") message set "pool lower bound" }
+assert with { condition set main.pool with { maximum set 0 } == err(std.problems.create("redis", "Redis pool size must be from 1 through 1024")) message set "pool lower bound" }
 keep empty set main.pool with { maximum set 4 }
 keep rejected set choose empty {
-    case Ok carries value => main.pool_take with { pool_value set value } == err("Redis pool is empty")
+    case Ok carries value => main.pool_take with { pool_value set value } == err(std.problems.create("redis", "Redis pool is empty"))
     case Err carries problem => no
 }
 assert with { condition set rejected message set "empty pool" }

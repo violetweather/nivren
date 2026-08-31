@@ -1,7 +1,7 @@
 use "../src/main.niv"
 
 define verify
-gives Bool or String
+gives Bool or Problem
 {
     keep health set main.route with { method set "GET" path set "/health" name set "health" }
     keep user set main.route with { method set "GET" path set "/users/:id" name set "user" }

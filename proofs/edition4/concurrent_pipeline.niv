@@ -11,7 +11,7 @@ gives Int
 }
 
 define combine
-gives Int or String
+gives Int or Problem
 needs Task
 {
     keep values set together [start first, start second] or give

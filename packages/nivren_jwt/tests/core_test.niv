@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define verify
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep secret set std.bytes.from_string with { value set "a sufficiently long development secret" }
     keep token set main.sign_hs256 with { payload_json set "{\"sub\":\"42\",\"admin\":true}" secret set secret } or give

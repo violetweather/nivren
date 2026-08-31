@@ -8,7 +8,7 @@ define send_message
 takes {
     plan is MessagePlan
 }
-gives String or String
+gives String or Problem
 needs Network within "discord.com"
 {
     keep headers set std.map.of with {

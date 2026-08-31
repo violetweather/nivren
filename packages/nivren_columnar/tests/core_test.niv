@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define works
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep ids set main.Column.Ints(main.IntColumn("id", [1, 2]))
     keep names set main.Column.Texts(main.TextColumn("name", ["Ada", "Lin"]))

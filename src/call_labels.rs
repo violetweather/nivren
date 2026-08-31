@@ -143,6 +143,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "parse:source;format:value;from_int:value;to_int:value;wrapping_add:left,right;wrapping_sub:left,right;wrapping_mul:left,right;min:;max:",
     );
     add(&mut labels, "std.gpu", "available:;open:adapter");
+    add(&mut labels, "std.problems", "create:kind,message");
     add(
         &mut labels,
         "std.source",

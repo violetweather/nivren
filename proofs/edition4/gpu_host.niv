@@ -1,7 +1,7 @@
 use "../../packages/nivren_gpu/src/main.niv"
 
 define compute
-gives [Int] or String
+gives [Int] or Problem
 needs Native within "gpu"
 {
     keep plan set main.AddPlan with {

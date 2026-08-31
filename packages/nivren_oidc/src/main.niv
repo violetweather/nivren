@@ -3,12 +3,12 @@ shape CoreClaims holds { issuer is String audience is String subject is String e
 
 define join
 takes { left is String right is String }
-gives String or String
+gives String or Problem
 { give std.text.concat with { left set left right set right } }
 
 define parameter
 takes { name is String value is String }
-gives String or String
+gives String or Problem
 {
     keep encoded set std.web.encode_component with { value set value } or give
     keep prefix set join with { left set name right set "=" } or give
@@ -17,23 +17,23 @@ gives String or String
 
 define pkce_challenge
 takes { verifier is String }
-gives String or String
+gives String or Problem
 {
-    when len(verifier) < 43 or len(verifier) > 128 { give err("PKCE verifier must contain 43 through 128 characters") }
+    when len(verifier) < 43 or len(verifier) > 128 { give err(std.problems.create("oidc", "PKCE verifier must contain 43 through 128 characters")) }
     keep encoded set std.web.encode_component with { value set verifier } or give
-    when encoded != verifier { give err("PKCE verifier must use only RFC 3986 unreserved characters") }
+    when encoded != verifier { give err(std.problems.create("oidc", "PKCE verifier must use only RFC 3986 unreserved characters")) }
     keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set verifier } } or give
     give std.encoding.base64url_encode with { bytes set digest }
 }
 
 define authorization_url
 takes { endpoint is String client_id is String redirect_uri is String scope is String state is String nonce is String verifier is String }
-gives Authorization or String
+gives Authorization or Problem
 {
-    when not std.text.starts_with with { value set endpoint prefix set "https://" } { give err("OIDC authorization endpoint must use HTTPS") }
-    when len(std.text.split with { value set endpoint separator set "?" maximum set 2 } or give) != 1 { give err("OIDC authorization endpoint must not contain a query") }
-    when client_id == "" or redirect_uri == "" or scope == "" { give err("OIDC client, redirect URI, and scope must not be empty") }
-    when len(state) < 16 or len(state) > 256 or len(nonce) < 16 or len(nonce) > 256 { give err("OIDC state and nonce must each contain 16 through 256 characters") }
+    when not std.text.starts_with with { value set endpoint prefix set "https://" } { give err(std.problems.create("oidc", "OIDC authorization endpoint must use HTTPS")) }
+    when len(std.text.split with { value set endpoint separator set "?" maximum set 2 } or give) != 1 { give err(std.problems.create("oidc", "OIDC authorization endpoint must not contain a query")) }
+    when client_id == "" or redirect_uri == "" or scope == "" { give err(std.problems.create("oidc", "OIDC client, redirect URI, and scope must not be empty")) }
+    when len(state) < 16 or len(state) > 256 or len(nonce) < 16 or len(nonce) > 256 { give err(std.problems.create("oidc", "OIDC state and nonce must each contain 16 through 256 characters")) }
     keep challenge set pkce_challenge with { verifier set verifier } or give
     change url set join with { left set endpoint right set "?response_type=code" } or give
     each item within [
@@ -53,21 +53,21 @@ gives Authorization or String
 
 define validate_claims
 takes { value is CoreClaims expected_issuer is String expected_audience is String expected_nonce is String now is Int clock_skew is Int }
-gives CoreClaims or String
+gives CoreClaims or Problem
 {
-    when clock_skew < 0 or clock_skew > 300 { give err("OIDC clock skew must be 0 through 300 seconds") }
-    when value.issuer != expected_issuer { give err("OIDC issuer does not match") }
-    when value.audience != expected_audience { give err("OIDC audience does not match") }
-    when value.nonce != expected_nonce { give err("OIDC nonce does not match") }
-    when value.subject == "" { give err("OIDC subject must not be empty") }
-    when value.expires_at <= now - clock_skew { give err("OIDC token has expired") }
-    when value.issued_at > now + clock_skew { give err("OIDC token was issued in the future") }
+    when clock_skew < 0 or clock_skew > 300 { give err(std.problems.create("oidc", "OIDC clock skew must be 0 through 300 seconds")) }
+    when value.issuer != expected_issuer { give err(std.problems.create("oidc", "OIDC issuer does not match")) }
+    when value.audience != expected_audience { give err(std.problems.create("oidc", "OIDC audience does not match")) }
+    when value.nonce != expected_nonce { give err(std.problems.create("oidc", "OIDC nonce does not match")) }
+    when value.subject == "" { give err(std.problems.create("oidc", "OIDC subject must not be empty")) }
+    when value.expires_at <= now - clock_skew { give err(std.problems.create("oidc", "OIDC token has expired")) }
+    when value.issued_at > now + clock_skew { give err(std.problems.create("oidc", "OIDC token was issued in the future")) }
     give ok(value)
 }
 
 define validate_id_claims
 takes { payload_json is String expected_issuer is String expected_audience is String expected_nonce is String now is Int clock_skew is Int }
-gives CoreClaims or String
+gives CoreClaims or Problem
 {
     keep value set std.json.decode with { schema set CoreClaims source set payload_json } or give
     give validate_claims with { value set value expected_issuer set expected_issuer expected_audience set expected_audience expected_nonce set expected_nonce now set now clock_skew set clock_skew }

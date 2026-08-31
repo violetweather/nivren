@@ -34,18 +34,18 @@ gives Int
 
 define table
 takes { columns is [Column] }
-gives Table or String
+gives Table or Problem
 {
-    when len(columns) == 0 { give err("table requires at least one column") }
-    when len(columns) > 4096 { give err("table exceeds 4096 columns") }
+    when len(columns) == 0 { give err(std.problems.create("columnar", "table requires at least one column")) }
+    when len(columns) > 4096 { give err(std.problems.create("columnar", "table exceeds 4096 columns")) }
     keep rows set column_length with { column set columns[0] }
-    when rows > 1000000 { give err("table exceeds one million rows") }
+    when rows > 1000000 { give err(std.problems.create("columnar", "table exceeds one million rows")) }
     change names is [String] set []
     each column within columns {
         keep name set column_name with { column set column }
-        when name == "" { give err("column names must not be empty") }
-        each existing within names { when existing == name { give err("column names must be unique") } }
-        when column_length with { column set column } != rows { give err("all columns must have the same row count") }
+        when name == "" { give err(std.problems.create("columnar", "column names must not be empty")) }
+        each existing within names { when existing == name { give err(std.problems.create("columnar", "column names must be unique")) } }
+        when column_length with { column set column } != rows { give err(std.problems.create("columnar", "all columns must have the same row count")) }
         change names to append with { values set names value set name }
     }
     give ok(Table(rows, columns))
@@ -53,16 +53,16 @@ gives Table or String
 
 define select
 takes { value is Table names is [String] }
-gives Table or String
+gives Table or Problem
 {
-    when len(names) == 0 { give err("selection requires at least one column") }
+    when len(names) == 0 { give err(std.problems.create("columnar", "selection requires at least one column")) }
     change selected is [Column] set []
     each name within names {
         change found is maybe Column set none
         each column within value.columns {
             when column_name with { column set column } == name { change found to column }
         }
-        when found == none { give err("selected column does not exist") }
+        when found == none { give err(std.problems.create("columnar", "selected column does not exist")) }
         change selected to append with { values set selected value set found ?? value.columns[0] }
     }
     give table with { columns set selected }

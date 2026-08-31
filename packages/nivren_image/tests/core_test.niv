@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define works
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep pixels set std.bytes.from_values with { values set [255, 0, 0, 0, 255, 0] } or give
     keep source set main.image with { width set 2 height set 1 pixels set pixels } or give

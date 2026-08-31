@@ -2,7 +2,7 @@ define summarize
 takes {
     source is String
 }
-gives String or String
+gives String or Problem
 {
     keep headers set ["name", "score"]
     keep rows set std.csv.decode with {
@@ -18,6 +18,6 @@ gives String or String
 keep result set summarize with { source set "Nivren,100\r\n" }
 keep message set choose result {
     case Ok carries name => name
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }
 show(message)

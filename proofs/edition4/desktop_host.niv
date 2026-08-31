@@ -1,7 +1,7 @@
 use "../../packages/nivren_desktop/src/main.niv"
 
 define run_desktop
-gives String or String
+gives String or Problem
 needs Native within "desktop"
 {
     keep window set main.Window with {

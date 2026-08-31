@@ -2,7 +2,7 @@ define count_valid_lines
 takes {
     path is String
 }
-gives Int or String
+gives Int or Problem
 needs FileRead
 {
     keep opened set std.files.open_read with { path set path } or give

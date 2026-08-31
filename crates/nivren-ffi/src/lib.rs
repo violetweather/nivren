@@ -610,7 +610,7 @@ mod tests {
         // SAFETY: This is the unchanged, not-yet-freed returned buffer.
         unsafe { nivren_buffer_free(compiled) };
 
-        let host_source = b"define call takes { } gives Result<String, String> needs Native { give std.host.invoke(\"echo\", \"hello\") } call()";
+        let host_source = b"define call takes { } gives Result<String, Problem> needs Native { give std.host.invoke(\"echo\", \"hello\") } call()";
         let mut frees = 0usize;
         // SAFETY: Callback functions and the counter context remain live.
         let hosted = unsafe {
@@ -632,7 +632,7 @@ mod tests {
 
         let nested_source = br#"
 shape Reply { name is String, values is [Int] }
-define read takes { } gives Result<String, String> needs Native {
+define read takes { } gives Result<String, Problem> needs Native {
     keep response set std.host.invoke("nested", "request") or give
     keep reply set std.json.decode(Reply, response) or give
     give ok(reply.name)

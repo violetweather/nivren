@@ -390,6 +390,14 @@ impl Display for Value {
             Self::Iterator(_) => write!(formatter, "<iterator>"),
             Self::RecordType(record) => write!(formatter, "<shape {}>", record.name),
             Self::Record(record) => {
+                // The builtin Problem shape displays as its message, so
+                // printed and interpolated failures stay readable.
+                if record.type_name == "Problem"
+                    && let Some((_, Value::String(message))) =
+                        record.fields.iter().find(|(name, _)| name == "message")
+                {
+                    return write!(formatter, "{message}");
+                }
                 write!(formatter, "{} {{ ", record.type_name)?;
                 for (index, (name, value)) in record.fields.iter().enumerate() {
                     if index > 0 {
@@ -530,6 +538,9 @@ pub struct NativeFunction {
     arity: usize,
     call: NativeCall,
     capability: Option<&'static str>,
+    /// The `Problem.kind` this function's typed failures carry; `None`
+    /// leaves string failures unwrapped (the global prelude).
+    problem_kind: Option<&'static str>,
 }
 
 type NativeCall = fn(Vec<Value>, Span) -> Result<Value, NivError>;
@@ -548,6 +559,28 @@ pub struct RecordValue {
     type_name: String,
     fields: Vec<(String, Value)>,
     field_indices: Arc<HashMap<String, usize>>,
+}
+
+/// Builds the builtin `Problem` shape every standard-library typed failure
+/// carries: `kind` names the failing module, `message` explains the failure.
+impl Value {
+    /// Builds the builtin `Problem` failure value the standard library and
+    /// derives give back; public so hosts and tests can construct expected
+    /// failures.
+    #[must_use]
+    pub fn problem(kind: &str, message: &str) -> Value {
+        problem_value(kind, message.to_string())
+    }
+}
+
+fn problem_value(kind: &str, message: String) -> Value {
+    builtin_record(
+        "Problem",
+        vec![
+            ("kind", Value::String(kind.to_string())),
+            ("message", Value::String(message)),
+        ],
+    )
 }
 
 /// Builds a value of one of the builtin shapes (`Response`, `Request`) that
@@ -1097,36 +1130,42 @@ impl Interpreter {
                 arity: 1,
                 call: native_len,
                 capability: None,
+                problem_kind: None,
             },
             NativeFunction {
                 name: "type",
                 arity: 1,
                 call: native_type,
                 capability: None,
+                problem_kind: None,
             },
             NativeFunction {
                 name: "append",
                 arity: 2,
                 call: native_append,
                 capability: None,
+                problem_kind: None,
             },
             NativeFunction {
                 name: "assert",
                 arity: 2,
                 call: native_assert,
                 capability: None,
+                problem_kind: None,
             },
             NativeFunction {
                 name: "ok",
                 arity: 1,
                 call: native_ok,
                 capability: None,
+                problem_kind: None,
             },
             NativeFunction {
                 name: "err",
                 arity: 1,
                 call: native_err,
                 capability: None,
+                problem_kind: None,
             },
         ] {
             globals.lock().unwrap().values.insert(
@@ -2915,6 +2954,18 @@ impl Interpreter {
                     "close_handle" => self.host_close_handle(arguments, span),
                     _ => (function.call)(arguments, span),
                 };
+                // Standard-library typed failures carry the builtin Problem
+                // shape; the module that registered the native names the kind.
+                let result = match (result, function.problem_kind) {
+                    (Ok(Value::Err(payload)), Some(kind)) => {
+                        if let Value::String(message) = payload.as_ref() {
+                            Ok(Value::Err(Arc::new(problem_value(kind, message.clone()))))
+                        } else {
+                            Ok(Value::Err(payload))
+                        }
+                    }
+                    (result, _) => result,
+                };
                 if let (Some(capability), Some(digest)) = (function.capability, effect_digest)
                     && let Some(recorder) = &self.effect_recorder
                     && let Ok(value) = &result
@@ -2993,7 +3044,19 @@ impl Interpreter {
                     })?;
                 self.call(implementation, arguments, span)
             }
-            Value::DerivedMethod(method) => call_derived_method(&method, arguments, span),
+            Value::DerivedMethod(method) => match call_derived_method(&method, arguments, span) {
+                Ok(Value::Err(payload)) => {
+                    if let Value::String(message) = payload.as_ref() {
+                        Ok(Value::Err(Arc::new(problem_value(
+                            "derive",
+                            message.clone(),
+                        ))))
+                    } else {
+                        Ok(Value::Err(payload))
+                    }
+                }
+                other => other,
+            },
             value => Err(NivError::new(
                 format!("{} is not callable", value.type_name()),
                 span.line,
@@ -6543,294 +6606,346 @@ fn standard_library() -> Value {
     let modules = HashMap::from([
         (
             "files".into(),
-            named_native_module(&[
-                ("read", "read", 1, native_fs_read, Some("FileRead")),
-                ("write", "write", 2, native_fs_write, Some("FileWrite")),
-                ("exists", "exists", 1, native_fs_exists, Some("FileRead")),
-                (
-                    "open_read",
-                    "open_read",
-                    1,
-                    native_fs_open_read,
-                    Some("FileRead"),
-                ),
-                (
-                    "open_write",
-                    "open_write",
-                    1,
-                    native_fs_open_write,
-                    Some("FileWrite"),
-                ),
-                (
-                    "read_from",
-                    "read_from",
-                    2,
-                    native_fs_read_open,
-                    Some("FileRead"),
-                ),
-                (
-                    "write_to",
-                    "write_to",
-                    2,
-                    native_fs_write_open,
-                    Some("FileWrite"),
-                ),
-                (
-                    "read_async",
-                    "files.read_async",
-                    2,
-                    native_intrinsic,
-                    Some("FileRead"),
-                ),
-                (
-                    "write_async",
-                    "files.write_async",
-                    2,
-                    native_intrinsic,
-                    Some("FileWrite"),
-                ),
-                ("close", "close", 1, native_fs_close, None),
-            ]),
+            named_native_module(
+                "files",
+                &[
+                    ("read", "read", 1, native_fs_read, Some("FileRead")),
+                    ("write", "write", 2, native_fs_write, Some("FileWrite")),
+                    ("exists", "exists", 1, native_fs_exists, Some("FileRead")),
+                    (
+                        "open_read",
+                        "open_read",
+                        1,
+                        native_fs_open_read,
+                        Some("FileRead"),
+                    ),
+                    (
+                        "open_write",
+                        "open_write",
+                        1,
+                        native_fs_open_write,
+                        Some("FileWrite"),
+                    ),
+                    (
+                        "read_from",
+                        "read_from",
+                        2,
+                        native_fs_read_open,
+                        Some("FileRead"),
+                    ),
+                    (
+                        "write_to",
+                        "write_to",
+                        2,
+                        native_fs_write_open,
+                        Some("FileWrite"),
+                    ),
+                    (
+                        "read_async",
+                        "files.read_async",
+                        2,
+                        native_intrinsic,
+                        Some("FileRead"),
+                    ),
+                    (
+                        "write_async",
+                        "files.write_async",
+                        2,
+                        native_intrinsic,
+                        Some("FileWrite"),
+                    ),
+                    ("close", "close", 1, native_fs_close, None),
+                ],
+            ),
         ),
         (
             "path".into(),
-            native_module(&[
-                ("join", 2, native_path_join, None),
-                ("basename", 1, native_path_basename, None),
-                ("dirname", 1, native_path_dirname, None),
-            ]),
+            native_module(
+                "path",
+                &[
+                    ("join", 2, native_path_join, None),
+                    ("basename", 1, native_path_basename, None),
+                    ("dirname", 1, native_path_dirname, None),
+                ],
+            ),
         ),
         (
             "env".into(),
-            native_module(&[("get", 1, native_env_get, Some("Environment"))]),
+            native_module("env", &[("get", 1, native_env_get, Some("Environment"))]),
         ),
         (
             "time".into(),
-            native_module(&[
-                ("sleep", 1, native_sleep, Some("Time")),
-                ("from_unix", 2, native_time_from_unix, None),
-                ("parse", 1, native_time_parse, None),
-                ("format", 1, native_time_format, None),
-                ("in_zone", 2, native_time_in_zone, None),
-                ("unix", 1, native_time_unix, None),
-                ("add_seconds", 2, native_time_add_seconds, None),
-                ("now_zoned", 1, native_time_now_zoned, Some("Time")),
-                ("monotonic", 0, native_time_monotonic, Some("Time")),
-                ("year", 1, native_time_year, None),
-                ("month", 1, native_time_month, None),
-                ("day", 1, native_time_day, None),
-                ("hour", 1, native_time_hour, None),
-                ("minute", 1, native_time_minute, None),
-                ("second", 1, native_time_second, None),
-                ("weekday", 1, native_time_weekday, None),
-                (
-                    "difference_seconds",
-                    2,
-                    native_time_difference_seconds,
-                    None,
-                ),
-            ]),
+            native_module(
+                "time",
+                &[
+                    ("sleep", 1, native_sleep, Some("Time")),
+                    ("from_unix", 2, native_time_from_unix, None),
+                    ("parse", 1, native_time_parse, None),
+                    ("format", 1, native_time_format, None),
+                    ("in_zone", 2, native_time_in_zone, None),
+                    ("unix", 1, native_time_unix, None),
+                    ("add_seconds", 2, native_time_add_seconds, None),
+                    ("now_zoned", 1, native_time_now_zoned, Some("Time")),
+                    ("monotonic", 0, native_time_monotonic, Some("Time")),
+                    ("year", 1, native_time_year, None),
+                    ("month", 1, native_time_month, None),
+                    ("day", 1, native_time_day, None),
+                    ("hour", 1, native_time_hour, None),
+                    ("minute", 1, native_time_minute, None),
+                    ("second", 1, native_time_second, None),
+                    ("weekday", 1, native_time_weekday, None),
+                    (
+                        "difference_seconds",
+                        2,
+                        native_time_difference_seconds,
+                        None,
+                    ),
+                ],
+            ),
         ),
         (
             "process".into(),
-            native_module(&[("run", 2, native_process_run, Some("Process"))]),
+            native_module(
+                "process",
+                &[("run", 2, native_process_run, Some("Process"))],
+            ),
         ),
         (
             "json".into(),
-            native_module(&[
-                ("valid", 1, native_json_valid, None),
-                ("compact", 1, native_json_compact, None),
-                ("pretty", 1, native_json_pretty, None),
-                ("parse", 1, native_json_parse, None),
-                ("encode", 1, native_json_stringify, None),
-                ("decode", 2, native_json_decode, None),
-                ("read_next", 2, native_json_read_next, Some("FileRead")),
-                (
-                    "read_next_as",
-                    3,
-                    native_json_read_next_as,
-                    Some("FileRead"),
-                ),
-            ]),
+            native_module(
+                "json",
+                &[
+                    ("valid", 1, native_json_valid, None),
+                    ("compact", 1, native_json_compact, None),
+                    ("pretty", 1, native_json_pretty, None),
+                    ("parse", 1, native_json_parse, None),
+                    ("encode", 1, native_json_stringify, None),
+                    ("decode", 2, native_json_decode, None),
+                    ("read_next", 2, native_json_read_next, Some("FileRead")),
+                    (
+                        "read_next_as",
+                        3,
+                        native_json_read_next_as,
+                        Some("FileRead"),
+                    ),
+                ],
+            ),
         ),
         (
             "bytes".into(),
-            native_module(&[
-                ("from_string", 1, native_bytes_from_string, None),
-                ("from_values", 1, native_bytes_from_values, None),
-                ("to_string", 1, native_bytes_to_string, None),
-                ("length", 1, native_bytes_length, None),
-                ("get", 2, native_bytes_get, None),
-                ("slice", 3, native_bytes_slice, None),
-            ]),
+            native_module(
+                "bytes",
+                &[
+                    ("from_string", 1, native_bytes_from_string, None),
+                    ("from_values", 1, native_bytes_from_values, None),
+                    ("to_string", 1, native_bytes_to_string, None),
+                    ("length", 1, native_bytes_length, None),
+                    ("get", 2, native_bytes_get, None),
+                    ("slice", 3, native_bytes_slice, None),
+                ],
+            ),
         ),
         (
             "text".into(),
-            native_module(&[
-                ("concat", 2, native_text_concat, None),
-                ("split", 3, native_text_split, None),
-                ("split_last", 2, native_text_split_last, None),
-                ("starts_with", 2, native_text_starts_with, None),
-                ("contains", 2, native_text_contains, None),
-                ("ends_with", 2, native_text_ends_with, None),
-                ("index_of", 2, native_text_index_of, None),
-                ("slice", 3, native_text_slice, None),
-                ("replace", 4, native_text_replace, None),
-                ("trim", 1, native_text_trim, None),
-                ("trim_start", 1, native_text_trim_start, None),
-                ("trim_end", 1, native_text_trim_end, None),
-                ("to_upper", 1, native_text_to_upper, None),
-                ("to_lower", 1, native_text_to_lower, None),
-                ("join", 2, native_text_join, None),
-                ("lines", 1, native_text_lines, None),
-                ("repeat", 2, native_text_repeat, None),
-                ("pad_start", 3, native_text_pad_start, None),
-                ("pad_end", 3, native_text_pad_end, None),
-            ]),
+            native_module(
+                "text",
+                &[
+                    ("concat", 2, native_text_concat, None),
+                    ("split", 3, native_text_split, None),
+                    ("split_last", 2, native_text_split_last, None),
+                    ("starts_with", 2, native_text_starts_with, None),
+                    ("contains", 2, native_text_contains, None),
+                    ("ends_with", 2, native_text_ends_with, None),
+                    ("index_of", 2, native_text_index_of, None),
+                    ("slice", 3, native_text_slice, None),
+                    ("replace", 4, native_text_replace, None),
+                    ("trim", 1, native_text_trim, None),
+                    ("trim_start", 1, native_text_trim_start, None),
+                    ("trim_end", 1, native_text_trim_end, None),
+                    ("to_upper", 1, native_text_to_upper, None),
+                    ("to_lower", 1, native_text_to_lower, None),
+                    ("join", 2, native_text_join, None),
+                    ("lines", 1, native_text_lines, None),
+                    ("repeat", 2, native_text_repeat, None),
+                    ("pad_start", 3, native_text_pad_start, None),
+                    ("pad_end", 3, native_text_pad_end, None),
+                ],
+            ),
         ),
         (
             "int".into(),
-            native_module(&[
-                ("parse", 1, native_int_parse, None),
-                ("format", 1, native_int_format, None),
-            ]),
+            native_module(
+                "int",
+                &[
+                    ("parse", 1, native_int_parse, None),
+                    ("format", 1, native_int_format, None),
+                ],
+            ),
         ),
         (
             "uint".into(),
-            native_module(&[
-                ("parse", 1, native_uint_parse, None),
-                ("format", 1, native_uint_format, None),
-                ("from_int", 1, native_uint_from_int, None),
-                ("to_int", 1, native_uint_to_int, None),
-                ("wrapping_add", 2, native_uint_wrapping_add, None),
-                ("wrapping_sub", 2, native_uint_wrapping_sub, None),
-                ("wrapping_mul", 2, native_uint_wrapping_mul, None),
-                ("min", 0, native_uint_min, None),
-                ("max", 0, native_uint_max, None),
-            ]),
+            native_module(
+                "uint",
+                &[
+                    ("parse", 1, native_uint_parse, None),
+                    ("format", 1, native_uint_format, None),
+                    ("from_int", 1, native_uint_from_int, None),
+                    ("to_int", 1, native_uint_to_int, None),
+                    ("wrapping_add", 2, native_uint_wrapping_add, None),
+                    ("wrapping_sub", 2, native_uint_wrapping_sub, None),
+                    ("wrapping_mul", 2, native_uint_wrapping_mul, None),
+                    ("min", 0, native_uint_min, None),
+                    ("max", 0, native_uint_max, None),
+                ],
+            ),
         ),
         (
             "float".into(),
-            native_module(&[
-                ("parse", 1, native_float_parse, None),
-                ("format", 1, native_float_format, None),
-            ]),
+            native_module(
+                "float",
+                &[
+                    ("parse", 1, native_float_parse, None),
+                    ("format", 1, native_float_format, None),
+                ],
+            ),
         ),
         (
             "binary".into(),
-            native_module(&[
-                ("u16_be", 1, native_binary_u16_be, None),
-                ("u16_le", 1, native_binary_u16_le, None),
-                ("u32_be", 1, native_binary_u32_be, None),
-                ("u32_le", 1, native_binary_u32_le, None),
-                ("u64_be", 1, native_binary_u64_be, None),
-                ("u64_le", 1, native_binary_u64_le, None),
-                ("i16_be", 1, native_binary_i16_be, None),
-                ("i16_le", 1, native_binary_i16_le, None),
-                ("i32_be", 1, native_binary_i32_be, None),
-                ("i32_le", 1, native_binary_i32_le, None),
-                ("int_be", 1, native_binary_int_be, None),
-                ("int_le", 1, native_binary_int_le, None),
-                ("float_be", 1, native_binary_float_be, None),
-                ("float_le", 1, native_binary_float_le, None),
-                ("read_u16_be", 2, native_binary_read_u16_be, None),
-                ("read_u16_le", 2, native_binary_read_u16_le, None),
-                ("read_u32_be", 2, native_binary_read_u32_be, None),
-                ("read_u32_le", 2, native_binary_read_u32_le, None),
-                ("read_u64_be", 2, native_binary_read_u64_be, None),
-                ("read_u64_le", 2, native_binary_read_u64_le, None),
-                ("read_i16_be", 2, native_binary_read_i16_be, None),
-                ("read_i16_le", 2, native_binary_read_i16_le, None),
-                ("read_i32_be", 2, native_binary_read_i32_be, None),
-                ("read_i32_le", 2, native_binary_read_i32_le, None),
-                ("read_int_be", 2, native_binary_read_int_be, None),
-                ("read_int_le", 2, native_binary_read_int_le, None),
-                ("read_float_be", 2, native_binary_read_float_be, None),
-                ("read_float_le", 2, native_binary_read_float_le, None),
-                ("concat", 2, native_binary_concat, None),
-            ]),
+            native_module(
+                "binary",
+                &[
+                    ("u16_be", 1, native_binary_u16_be, None),
+                    ("u16_le", 1, native_binary_u16_le, None),
+                    ("u32_be", 1, native_binary_u32_be, None),
+                    ("u32_le", 1, native_binary_u32_le, None),
+                    ("u64_be", 1, native_binary_u64_be, None),
+                    ("u64_le", 1, native_binary_u64_le, None),
+                    ("i16_be", 1, native_binary_i16_be, None),
+                    ("i16_le", 1, native_binary_i16_le, None),
+                    ("i32_be", 1, native_binary_i32_be, None),
+                    ("i32_le", 1, native_binary_i32_le, None),
+                    ("int_be", 1, native_binary_int_be, None),
+                    ("int_le", 1, native_binary_int_le, None),
+                    ("float_be", 1, native_binary_float_be, None),
+                    ("float_le", 1, native_binary_float_le, None),
+                    ("read_u16_be", 2, native_binary_read_u16_be, None),
+                    ("read_u16_le", 2, native_binary_read_u16_le, None),
+                    ("read_u32_be", 2, native_binary_read_u32_be, None),
+                    ("read_u32_le", 2, native_binary_read_u32_le, None),
+                    ("read_u64_be", 2, native_binary_read_u64_be, None),
+                    ("read_u64_le", 2, native_binary_read_u64_le, None),
+                    ("read_i16_be", 2, native_binary_read_i16_be, None),
+                    ("read_i16_le", 2, native_binary_read_i16_le, None),
+                    ("read_i32_be", 2, native_binary_read_i32_be, None),
+                    ("read_i32_le", 2, native_binary_read_i32_le, None),
+                    ("read_int_be", 2, native_binary_read_int_be, None),
+                    ("read_int_le", 2, native_binary_read_int_le, None),
+                    ("read_float_be", 2, native_binary_read_float_be, None),
+                    ("read_float_le", 2, native_binary_read_float_le, None),
+                    ("concat", 2, native_binary_concat, None),
+                ],
+            ),
         ),
         (
             "crypto".into(),
-            native_module(&[
-                ("sha256", 1, native_crypto_sha256, None),
-                ("hmac_sha256", 2, native_crypto_hmac_sha256, None),
-                (
-                    "hmac_sha256_verify",
-                    3,
-                    native_crypto_verify_hmac_sha256,
-                    None,
-                ),
-                (
-                    "random_bytes",
-                    1,
-                    native_crypto_random_bytes,
-                    Some("Random"),
-                ),
-                ("password_hash", 5, native_crypto_password_hash, None),
-                ("password_verify", 2, native_crypto_password_verify, None),
-                ("key_import", 1, native_crypto_key_import, None),
-                (
-                    "key_generate",
-                    0,
-                    native_crypto_key_generate,
-                    Some("Random"),
-                ),
-                ("encrypt", 4, native_crypto_encrypt, None),
-                ("decrypt", 4, native_crypto_decrypt, None),
-                ("ed25519_public", 1, native_crypto_ed25519_public, None),
-                ("ed25519_sign", 2, native_crypto_ed25519_sign, None),
-                ("ed25519_verify", 3, native_crypto_ed25519_verify, None),
-            ]),
+            native_module(
+                "crypto",
+                &[
+                    ("sha256", 1, native_crypto_sha256, None),
+                    ("hmac_sha256", 2, native_crypto_hmac_sha256, None),
+                    (
+                        "hmac_sha256_verify",
+                        3,
+                        native_crypto_verify_hmac_sha256,
+                        None,
+                    ),
+                    (
+                        "random_bytes",
+                        1,
+                        native_crypto_random_bytes,
+                        Some("Random"),
+                    ),
+                    ("password_hash", 5, native_crypto_password_hash, None),
+                    ("password_verify", 2, native_crypto_password_verify, None),
+                    ("key_import", 1, native_crypto_key_import, None),
+                    (
+                        "key_generate",
+                        0,
+                        native_crypto_key_generate,
+                        Some("Random"),
+                    ),
+                    ("encrypt", 4, native_crypto_encrypt, None),
+                    ("decrypt", 4, native_crypto_decrypt, None),
+                    ("ed25519_public", 1, native_crypto_ed25519_public, None),
+                    ("ed25519_sign", 2, native_crypto_ed25519_sign, None),
+                    ("ed25519_verify", 3, native_crypto_ed25519_verify, None),
+                ],
+            ),
         ),
         (
             "compression".into(),
-            native_module(&[
-                ("gzip", 2, native_compression_gzip, None),
-                ("gzip_decode", 2, native_compression_gunzip, None),
-                ("zlib", 2, native_compression_zlib, None),
-                ("zlib_decode", 2, native_compression_unzlib, None),
-            ]),
+            native_module(
+                "compression",
+                &[
+                    ("gzip", 2, native_compression_gzip, None),
+                    ("gzip_decode", 2, native_compression_gunzip, None),
+                    ("zlib", 2, native_compression_zlib, None),
+                    ("zlib_decode", 2, native_compression_unzlib, None),
+                ],
+            ),
         ),
         (
             "csv".into(),
-            native_module(&[
-                ("decode", 4, native_csv_decode, None),
-                ("encode", 3, native_csv_encode, None),
-            ]),
+            native_module(
+                "csv",
+                &[
+                    ("decode", 4, native_csv_decode, None),
+                    ("encode", 3, native_csv_encode, None),
+                ],
+            ),
         ),
         (
             "encoding".into(),
-            native_module(&[
-                ("hex_encode", 1, native_encoding_hex, None),
-                ("hex_decode", 1, native_encoding_unhex, None),
-                ("base64_encode", 1, native_encoding_base64, None),
-                ("base64_decode", 1, native_encoding_unbase64, None),
-                ("base64url_encode", 1, native_encoding_base64url, None),
-                ("base64url_decode", 1, native_encoding_unbase64url, None),
-            ]),
+            native_module(
+                "encoding",
+                &[
+                    ("hex_encode", 1, native_encoding_hex, None),
+                    ("hex_decode", 1, native_encoding_unhex, None),
+                    ("base64_encode", 1, native_encoding_base64, None),
+                    ("base64_decode", 1, native_encoding_unbase64, None),
+                    ("base64url_encode", 1, native_encoding_base64url, None),
+                    ("base64url_decode", 1, native_encoding_unbase64url, None),
+                ],
+            ),
         ),
         (
             "bigint".into(),
-            native_module(&[
-                ("parse", 1, native_bigint_parse, None),
-                ("from_int", 1, native_bigint_from_int, None),
-                ("format", 1, native_bigint_format, None),
-                ("to_int", 1, native_bigint_to_int, None),
-            ]),
+            native_module(
+                "bigint",
+                &[
+                    ("parse", 1, native_bigint_parse, None),
+                    ("from_int", 1, native_bigint_from_int, None),
+                    ("format", 1, native_bigint_format, None),
+                    ("to_int", 1, native_bigint_to_int, None),
+                ],
+            ),
         ),
         (
             "decimal".into(),
-            native_module(&[
-                ("parse", 1, native_decimal_parse, None),
-                ("from_int", 1, native_decimal_from_int, None),
-                ("format", 1, native_decimal_format, None),
-                ("to_int", 1, native_decimal_to_int, None),
-            ]),
+            native_module(
+                "decimal",
+                &[
+                    ("parse", 1, native_decimal_parse, None),
+                    ("from_int", 1, native_decimal_from_int, None),
+                    ("format", 1, native_decimal_format, None),
+                    ("to_int", 1, native_decimal_to_int, None),
+                ],
+            ),
         ),
         (
             "i8".into(),
             fixed_native_module(
+                "i8",
                 native_i8_from_int,
                 native_i8_parse,
                 native_i8_format,
@@ -6840,6 +6955,7 @@ fn standard_library() -> Value {
         (
             "i16".into(),
             fixed_native_module(
+                "i16",
                 native_i16_from_int,
                 native_i16_parse,
                 native_i16_format,
@@ -6849,6 +6965,7 @@ fn standard_library() -> Value {
         (
             "i32".into(),
             fixed_native_module(
+                "i32",
                 native_i32_from_int,
                 native_i32_parse,
                 native_i32_format,
@@ -6858,6 +6975,7 @@ fn standard_library() -> Value {
         (
             "u8".into(),
             fixed_native_module(
+                "u8",
                 native_u8_from_int,
                 native_u8_parse,
                 native_u8_format,
@@ -6867,6 +6985,7 @@ fn standard_library() -> Value {
         (
             "u16".into(),
             fixed_native_module(
+                "u16",
                 native_u16_from_int,
                 native_u16_parse,
                 native_u16_format,
@@ -6876,6 +6995,7 @@ fn standard_library() -> Value {
         (
             "u32".into(),
             fixed_native_module(
+                "u32",
                 native_u32_from_int,
                 native_u32_parse,
                 native_u32_format,
@@ -6885,6 +7005,7 @@ fn standard_library() -> Value {
         (
             "u64".into(),
             fixed_native_module(
+                "u64",
                 native_u64_from_int,
                 native_u64_parse,
                 native_u64_format,
@@ -6893,16 +7014,20 @@ fn standard_library() -> Value {
         ),
         (
             "u128".into(),
-            native_module(&[
-                ("parse", 1, native_u128_parse, None),
-                ("format", 1, native_u128_format, None),
-                ("from_int", 1, native_u128_from_int, None),
-                ("to_int", 1, native_u128_to_int, None),
-            ]),
+            native_module(
+                "u128",
+                &[
+                    ("parse", 1, native_u128_parse, None),
+                    ("format", 1, native_u128_format, None),
+                    ("from_int", 1, native_u128_from_int, None),
+                    ("to_int", 1, native_u128_to_int, None),
+                ],
+            ),
         ),
         (
             "i128".into(),
             fixed_native_module(
+                "i128",
                 native_i128_from_int,
                 native_i128_parse,
                 native_i128_format,
@@ -6911,341 +7036,405 @@ fn standard_library() -> Value {
         ),
         (
             "map".into(),
-            native_module(&[
-                ("of", 2, native_map_single, None),
-                ("set", 3, native_map_set, None),
-                ("get", 2, native_map_get, None),
-                ("contains", 2, native_map_contains, None),
-                ("remove", 2, native_map_remove, None),
-                ("length", 1, native_map_length, None),
-                ("keys", 1, native_map_keys, None),
-                ("values", 1, native_map_values, None),
-            ]),
+            native_module(
+                "map",
+                &[
+                    ("of", 2, native_map_single, None),
+                    ("set", 3, native_map_set, None),
+                    ("get", 2, native_map_get, None),
+                    ("contains", 2, native_map_contains, None),
+                    ("remove", 2, native_map_remove, None),
+                    ("length", 1, native_map_length, None),
+                    ("keys", 1, native_map_keys, None),
+                    ("values", 1, native_map_values, None),
+                ],
+            ),
         ),
         (
             "set".into(),
-            native_module(&[
-                ("of", 1, native_set_single, None),
-                ("add", 2, native_set_add, None),
-                ("contains", 2, native_set_contains, None),
-                ("remove", 2, native_set_remove, None),
-                ("length", 1, native_set_length, None),
-                ("values", 1, native_set_values, None),
-            ]),
+            native_module(
+                "set",
+                &[
+                    ("of", 1, native_set_single, None),
+                    ("add", 2, native_set_add, None),
+                    ("contains", 2, native_set_contains, None),
+                    ("remove", 2, native_set_remove, None),
+                    ("length", 1, native_set_length, None),
+                    ("values", 1, native_set_values, None),
+                ],
+            ),
         ),
         (
             "list".into(),
-            native_module(&[
-                ("batch", 2, native_intrinsic, None),
-                ("transform", 2, native_intrinsic, None),
-                ("select", 2, native_intrinsic, None),
-                ("fold", 3, native_intrinsic, None),
-                ("any", 2, native_intrinsic, None),
-                ("every", 2, native_intrinsic, None),
-            ]),
+            native_module(
+                "list",
+                &[
+                    ("batch", 2, native_intrinsic, None),
+                    ("transform", 2, native_intrinsic, None),
+                    ("select", 2, native_intrinsic, None),
+                    ("fold", 3, native_intrinsic, None),
+                    ("any", 2, native_intrinsic, None),
+                    ("every", 2, native_intrinsic, None),
+                ],
+            ),
         ),
         (
             "iter".into(),
-            named_native_module(&[
-                ("from", "iter.from", 1, native_iterator_from, None),
-                ("range", "iter.range", 3, native_iterator_range, None),
-                (
-                    "lines",
-                    "iter.lines",
-                    2,
-                    native_iterator_lines,
-                    Some("FileRead"),
-                ),
-                (
-                    "tcp_lines",
-                    "iter.tcp_lines",
-                    3,
-                    native_iterator_tcp_lines,
-                    Some("Network"),
-                ),
-                ("next", "iter.next", 1, native_iterator_next, None),
-                ("take", "iter.take", 2, native_iterator_take, None),
-                ("skip", "iter.skip", 2, native_iterator_skip, None),
-                ("transform", "iter.transform", 2, native_intrinsic, None),
-                ("select", "iter.select", 2, native_intrinsic, None),
-                ("collect", "iter.collect", 1, native_iterator_collect, None),
-                ("chain", "iter.chain", 2, native_iterator_chain, None),
-                ("count", "iter.count", 1, native_iterator_count, None),
-                ("fold", "iter.fold", 3, native_intrinsic, None),
-                ("any", "iter.any", 2, native_intrinsic, None),
-                ("every", "iter.every", 2, native_intrinsic, None),
-                ("find", "iter.find", 2, native_intrinsic, None),
-            ]),
+            named_native_module(
+                "iter",
+                &[
+                    ("from", "iter.from", 1, native_iterator_from, None),
+                    ("range", "iter.range", 3, native_iterator_range, None),
+                    (
+                        "lines",
+                        "iter.lines",
+                        2,
+                        native_iterator_lines,
+                        Some("FileRead"),
+                    ),
+                    (
+                        "tcp_lines",
+                        "iter.tcp_lines",
+                        3,
+                        native_iterator_tcp_lines,
+                        Some("Network"),
+                    ),
+                    ("next", "iter.next", 1, native_iterator_next, None),
+                    ("take", "iter.take", 2, native_iterator_take, None),
+                    ("skip", "iter.skip", 2, native_iterator_skip, None),
+                    ("transform", "iter.transform", 2, native_intrinsic, None),
+                    ("select", "iter.select", 2, native_intrinsic, None),
+                    ("collect", "iter.collect", 1, native_iterator_collect, None),
+                    ("chain", "iter.chain", 2, native_iterator_chain, None),
+                    ("count", "iter.count", 1, native_iterator_count, None),
+                    ("fold", "iter.fold", 3, native_intrinsic, None),
+                    ("any", "iter.any", 2, native_intrinsic, None),
+                    ("every", "iter.every", 2, native_intrinsic, None),
+                    ("find", "iter.find", 2, native_intrinsic, None),
+                ],
+            ),
         ),
         (
             "net".into(),
-            native_module(&[
-                ("listen", 2, native_net_listen, Some("Network")),
-                ("accept", 2, native_net_accept, Some("Network")),
-                ("connect", 3, native_net_connect, Some("Network")),
-                ("tls_connect", 4, native_net_tls_connect, Some("Network")),
-                ("read", 2, native_net_read, Some("Network")),
-                (
-                    "read_exact_bytes",
-                    3,
-                    native_net_read_exact_bytes,
-                    Some("Network"),
-                ),
-                ("read_line", 3, native_net_read_line, Some("Network")),
-                ("write", 2, native_net_write, Some("Network")),
-                ("write_some", 4, native_net_write_some, Some("Network")),
-                ("wait_ready", 3, native_net_ready, Some("Network")),
-                ("wait_ready_any", 3, native_net_ready_any, Some("Network")),
-                ("read_ready", 3, native_net_read_ready, Some("Network")),
-                ("write_ready", 4, native_net_write_ready, Some("Network")),
-                (
-                    "tls_read_exact_bytes",
-                    3,
-                    native_net_tls_read_exact_bytes,
-                    Some("Network"),
-                ),
-                (
-                    "tls_read_line",
-                    3,
-                    native_net_tls_read_line,
-                    Some("Network"),
-                ),
-                (
-                    "tls_write_ready",
-                    4,
-                    native_net_tls_write_ready,
-                    Some("Network"),
-                ),
-                ("tls_close", 1, native_net_tls_close, Some("Network")),
-                ("close", 1, native_net_close, Some("Network")),
-            ]),
+            native_module(
+                "net",
+                &[
+                    ("listen", 2, native_net_listen, Some("Network")),
+                    ("accept", 2, native_net_accept, Some("Network")),
+                    ("connect", 3, native_net_connect, Some("Network")),
+                    ("tls_connect", 4, native_net_tls_connect, Some("Network")),
+                    ("read", 2, native_net_read, Some("Network")),
+                    (
+                        "read_exact_bytes",
+                        3,
+                        native_net_read_exact_bytes,
+                        Some("Network"),
+                    ),
+                    ("read_line", 3, native_net_read_line, Some("Network")),
+                    ("write", 2, native_net_write, Some("Network")),
+                    ("write_some", 4, native_net_write_some, Some("Network")),
+                    ("wait_ready", 3, native_net_ready, Some("Network")),
+                    ("wait_ready_any", 3, native_net_ready_any, Some("Network")),
+                    ("read_ready", 3, native_net_read_ready, Some("Network")),
+                    ("write_ready", 4, native_net_write_ready, Some("Network")),
+                    (
+                        "tls_read_exact_bytes",
+                        3,
+                        native_net_tls_read_exact_bytes,
+                        Some("Network"),
+                    ),
+                    (
+                        "tls_read_line",
+                        3,
+                        native_net_tls_read_line,
+                        Some("Network"),
+                    ),
+                    (
+                        "tls_write_ready",
+                        4,
+                        native_net_tls_write_ready,
+                        Some("Network"),
+                    ),
+                    ("tls_close", 1, native_net_tls_close, Some("Network")),
+                    ("close", 1, native_net_close, Some("Network")),
+                ],
+            ),
         ),
         (
             "web".into(),
-            native_module(&[
-                ("get", 2, native_http_get, Some("Network")),
-                ("headers", 0, native_web_headers, None),
-                ("encode_component", 1, native_web_encode_component, None),
-                ("decode_component", 1, native_web_decode_component, None),
-                ("request", 6, native_web_request, Some("Network")),
-                ("read_request", 2, native_web_read_request, Some("Network")),
-                ("respond", 4, native_web_respond, Some("Network")),
-                (
-                    "websocket_connect",
-                    4,
-                    native_websocket_connect,
-                    Some("Network"),
-                ),
-                (
-                    "websocket_secure_connect",
-                    5,
-                    native_websocket_secure_connect,
-                    Some("Network"),
-                ),
-                (
-                    "websocket_secure_listen",
-                    5,
-                    native_websocket_secure_listen,
-                    Some("Network"),
-                ),
-                (
-                    "websocket_secure_accept",
-                    2,
-                    native_websocket_secure_accept,
-                    Some("Network"),
-                ),
-                ("tls_close", 1, native_tls_listener_close, Some("Network")),
-                ("tls_options", 0, native_tls_options, None),
-                (
-                    "websocket_accept",
-                    2,
-                    native_websocket_accept,
-                    Some("Network"),
-                ),
-                ("websocket_send", 2, native_websocket_send, Some("Network")),
-                (
-                    "websocket_receive",
-                    2,
-                    native_websocket_receive,
-                    Some("Network"),
-                ),
-                (
-                    "websocket_close",
-                    1,
-                    native_websocket_close,
-                    Some("Network"),
-                ),
-            ]),
+            native_module(
+                "web",
+                &[
+                    ("get", 2, native_http_get, Some("Network")),
+                    ("headers", 0, native_web_headers, None),
+                    ("encode_component", 1, native_web_encode_component, None),
+                    ("decode_component", 1, native_web_decode_component, None),
+                    ("request", 6, native_web_request, Some("Network")),
+                    ("read_request", 2, native_web_read_request, Some("Network")),
+                    ("respond", 4, native_web_respond, Some("Network")),
+                    (
+                        "websocket_connect",
+                        4,
+                        native_websocket_connect,
+                        Some("Network"),
+                    ),
+                    (
+                        "websocket_secure_connect",
+                        5,
+                        native_websocket_secure_connect,
+                        Some("Network"),
+                    ),
+                    (
+                        "websocket_secure_listen",
+                        5,
+                        native_websocket_secure_listen,
+                        Some("Network"),
+                    ),
+                    (
+                        "websocket_secure_accept",
+                        2,
+                        native_websocket_secure_accept,
+                        Some("Network"),
+                    ),
+                    ("tls_close", 1, native_tls_listener_close, Some("Network")),
+                    ("tls_options", 0, native_tls_options, None),
+                    (
+                        "websocket_accept",
+                        2,
+                        native_websocket_accept,
+                        Some("Network"),
+                    ),
+                    ("websocket_send", 2, native_websocket_send, Some("Network")),
+                    (
+                        "websocket_receive",
+                        2,
+                        native_websocket_receive,
+                        Some("Network"),
+                    ),
+                    (
+                        "websocket_close",
+                        1,
+                        native_websocket_close,
+                        Some("Network"),
+                    ),
+                ],
+            ),
         ),
         (
             "tasks".into(),
-            native_module(&[
-                ("spawn", 1, native_intrinsic, Some("Task")),
-                ("await", 1, native_intrinsic, Some("Task")),
-                ("await_for", 2, native_intrinsic, Some("Task")),
-                ("cancel", 1, native_intrinsic, Some("Task")),
-                ("all", 1, native_intrinsic, Some("Task")),
-                ("race", 1, native_intrinsic, Some("Task")),
-            ]),
+            native_module(
+                "tasks",
+                &[
+                    ("spawn", 1, native_intrinsic, Some("Task")),
+                    ("await", 1, native_intrinsic, Some("Task")),
+                    ("await_for", 2, native_intrinsic, Some("Task")),
+                    ("cancel", 1, native_intrinsic, Some("Task")),
+                    ("all", 1, native_intrinsic, Some("Task")),
+                    ("race", 1, native_intrinsic, Some("Task")),
+                ],
+            ),
         ),
         (
             "channels".into(),
-            native_module(&[
-                ("create", 1, native_intrinsic, Some("Channel")),
-                ("send", 3, native_intrinsic, Some("Channel")),
-                ("receive", 2, native_intrinsic, Some("Channel")),
-            ]),
+            native_module(
+                "channels",
+                &[
+                    ("create", 1, native_intrinsic, Some("Channel")),
+                    ("send", 3, native_intrinsic, Some("Channel")),
+                    ("receive", 2, native_intrinsic, Some("Channel")),
+                ],
+            ),
         ),
         (
             "locks".into(),
-            named_native_module(&[
-                ("create", "locks.create", 1, native_lock_create, None),
-                (
-                    "acquire",
-                    "locks.acquire",
-                    2,
-                    native_lock_acquire,
-                    Some("Task"),
-                ),
-                ("read", "locks.read", 1, native_lock_read, Some("Task")),
-                ("write", "locks.write", 2, native_lock_write, Some("Task")),
-                ("close", "locks.close", 1, native_lock_close, Some("Task")),
-            ]),
+            named_native_module(
+                "locks",
+                &[
+                    ("create", "locks.create", 1, native_lock_create, None),
+                    (
+                        "acquire",
+                        "locks.acquire",
+                        2,
+                        native_lock_acquire,
+                        Some("Task"),
+                    ),
+                    ("read", "locks.read", 1, native_lock_read, Some("Task")),
+                    ("write", "locks.write", 2, native_lock_write, Some("Task")),
+                    ("close", "locks.close", 1, native_lock_close, Some("Task")),
+                ],
+            ),
         ),
         (
             "atomics".into(),
-            named_native_module(&[
-                ("create", "atomics.create", 1, native_atomic_create, None),
-                ("load", "atomics.load", 1, native_atomic_load, None),
-                ("store", "atomics.store", 2, native_atomic_store, None),
-                ("swap", "atomics.swap", 2, native_atomic_swap, None),
-                ("add", "atomics.add", 2, native_atomic_add, None),
-                (
-                    "compare_exchange",
-                    "atomics.compare_exchange",
-                    3,
-                    native_atomic_compare_exchange,
-                    None,
-                ),
-            ]),
+            named_native_module(
+                "atomics",
+                &[
+                    ("create", "atomics.create", 1, native_atomic_create, None),
+                    ("load", "atomics.load", 1, native_atomic_load, None),
+                    ("store", "atomics.store", 2, native_atomic_store, None),
+                    ("swap", "atomics.swap", 2, native_atomic_swap, None),
+                    ("add", "atomics.add", 2, native_atomic_add, None),
+                    (
+                        "compare_exchange",
+                        "atomics.compare_exchange",
+                        3,
+                        native_atomic_compare_exchange,
+                        None,
+                    ),
+                ],
+            ),
         ),
         (
             "transactions".into(),
-            named_native_module(&[
-                (
-                    "create",
-                    "transactions.create",
-                    1,
-                    native_transaction_begin,
-                    None,
-                ),
-                ("get", "transactions.get", 2, native_transaction_get, None),
-                ("set", "transactions.set", 3, native_intrinsic, None),
-                (
-                    "remove",
-                    "transactions.remove",
-                    2,
-                    native_transaction_remove,
-                    None,
-                ),
-                (
-                    "commit",
-                    "transactions.commit",
-                    1,
-                    native_transaction_commit,
-                    None,
-                ),
-                (
-                    "rollback",
-                    "transactions.rollback",
-                    1,
-                    native_transaction_rollback,
-                    None,
-                ),
-                (
-                    "close",
-                    "transactions.close",
-                    1,
-                    native_transaction_close,
-                    None,
-                ),
-            ]),
+            named_native_module(
+                "transactions",
+                &[
+                    (
+                        "create",
+                        "transactions.create",
+                        1,
+                        native_transaction_begin,
+                        None,
+                    ),
+                    ("get", "transactions.get", 2, native_transaction_get, None),
+                    ("set", "transactions.set", 3, native_intrinsic, None),
+                    (
+                        "remove",
+                        "transactions.remove",
+                        2,
+                        native_transaction_remove,
+                        None,
+                    ),
+                    (
+                        "commit",
+                        "transactions.commit",
+                        1,
+                        native_transaction_commit,
+                        None,
+                    ),
+                    (
+                        "rollback",
+                        "transactions.rollback",
+                        1,
+                        native_transaction_rollback,
+                        None,
+                    ),
+                    (
+                        "close",
+                        "transactions.close",
+                        1,
+                        native_transaction_close,
+                        None,
+                    ),
+                ],
+            ),
         ),
         (
             "log".into(),
-            native_module(&[
-                ("info", 1, native_log_info, Some("Log")),
-                ("warn", 1, native_log_warn, Some("Log")),
-                ("error", 1, native_log_error, Some("Log")),
-                ("event", 3, native_log_event, Some("Log")),
-            ]),
+            native_module(
+                "log",
+                &[
+                    ("info", 1, native_log_info, Some("Log")),
+                    ("warn", 1, native_log_warn, Some("Log")),
+                    ("error", 1, native_log_error, Some("Log")),
+                    ("event", 3, native_log_event, Some("Log")),
+                ],
+            ),
         ),
         (
             "host".into(),
-            named_native_module(&[
-                ("invoke", "invoke", 2, native_intrinsic, Some("Native")),
-                (
-                    "invoke_async",
-                    "invoke_async",
-                    2,
-                    native_intrinsic,
-                    Some("Native"),
-                ),
-                ("open", "open_handle", 2, native_intrinsic, Some("Native")),
-                ("call", "call_handle", 3, native_intrinsic, Some("Native")),
-                ("close", "close_handle", 1, native_intrinsic, Some("Native")),
-            ]),
+            named_native_module(
+                "host",
+                &[
+                    ("invoke", "invoke", 2, native_intrinsic, Some("Native")),
+                    (
+                        "invoke_async",
+                        "invoke_async",
+                        2,
+                        native_intrinsic,
+                        Some("Native"),
+                    ),
+                    ("open", "open_handle", 2, native_intrinsic, Some("Native")),
+                    ("call", "call_handle", 3, native_intrinsic, Some("Native")),
+                    ("close", "close_handle", 1, native_intrinsic, Some("Native")),
+                ],
+            ),
         ),
         (
             "native".into(),
-            native_module(&[
-                ("open", 1, native_library_open, Some("Native")),
-                ("call_int", 3, native_library_call_int, Some("Native")),
-                ("call_float", 3, native_library_call_float, Some("Native")),
-                ("call_buffer", 4, native_library_call_buffer, Some("Native")),
-                ("close", 1, native_library_close, Some("Native")),
-            ]),
+            native_module(
+                "native",
+                &[
+                    ("open", 1, native_library_open, Some("Native")),
+                    ("call_int", 3, native_library_call_int, Some("Native")),
+                    ("call_float", 3, native_library_call_float, Some("Native")),
+                    ("call_buffer", 4, native_library_call_buffer, Some("Native")),
+                    ("close", 1, native_library_close, Some("Native")),
+                ],
+            ),
         ),
         (
             "reflect".into(),
-            native_module(&[
-                ("kind", 1, native_reflect_kind, None),
-                ("fields", 1, native_reflect_fields, None),
-                ("schema", 1, native_reflect_schema, None),
-            ]),
+            native_module(
+                "reflect",
+                &[
+                    ("kind", 1, native_reflect_kind, None),
+                    ("fields", 1, native_reflect_fields, None),
+                    ("schema", 1, native_reflect_schema, None),
+                ],
+            ),
         ),
         (
             "plans".into(),
-            native_module(&[
-                ("encode", 1, native_plans_encode, None),
-                ("decode", 2, native_plans_decode, None),
-            ]),
+            native_module(
+                "plans",
+                &[
+                    ("encode", 1, native_plans_encode, None),
+                    ("decode", 2, native_plans_decode, None),
+                ],
+            ),
         ),
         (
             "gpu".into(),
-            native_module(&[
-                ("available", 0, native_gpu_available, Some("Gpu")),
-                ("open", 1, native_gpu_open, Some("Gpu")),
-            ]),
+            native_module(
+                "gpu",
+                &[
+                    ("available", 0, native_gpu_available, Some("Gpu")),
+                    ("open", 1, native_gpu_open, Some("Gpu")),
+                ],
+            ),
+        ),
+        (
+            "problems".into(),
+            named_native_module(
+                "problems",
+                &[("create", "problems.create", 2, native_problems_create, None)],
+            ),
         ),
         (
             "source".into(),
-            native_module(&[
-                ("shape", 3, native_source_shape, None),
-                ("choice", 2, native_source_choice, None),
-                ("binding", 2, native_source_binding, None),
-                ("function", 4, native_source_function, None),
-                ("give", 1, native_source_give, None),
-                ("call", 1, native_source_call, None),
-                ("when", 3, native_source_when, None),
-                ("each", 3, native_source_each, None),
-            ]),
+            native_module(
+                "source",
+                &[
+                    ("shape", 3, native_source_shape, None),
+                    ("choice", 2, native_source_choice, None),
+                    ("binding", 2, native_source_binding, None),
+                    ("function", 4, native_source_function, None),
+                    ("give", 1, native_source_give, None),
+                    ("call", 1, native_source_call, None),
+                    ("when", 3, native_source_when, None),
+                    ("each", 3, native_source_each, None),
+                ],
+            ),
         ),
     ]);
     Value::Module(Arc::new(modules))
 }
 
-fn native_module(functions: &[(&'static str, usize, NativeCall, Option<&'static str>)]) -> Value {
+fn native_module(
+    kind: &'static str,
+    functions: &[(&'static str, usize, NativeCall, Option<&'static str>)],
+) -> Value {
     Value::Module(Arc::new(
         functions
             .iter()
@@ -7257,6 +7446,7 @@ fn native_module(functions: &[(&'static str, usize, NativeCall, Option<&'static 
                         arity: *arity,
                         call: *call,
                         capability: *capability,
+                        problem_kind: Some(kind),
                     })),
                 )
             })
@@ -7265,17 +7455,21 @@ fn native_module(functions: &[(&'static str, usize, NativeCall, Option<&'static 
 }
 
 fn fixed_native_module(
+    kind: &'static str,
     from_int: NativeCall,
     parse: NativeCall,
     format: NativeCall,
     to_int: NativeCall,
 ) -> Value {
-    native_module(&[
-        ("from_int", 1, from_int, None),
-        ("parse", 1, parse, None),
-        ("format", 1, format, None),
-        ("to_int", 1, to_int, None),
-    ])
+    native_module(
+        kind,
+        &[
+            ("from_int", 1, from_int, None),
+            ("parse", 1, parse, None),
+            ("format", 1, format, None),
+            ("to_int", 1, to_int, None),
+        ],
+    )
 }
 
 type NamedNative = (
@@ -7286,7 +7480,7 @@ type NamedNative = (
     Option<&'static str>,
 );
 
-fn named_native_module(functions: &[NamedNative]) -> Value {
+fn named_native_module(kind: &'static str, functions: &[NamedNative]) -> Value {
     Value::Module(Arc::new(
         functions
             .iter()
@@ -7298,6 +7492,7 @@ fn named_native_module(functions: &[NamedNative]) -> Value {
                         arity: *arity,
                         call: *call,
                         capability: *capability,
+                        problem_kind: Some(kind),
                     })),
                 )
             })
@@ -11847,6 +12042,19 @@ fn native_source_each(arguments: Vec<Value>, span: Span) -> Result<Value, NivErr
             span,
         },
     )))))
+}
+
+fn native_problems_create(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let kind = expect_string(&arguments[0], "std.problems.create", span)?;
+    let message = expect_string(&arguments[1], "std.problems.create", span)?;
+    if kind.is_empty() || kind.len() > 64 {
+        return Err(NivError::new(
+            "a problem kind uses 1 through 64 bytes",
+            span.line,
+            span.column,
+        ));
+    }
+    Ok(problem_value(kind, message.to_string()))
 }
 
 fn native_gpu_available(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
