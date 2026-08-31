@@ -113,7 +113,7 @@ fn main() {
     ));
     fs::write(&file, "bounded intent proof payload").unwrap();
     let path = file.to_string_lossy().replace('\\', "\\\\");
-    let file_prefix = "define work takes { path is String } gives Int or String needs FileRead { change count set 0\nrepeat while count < 64 {";
+    let file_prefix = "define work takes { path is String } gives Int or Problem needs FileRead { change count set 0\nrepeat while count < 64 {";
     let file_suffix =
         " or give\nchange count to count + 1 }\ngive ok(count) }\nwork with { path set \"";
     let direct_file = format!(
@@ -130,26 +130,27 @@ fn main() {
     let http_runs = HTTP_RUNS;
     let (direct_url, direct_server) = local_http_server(http_runs);
     let direct_http = format!(
-        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set std.web.get with {{ url set \"{direct_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nwork with {{}}"
+        "define work takes {{}} gives Int or Problem needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set std.web.get with {{ url set \"{direct_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nwork with {{}}"
     );
     let (intent_url, intent_server) = local_http_server(http_runs);
     let intent_http = format!(
-        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set perform std.web.get with {{ url set \"{intent_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nperform work with {{}}"
+        "define work takes {{}} gives Int or Problem needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set perform std.web.get with {{ url set \"{intent_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nperform work with {{}}"
     );
     let http_ratio = compare("http", &direct_http, &intent_http);
     direct_server.join().unwrap();
     intent_server.join().unwrap();
 
     let database_body = "keep original set std.map.of with { key set \"count\" value set 1 }\nchange count set 0\nrepeat while count < 512 { keep transaction set std.transactions.create with { map set original }\nkeep changed set std.transactions.set with { transaction set transaction key set \"count\" value set count } or give\nkeep committed set std.transactions.commit with { transaction set transaction } or give\nchange count to count + 1 }\ngive ok(count)";
-    let direct_database =
-        format!("define work takes {{}} gives Int or String {{ {database_body} }}\nwork with {{}}");
+    let direct_database = format!(
+        "define work takes {{}} gives Int or Problem {{ {database_body} }}\nwork with {{}}"
+    );
     let intent_database = format!(
-        "shape Query holds {{ name is String }}\nprepare query as Query with {{ name set \"counter\" }}\ndefine work takes {{ query is Query }} gives Int or String {{ {database_body} }}\nwork with {{ query set perform query }}"
+        "shape Query holds {{ name is String }}\nprepare query as Query with {{ name set \"counter\" }}\ndefine work takes {{ query is Query }} gives Int or Problem {{ {database_body} }}\nwork with {{ query set perform query }}"
     );
     let database_ratio = compare("database", &direct_database, &intent_database);
 
-    let direct_concurrency = "define work takes {} gives Int or String needs Channel { keep channel set std.channels.create with { capacity set 1 }\nchange count set 0\nrepeat while count < 256 { keep sent set std.channels.send with { channel set channel value set count timeout set 1.0 } or give\nkeep received set std.channels.receive with { channel set channel timeout set 1.0 } or give\nchange count to count + 1 }\ngive ok(count) }\nwork with {}";
-    let intent_concurrency = "define work takes {} gives Int or String needs Channel { keep channel set perform std.channels.create with { capacity set 1 }\nchange count set 0\nrepeat while count < 256 { keep sent set perform std.channels.send with { channel set channel value set count timeout set 1.0 } or give\nkeep received set perform std.channels.receive with { channel set channel timeout set 1.0 } or give\nchange count to count + 1 }\ngive ok(count) }\nperform work with {}";
+    let direct_concurrency = "define work takes {} gives Int or Problem needs Channel { keep channel set std.channels.create with { capacity set 1 }\nchange count set 0\nrepeat while count < 256 { keep sent set std.channels.send with { channel set channel value set count timeout set 1.0 } or give\nkeep received set std.channels.receive with { channel set channel timeout set 1.0 } or give\nchange count to count + 1 }\ngive ok(count) }\nwork with {}";
+    let intent_concurrency = "define work takes {} gives Int or Problem needs Channel { keep channel set perform std.channels.create with { capacity set 1 }\nchange count set 0\nrepeat while count < 256 { keep sent set perform std.channels.send with { channel set channel value set count timeout set 1.0 } or give\nkeep received set perform std.channels.receive with { channel set channel timeout set 1.0 } or give\nchange count to count + 1 }\ngive ok(count) }\nperform work with {}";
     let concurrency_ratio = compare("concurrency", direct_concurrency, intent_concurrency);
 
     if std::env::var_os("NIVREN_INTENT_BENCH_GATE").is_some() {
