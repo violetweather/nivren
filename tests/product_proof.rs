@@ -102,6 +102,38 @@ fn desktop_host_is_typed_scoped_and_equivalent_in_vm_and_native_control() {
 }
 
 #[test]
+fn real_windows_webview_host_round_trips_the_bridge_or_reports_the_matrix() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/desktop_host.niv");
+    let program = nivren::modules::load(&path).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    for native in [false, true] {
+        let host = nivren_desktop_host::DesktopHost::new();
+        let mut interpreter = Interpreter::new()
+            .with_capabilities(["Native".to_string()])
+            .with_host_callback(host.callback());
+        let result = if native {
+            interpreter.run_native(&chunk)
+        } else {
+            interpreter.run_bytecode(&chunk)
+        };
+        let rendered = format!("{:?}", result.unwrap());
+        if cfg!(windows) {
+            // The shell page answered through real WebView2 page script.
+            assert!(
+                rendered.contains(r#""handled":true"#) && rendered.contains("request-1"),
+                "expected a live bridge response, got: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains("available on Windows first"),
+                "expected the platform matrix report, got: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
 fn real_webgpu_host_computes_or_reports_the_unavailable_matrix() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/gpu_host.niv");
     let program = nivren::modules::load(&path).unwrap();

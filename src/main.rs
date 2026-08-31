@@ -655,27 +655,46 @@ fn run_native_project(path: &str) -> ExitCode {
     }
 }
 
-/// Routes one host request between the bundled hosts: GPU opens by kind,
-/// and later calls and closes by the handle's backend prefix.
-fn host_request_targets_gpu(operation: &str, request: &str) -> bool {
-    if operation == "nivren.handle.open:gpu" {
-        return true;
-    }
-    if operation == "nivren.handle.close" {
-        return request.starts_with("gpu-");
+/// Which bundled host serves one request: opens route by kind, later
+/// calls and closes route by the handle's backend prefix.
+#[derive(PartialEq)]
+enum BundledHost {
+    Database,
+    Gpu,
+    Desktop,
+}
+
+fn bundled_host_for(operation: &str, request: &str) -> BundledHost {
+    match operation {
+        "nivren.handle.open:gpu" => return BundledHost::Gpu,
+        "nivren.handle.open:desktop" => return BundledHost::Desktop,
+        "nivren.handle.close" => return bundled_host_for_handle(request),
+        _ => {}
     }
     if operation.starts_with("nivren.handle.call:") {
-        return serde_json::from_str::<serde_json::Value>(request)
+        let handle = serde_json::from_str::<serde_json::Value>(request)
             .ok()
             .and_then(|envelope| {
                 envelope
                     .get("handle")
                     .and_then(serde_json::Value::as_str)
-                    .map(|handle| handle.starts_with("gpu-"))
-            })
-            .unwrap_or(false);
+                    .map(str::to_owned)
+            });
+        if let Some(handle) = handle {
+            return bundled_host_for_handle(&handle);
+        }
     }
-    false
+    BundledHost::Database
+}
+
+fn bundled_host_for_handle(handle: &str) -> BundledHost {
+    if handle.starts_with("gpu-") {
+        BundledHost::Gpu
+    } else if handle.starts_with("desktop-") {
+        BundledHost::Desktop
+    } else {
+        BundledHost::Database
+    }
 }
 
 fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
@@ -688,11 +707,12 @@ fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
             Ok(database) => {
                 let database = database.callback();
                 let gpu = nivren_gpu_host::GpuHost::new().callback();
+                let desktop = nivren_desktop_host::DesktopHost::new().callback();
                 interpreter.with_host_callback(move |operation, request| {
-                    if host_request_targets_gpu(operation, request) {
-                        gpu(operation, request)
-                    } else {
-                        database(operation, request)
+                    match bundled_host_for(operation, request) {
+                        BundledHost::Gpu => gpu(operation, request),
+                        BundledHost::Desktop => desktop(operation, request),
+                        BundledHost::Database => database(operation, request),
                     }
                 })
             }

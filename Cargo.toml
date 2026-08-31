@@ -10,7 +10,7 @@ repository = "https://github.com/violetweather/nivren"
 [features]
 default = ["host-runtime"]
 portable-runtime = []
-host-runtime = ["dep:getrandom", "dep:mio", "dep:nivren-database-host", "dep:nivren-gpu-host", "dep:nivren-jit", "dep:nivren-native", "dep:ring", "dep:rustls", "dep:webpki-roots"]
+host-runtime = ["dep:getrandom", "dep:mio", "dep:nivren-database-host", "dep:nivren-desktop-host", "dep:nivren-gpu-host", "dep:nivren-jit", "dep:nivren-native", "dep:ring", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"], optional = true }
@@ -27,6 +27,7 @@ webpki-roots = { version = "1.0.9", optional = true }
 nivren-jit = { path = "crates/nivren-jit", optional = true }
 nivren-native = { path = "crates/nivren-native", optional = true }
 nivren-database-host = { path = "crates/nivren-database-host", optional = true }
+nivren-desktop-host = { path = "crates/nivren-desktop-host", optional = true }
 nivren-gpu-host = { path = "crates/nivren-gpu-host", optional = true }
 ed25519-dalek = "=3.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -38,6 +39,7 @@ mio = { version = "1.2.2", features = ["os-poll", "net"], optional = true }
 mimalloc = "0.1.52"
 
 [dev-dependencies]
+nivren-desktop-host = { path = "crates/nivren-desktop-host" }
 nivren-gpu-host = { path = "crates/nivren-gpu-host" }
 proptest = "1.11.0"
 rcgen = "=0.13.2"
@@ -78,6 +80,6 @@ unsafe_code = "forbid"
 all = "warn"
 
 [workspace]
-members = ["crates/nivren-database-host", "crates/nivren-ffi", "crates/nivren-gpu-host", "crates/nivren-jit", "crates/nivren-native", "crates/nivren-wasm"]
+members = ["crates/nivren-database-host", "crates/nivren-desktop-host", "crates/nivren-ffi", "crates/nivren-gpu-host", "crates/nivren-jit", "crates/nivren-native", "crates/nivren-wasm"]
 exclude = ["fuzz"]
 resolver = "3"
