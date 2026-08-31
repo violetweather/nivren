@@ -11,7 +11,7 @@ needs Native within "desktop"
         start_url set "app://index.html"
     }
     keep opened set perform main.open_host with { window set window } or give
-    using host = opened {
+    using host set opened {
         keep message set main.BridgeMessage with {
             identifier set "request-1"
             command set "preferences.load"

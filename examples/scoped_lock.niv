@@ -9,7 +9,7 @@ needs Task
     needs Task
     {
         keep acquired set std.locks.acquire with { lock set counter timeout set 2.0 } or give
-        using guard = acquired {
+        using guard set acquired {
             keep current set std.locks.read with { guard set guard } or give
             keep written set std.locks.write with {
                 guard set guard
@@ -21,7 +21,7 @@ needs Task
 
     keep completed set together [start increment, start increment] or give
     keep acquired set std.locks.acquire with { lock set counter timeout set 2.0 } or give
-    using guard = acquired {
+    using guard set acquired {
         give std.locks.read with { guard set guard }
     }
 }

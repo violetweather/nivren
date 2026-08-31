@@ -51,7 +51,7 @@ fn arithmetic_and_precedence() {
 #[test]
 fn edition_four_intent_grammar_checks_and_runs_in_both_engines() {
     let source = r#"
-type UserId from Int
+type UserId is Int
 
 shape User holds {
     id is UserId
@@ -148,7 +148,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
     assert!(errors[0].message.contains("canonical order"));
 
     for (source, expected) in [
-        ("type UserId U64", "from"),
+        ("type UserId U64", "is"),
         ("shape User name is String }", "holds"),
         ("choice State holds { case Failed carries }", "type"),
         ("prepare request Request with {}", "as"),
@@ -636,7 +636,7 @@ define count() gives Result<Int, String> needs Task {
     keep counter = std.locks.create(0)
     define increment() gives Result<Null, String> needs Task {
         keep acquired = std.locks.acquire(counter, 2.0) or give
-        using guard = acquired {
+        using guard set acquired {
             keep current = std.locks.read(guard) or give
             keep written = std.locks.write(guard, current + 1) or give
             give ok(none)
@@ -644,7 +644,7 @@ define count() gives Result<Int, String> needs Task {
     }
     keep completed = together [start increment, start increment] or give
     keep acquired = std.locks.acquire(counter, 2.0) or give
-    using guard = acquired {
+    using guard set acquired {
         give std.locks.read(guard)
     }
 }
@@ -753,7 +753,7 @@ choose update() { Ok(value) => value, Err(problem) => 0 }
 
     let scoped = r#"
 define abandon(transaction: Transaction<String, Int>) gives Result<Null, String> {
-    using active = transaction {
+    using active set transaction {
         keep changed = std.transactions.set(active, "count", 7) or give
         give err("abandoned")
     }
@@ -776,7 +776,7 @@ fn native_handles_are_opaque_scoped_and_released_once_in_both_engines() {
     let source = r#"
 define operate() gives Result<String, String> needs Native {
     keep opened = std.host.open("database", "configuration") or give
-    using handle = opened {
+    using handle set opened {
         give std.host.call(handle, "query", "select 42")
     }
 }
@@ -852,7 +852,7 @@ operate()
             r#"
 define calculate() gives Result<Int, String> needs Native {{
     keep opened = std.native.open("{path}") or give
-    using library = opened {{
+    using library set opened {{
         give std.native.call_int(library, "nivren_add", [20, 22])
     }}
 }}
@@ -863,7 +863,7 @@ choose calculate() {{ Ok(value) => value, Err(problem) => -1 }}
             r#"
 define calculate() gives Result<Float, String> needs Native {{
     keep opened = std.native.open("{path}") or give
-    using library = opened {{
+    using library set opened {{
         give std.native.call_float(library, "nivren_mean", [1.5, 2.5])
     }}
 }}
@@ -887,7 +887,7 @@ choose verify() {{ Ok(value) => value, Err(problem) => no }}
             r#"
 define transform() gives Result<String, String> needs Native {{
     keep opened = std.native.open("{path}") or give
-    using library = opened {{
+    using library set opened {{
         keep output = std.native.call_buffer(library, "nivren_upper", std.bytes.from_string("Nivren"), 64) or give
         give std.bytes.to_string(output)
     }}
@@ -988,7 +988,7 @@ define exercise() gives Result<Int, String> needs Native {
     change index = 0
     repeat index < 1000 {
         keep opened = std.host.open("device", "configuration") or give
-        using handle = opened { index = index + 1 }
+        using handle set opened { index = index + 1 }
     }
     give ok(index)
 }
@@ -1283,11 +1283,11 @@ fn generic_functions_infer_reuse_and_check_type_parameters() {
 
 #[test]
 fn generic_protocols_make_constraints_visible_and_checkable() {
-    let source = "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } keep integer: Int = add(20, 22) keep decimal: Float = add(1.5, 2.5) integer";
+    let source = "define add<Value is Number>(left: Value, right: Value) gives Value { give left + right } keep integer: Int = add(20, 22) keep decimal: Float = add(1.5, 2.5) integer";
     assert_eq!(eval_vm(source), Value::Int(42));
 
     let rejected = nivren::check(
-        "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } add(\"a\", \"b\")",
+        "define add<Value is Number>(left: Value, right: Value) gives Value { give left + right } add(\"a\", \"b\")",
     )
     .unwrap_err();
     assert!(
@@ -1297,7 +1297,7 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
     );
 
     nivren::check(
-        "define entry<Key: Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
+        "define entry<Key is Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
     )
     .unwrap();
     assert!(nivren::check(
@@ -1305,7 +1305,7 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
     )
     .is_err());
     assert!(
-        nivren::check("define bad<Value: Magical>(value: Value) gives Value { give value }",)
+        nivren::check("define bad<Value is Magical>(value: Value) gives Value { give value }",)
             .is_err()
     );
 }
@@ -1317,7 +1317,7 @@ protocol Identified
 shape User { id: Int, name: String }
 adopt Identified for User
 
-define preserve<Value: Identified>(value: Value) gives Value {
+define preserve<Value is Identified>(value: Value) gives Value {
     give value
 }
 
@@ -1334,7 +1334,7 @@ protocol Identified
 shape User { id: Int }
 shape Project { id: Int }
 adopt Identified for User
-define preserve<Value: Identified>(value: Value) gives Value { give value }
+define preserve<Value is Identified>(value: Value) gives Value { give value }
 preserve(Project(2))
 "#,
     )
@@ -1371,9 +1371,9 @@ protocol Rendered {
 }
 shape User { name: String }
 define render_user(value: User) gives String { give value.name }
-adopt Rendered for User { render = render_user }
+adopt Rendered for User { render set render_user }
 
-define present<Value: Rendered>(value: Value) gives String {
+define present<Value is Rendered>(value: Value) gives String {
     give Rendered.render(value)
 }
 present(User("Mira"))
@@ -1395,12 +1395,12 @@ present(User("Mira"))
     )
     .is_err());
     assert!(nivren::check(
-        "protocol Named { define name(value: Self) gives String } shape User { name: String } define wrong(value: User) gives Int { give 1 } adopt Named for User { name = wrong }"
+        "protocol Named { define name(value: Self) gives String } shape User { name: String } define wrong(value: User) gives Int { give 1 } adopt Named for User { name set wrong }"
     )
     .is_err());
     assert!(nivren::check("protocol Named { define name(value: Int) gives String }").is_err());
     assert!(nivren::check(
-        "protocol Logged { define emit(value: Self) gives Null needs Log } shape Event { text: String } define emit_event(value: Event) gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit = emit_event } define hidden<Value: Logged>(value: Value) { Logged.emit(value) }"
+        "protocol Logged { define emit(value: Self) gives Null needs Log } shape Event { text: String } define emit_event(value: Event) gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit set emit_event } define hidden<Value is Logged>(value: Value) { Logged.emit(value) }"
     )
     .is_err());
     assert!(nivren::check(
@@ -1683,11 +1683,11 @@ unwrap(present) + unwrap(absent)
     );
     assert!(nivren::check("shape Box<Value> { value: Value } keep value: Box = Box(1)").is_err());
     assert!(
-        nivren::check("shape Keyed<Key: Comparable> { key: Key } Keyed(std.iter.from([1]))")
+        nivren::check("shape Keyed<Key is Comparable> { key: Key } Keyed(std.iter.from([1]))")
             .is_err()
     );
     assert!(nivren::check(
-        "shape Keyed<Key: Comparable> { key: Key } define invalid(value: Keyed<Iterator<Int>>) { show(value) }"
+        "shape Keyed<Key is Comparable> { key: Key } define invalid(value: Keyed<Iterator<Int>>) { show(value) }"
     )
     .is_err());
 }
@@ -1866,7 +1866,7 @@ fn module_protocol_adoptions_follow_qualified_types_without_collisions() {
     let directory = module_fixture("protocol-modules");
     fs::write(
         directory.join("people.niv"),
-        "protocol Identified shape User { id: Int } adopt Identified for User define preserve<Value: Identified>(value: Value) gives Value { give value } expose { User, preserve }",
+        "protocol Identified shape User { id: Int } adopt Identified for User define preserve<Value is Identified>(value: Value) gives Value { give value } expose { User, preserve }",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -2452,7 +2452,7 @@ gives String or String
 needs Native within "database"
 {
     keep opened set perform std.host.open with { kind set "database" request set "memory://cli-proof" } or give
-    using handle = opened {
+    using handle set opened {
         keep created set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"CREATE TABLE users (name TEXT NOT NULL)\",\"parameters\":[],\"maximum_rows\":0,\"timeout\":5.0}" } or give
         keep inserted set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"INSERT INTO users (name) VALUES (?)\",\"parameters\":[\"Ada\"],\"maximum_rows\":0,\"timeout\":5.0}" } or give
         give perform std.host.call with { handle set handle name set "query" request set "{\"operation\":\"query\",\"statement\":\"SELECT name FROM users\",\"parameters\":[],\"maximum_rows\":10,\"timeout\":5.0}" }
@@ -2796,7 +2796,7 @@ fn documentation_includes_declared_capabilities() {
 
 #[test]
 fn documentation_preserves_generic_function_signatures() {
-    let source = "define identity<Value: Comparable>(value: Value) gives Value { give value } expose { identity }";
+    let source = "define identity<Value is Comparable>(value: Value) gives Value { give value } expose { identity }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "generic".into(),
@@ -2805,7 +2805,7 @@ fn documentation_preserves_generic_function_signatures() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(docs.contains("define identity<Value: Comparable>(value: Value) gives Value"));
+    assert!(docs.contains("define identity<Value is Comparable>(value: Value) gives Value"));
 }
 
 #[test]
@@ -3261,7 +3261,7 @@ fn json_lines_stream_with_a_bounded_record_buffer() {
 shape Item {{ id: Int }}
 define load(path: String) gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path) or give
-    using file = opened {{
+    using file set opened {{
         keep first = std.json.read_next_as(Item, file, 64) or give
         keep second = std.json.read_next_as(Item, file, 64) or give
         keep ending = std.json.read_next_as(Item, file, 64) or give
@@ -3285,7 +3285,7 @@ load({:?})
         r#"
 define recover(path: String) gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path) or give
-    using file = opened {{
+    using file set opened {{
         keep rejected = std.json.read_next(file, 8)
         keep recovered = choose rejected {{
             Ok(value) => err("oversized record accepted"),
@@ -3317,7 +3317,7 @@ fn file_line_iterators_are_lazy_bounded_and_recover_after_errors() {
         r#"
 define load(path: String) gives Result<Bool, String> needs FileRead {{
     keep opened = std.files.open_read(path) or give
-    using file = opened {{
+    using file set opened {{
         keep lines = std.iter.lines(file, 8) or give
         keep first = std.iter.next(lines) ?? err("missing first line")
         keep oversized = std.iter.next(lines) ?? ok("missing")
@@ -3983,7 +3983,7 @@ fn tcp_framing_reads_exact_bytes_without_consuming_the_next_message() {
         let source = format!(
             r#"
 define framed() gives Result<String, String> needs Network {{
-    using stream = std.net.connect("127.0.0.1", {port}, 2.0) or give {{
+    using stream set std.net.connect("127.0.0.1", {port}, 2.0) or give {{
         keep line = std.net.read_line(stream, 64, 2.0) or give
         assert(line == "+OK", "line framing")
         keep body = std.net.read_exact_bytes(stream, 5, 2.0) or give
@@ -4027,7 +4027,7 @@ fn official_redis_decodes_recursive_arrays_without_frame_overread() {
         let source = format!(
             r#"{redis}
 define probe() gives Result<Int, String> needs Network {{
-    using stream = connect("127.0.0.1", {port}, 2.0) or give {{
+    using stream set connect("127.0.0.1", {port}, 2.0) or give {{
         keep first = receive(stream, 2.0, 1024) or give
         keep count = choose first {{
             Array(items) => len(items),
@@ -4431,7 +4431,7 @@ fn tcp_partial_writes_make_backpressure_and_progress_explicit() {
             r#"
 define send() gives Result<Int, String> needs Network {{
     keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
-    using connection = stream {{
+    using connection set stream {{
         give std.net.write_some(connection, "abcdefgh", 4, 2.0)
     }}
 }}
@@ -4464,7 +4464,7 @@ fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
             r#"
 define probe() gives Result<Bool, String> needs Network {{
     keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
-    using connection = stream {{
+    using connection set stream {{
         give std.net.ready(connection, "read", 2.0)
     }}
 }}
@@ -4508,9 +4508,9 @@ fn tcp_reactor_selects_many_streams_and_drives_bounded_adapters() {
             r#"
 define exchange() gives Result<Int, String> needs Network {{
     keep first_opened = std.net.connect("127.0.0.1", {first_port}, 2.0) or give
-    using first = first_opened {{
+    using first set first_opened {{
         keep second_opened = std.net.connect("127.0.0.1", {second_port}, 2.0) or give
-        using second = second_opened {{
+        using second set second_opened {{
             keep selected = std.net.ready_any([first, second], "read", 2.0) or give
             keep index = selected ?? -1
             keep message = std.net.read_ready(second, 5, 2.0) or give
@@ -4701,7 +4701,7 @@ fn websocket_standard_library_exchanges_bounded_text_in_both_engines() {
             r#"
 define exchange() gives Result<String, String> needs Network {{
     keep opened = std.web.websocket_connect("127.0.0.1", {port}, "/echo", 2.0) or give
-    using socket = opened {{
+    using socket set opened {{
         keep sent = std.web.websocket_send(socket, "hello") or give
         give std.web.websocket_receive(socket, 1024)
     }}
@@ -4784,9 +4784,9 @@ define serve() gives Result<String, String> needs Network {{
     keep auth_policy = std.map.set(std.web.tls_options(), "client_auth", "required")
     keep options = std.map.set(auth_policy, "client_ca_pem", {client_ca_literal})
     keep opened = std.web.websocket_secure_listen("127.0.0.1", {port}, {certificate_literal}, {key_literal}, options) or give
-    using listener = opened {{
+    using listener set opened {{
         keep accepted = std.web.websocket_secure_accept(listener, 3.0) or give
-        using socket = accepted {{
+        using socket set accepted {{
             keep message = std.web.websocket_receive(socket, 1024) or give
             keep sent = std.web.websocket_send(socket, "secure:" + message) or give
             give ok(message)
@@ -4863,7 +4863,7 @@ define exchange() gives Result<String, String> needs Network {{
     keep identity = std.map.set(roots, "client_certificate_pem", {client_certificate_literal})
     keep policy = std.map.set(identity, "client_private_key_pem", {client_key_literal})
     keep opened = std.web.websocket_secure_connect("localhost", {port}, "/mutual", 3.0, policy) or give
-    using socket = opened {{
+    using socket set opened {{
         keep sent = std.web.websocket_send(socket, "client identity") or give
         give std.web.websocket_receive(socket, 1024)
     }}
@@ -4912,9 +4912,9 @@ fn tcp_listeners_accept_bounded_connections_and_close_with_scope() {
         let source = format!(
             r#"
 define serve(listener: TcpListener) gives Result<Int, String> needs Network {{
-    using server = listener {{
+    using server set listener {{
         keep accepted = std.net.accept(server, 2.0)
-        using connection = accepted or give {{
+        using connection set accepted or give {{
             keep request = std.net.read(connection, 4) or give
             keep sent = std.net.write(connection, "pong") or give
             give ok(len(request))
@@ -4954,7 +4954,7 @@ fn tcp_line_iterators_are_lazy_bounded_and_recover_after_oversized_frames() {
             r#"
 define consume() gives Result<Bool, String> needs Network {{
     keep opened = std.net.connect("127.0.0.1", {port}, 2.0) or give
-    using connection = opened {{
+    using connection set opened {{
         keep lines = std.iter.tcp_lines(connection, 5, 2.0) or give
         keep first = std.iter.next(lines) ?? err("missing first line")
         keep oversized = std.iter.next(lines) ?? err("missing oversized line")
@@ -5014,9 +5014,9 @@ fn web_servers_parse_bounded_requests_and_write_managed_responses() {
         let source = format!(
             r#"
 define serve(listener: TcpListener) gives Result<String, String> needs Network {{
-    using server = listener {{
+    using server set listener {{
         keep accepted = std.net.accept(server, 2.0)
-        using connection = accepted or give {{
+        using connection set accepted or give {{
             keep request = std.web.read_request(connection, 1024) or give
             keep path = std.map.get(request, "path") ?? ""
             keep body = std.map.get(request, "body") ?? ""
@@ -5067,9 +5067,9 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
             received
         });
         let function = if early_return {
-            "define finish(stream: TcpStream) gives Int needs Network { using socket = stream { give 7 } }"
+            "define finish(stream: TcpStream) gives Int needs Network { using socket set stream { give 7 } }"
         } else {
-            "define finish(stream: TcpStream) gives Int needs Network { using socket = stream { keep sent = std.net.write(socket, \"closed\") none } give 7 }"
+            "define finish(stream: TcpStream) gives Int needs Network { using socket set stream { keep sent = std.net.write(socket, \"closed\") none } give 7 }"
         };
         let source = format!(
             "{function} keep opened = std.net.connect(\"127.0.0.1\", {port}, 2.0) choose opened {{ Ok(stream) => finish(stream), Err(problem) => 0 }}"
@@ -5086,9 +5086,9 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
         }
     }
 
-    assert!(nivren::check("using value = 42 { value }").is_err());
+    assert!(nivren::check("using value set 42 { value }").is_err());
     let missing = nivren::check(
-        "define finish(stream: TcpStream) gives Null { using socket = stream { none } }",
+        "define finish(stream: TcpStream) gives Null { using socket set stream { none } }",
     )
     .unwrap_err();
     assert!(
@@ -5107,7 +5107,7 @@ fn using_scopes_close_bounded_file_handles_in_both_engines() {
             r#"
 define save(path: String) gives Result<Int, String> needs FileWrite {{
     keep opened = std.files.open_write(path)
-    using file = opened or give {{
+    using file set opened or give {{
         keep written = std.files.write_open(file, "nivren") or give
         give ok(7)
     }}
@@ -5131,7 +5131,7 @@ save("{}")
         r#"
 define load(path: String) gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path)
-    using file = opened or give {{
+    using file set opened or give {{
         give std.files.read_open(file, 64)
     }}
 }}
@@ -5170,13 +5170,13 @@ define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
     change index = 0
     repeat index < 64 {{
         keep opened_file = std.files.open_read(path) or give
-        using file = opened_file {{
+        using file set opened_file {{
             keep closed = std.files.close(file) or give
             keep rejected = choose std.files.read_open(file, 1) {{ Ok(value) => no, Err(problem) => yes }}
             when !rejected {{ give err("closed file accepted a read") }}
         }}
         keep opened_stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
-        using connection = opened_stream {{
+        using connection set opened_stream {{
             keep rejected = choose std.net.read_exact_bytes(connection, 1, 2.0) {{ Ok(value) => no, Err(problem) => yes }}
             when !rejected {{ give err("closed peer produced an exact byte") }}
         }}
@@ -6560,7 +6560,7 @@ show value
 
 #[test]
 fn when_carries_rejects_subjects_that_are_not_maybe_values() {
-    let errors = nivren::check("when 5 carries x { show x }").unwrap_err();
+    let errors = nivren::check("when 5 carries x { show(x) }").unwrap_err();
     assert!(errors[0].to_string().contains("maybe"));
 }
 
@@ -7557,7 +7557,7 @@ define counter_advance takes { state is Counter } gives CounterStep? {
     }
 }
 protocol Iterate { define advance(state: Self) gives CounterStep? }
-adopt Iterate for Counter { advance = counter_advance }
+adopt Iterate for Counter { advance set counter_advance }
 change total set 0
 each value in Counter with { current set 1, limit set 4 } {
     change total to total + value
@@ -7626,6 +7626,25 @@ fn edition_five_projects_opt_into_strict_gates() {
     assert!(nivren::typecheck::check_with_edition(&program, 4).is_ok());
     let errors = nivren::typecheck::check_with_edition(&program, 5).unwrap_err();
     assert!(errors[0].to_string().contains("trusted"));
+}
+
+#[test]
+fn edition_five_lexis_upgrades_work_in_both_engines() {
+    let source = r#"
+keep million set 1_000_000
+keep mask set 0xFF
+keep bits set 0b1010
+keep exponent set 1.5e3
+keep unicode set "A\u{2192}B"
+keep pem set raw "line\none"
+text "{million} {mask} {bits} {exponent} {unicode} {pem}"
+"#;
+    let expected = Value::String("1000000 255 10 1500 A→B line\\none".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    let errors = nivren::lexer::scan(r#""bad \q escape""#).unwrap_err();
+    assert!(errors[0].to_string().contains("unknown escape"));
+    assert!(nivren::lexer::scan("1__0").is_err());
 }
 
 #[test]

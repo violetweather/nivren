@@ -1,4 +1,4 @@
-type UserId from Int
+type UserId is Int
 
 shape User holds {
     id is UserId

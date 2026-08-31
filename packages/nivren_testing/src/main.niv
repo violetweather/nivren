@@ -1,4 +1,4 @@
-define expect_equal<Value: Comparable>
+define expect_equal<Value is Comparable>
 takes { actual is Value expected is Value label is String }
 gives Null or String
 {

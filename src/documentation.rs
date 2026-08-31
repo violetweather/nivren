@@ -88,7 +88,7 @@ fn declaration_signature(statement: &Stmt) -> String {
                         .iter()
                         .map(|parameter| parameter.constraint.as_ref().map_or_else(
                             || parameter.name.clone(),
-                            |constraint| format!("{}: {constraint}", parameter.name)
+                            |constraint| format!("{} is {constraint}", parameter.name)
                         ))
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -197,7 +197,7 @@ fn generic_parameters(parameters: &[crate::ast::TypeParam]) -> String {
                 .iter()
                 .map(|parameter| parameter.constraint.as_ref().map_or_else(
                     || parameter.name.clone(),
-                    |constraint| format!("{}: {constraint}", parameter.name)
+                    |constraint| format!("{} is {constraint}", parameter.name)
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")

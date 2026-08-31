@@ -5,9 +5,9 @@ takes {
 gives Null or String
 needs Network
 {
-    using server = listener {
+    using server set listener {
         keep accepted set std.net.accept with { listener set server timeout set 30.0 }
-        using connection = accepted or give {
+        using connection set accepted or give {
             keep request set std.web.read_request with {
                 stream set connection
                 maximum set 65536
@@ -16,7 +16,7 @@ needs Network
                 stream set connection
                 request set request
             }
-            using socket = upgraded or give {
+            using socket set upgraded or give {
                 keep message set std.web.websocket_receive with {
                     websocket set socket
                     maximum set 1048576

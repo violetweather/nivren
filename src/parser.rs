@@ -209,7 +209,7 @@ impl Parser {
                     ty: Some(self.type_ref()?),
                     span: param_span,
                 });
-                self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                self.matches(&[TokenKind::Comma]);
             }
             self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
         } else if self.check(&TokenKind::LeftParen) {
@@ -329,7 +329,7 @@ impl Parser {
                 {
                     return Err(self.error_here("duplicate generic type parameter"));
                 }
-                let constraint = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+                let constraint = if self.matches(&[TokenKind::Is]) {
                     Some(self.consume_identifier("expected protocol constraint")?)
                 } else {
                     None
@@ -407,10 +407,9 @@ impl Parser {
     fn nominal_type(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected nominal type name")?;
-        if !self.check_identifier_value("from") {
-            return Err(self.error_here("a nominal type names its representation with 'from'"));
+        if !self.matches(&[TokenKind::Is]) {
+            return Err(self.error_here("a nominal type names its representation with 'is'"));
         }
-        self.advance();
         let representation = self.type_ref()?;
         self.optional_semicolon();
         self.callables.insert(name.clone(), vec!["value".into()]);
@@ -544,7 +543,7 @@ impl Parser {
                             ty: Some(self.type_ref()?),
                             span: parameter_span,
                         });
-                        self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                        self.matches(&[TokenKind::Comma]);
                     }
                     self.consume(&TokenKind::RightBrace, "expected '}' after protocol inputs")?;
                 } else {
@@ -636,7 +635,7 @@ impl Parser {
                     column: self.peek().column,
                 };
                 let member = self.consume_identifier("expected protocol member name")?;
-                if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+                if !self.matches(&[TokenKind::Set]) {
                     return Err(self.error_here("a protocol adoption maps a member with 'set'"));
                 }
                 let implementation =
@@ -646,9 +645,7 @@ impl Parser {
                     implementation,
                     span: member_span,
                 });
-                if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
-                    && !self.check(&TokenKind::RightBrace)
-                {
+                if !self.matches(&[TokenKind::Comma]) && !self.check(&TokenKind::RightBrace) {
                     return Err(self.error_here("expected ',' or '}' after protocol mapping"));
                 }
             }
@@ -814,7 +811,7 @@ impl Parser {
                         ty: Some(self.type_ref()?),
                         span: param_span,
                     });
-                    self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                    self.matches(&[TokenKind::Comma]);
                 }
                 self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
             }
@@ -1043,7 +1040,7 @@ impl Parser {
             self.consume(&TokenKind::Set, "a labeled value uses 'set'")?;
             labels.push(name);
             arguments.push(self.expression()?);
-            self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+            self.matches(&[TokenKind::Comma]);
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after labeled values")?;
         Ok((labels, arguments))
@@ -1079,13 +1076,12 @@ impl Parser {
 
     fn print_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        let value = if self.matches(&[TokenKind::LeftParen]) {
-            let expression = self.expression()?;
-            self.consume(&TokenKind::RightParen, "expected ')' after show value")?;
-            expression
-        } else {
-            self.expression()?
-        };
+        self.consume(
+            &TokenKind::LeftParen,
+            "show writes one value with 'show(value)'",
+        )?;
+        let value = self.expression()?;
+        self.consume(&TokenKind::RightParen, "expected ')' after show value")?;
         self.optional_semicolon();
         Ok(Stmt::Print(value, span))
     }
@@ -1179,7 +1175,7 @@ impl Parser {
     fn using_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected resource name after using")?;
-        if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+        if !self.matches(&[TokenKind::Set]) {
             return Err(self.error_here("a scoped resource uses 'set'"));
         }
         let resource = self.expression()?;
@@ -1459,6 +1455,12 @@ impl Parser {
             TokenKind::Float(value) => Ok(Expr::Literal(Literal::Float(value), span)),
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value), span)),
             TokenKind::Identifier(name) => {
+                if name == "raw" && matches!(self.peek().kind, TokenKind::String(_)) {
+                    let TokenKind::String(value) = self.advance().kind.clone() else {
+                        unreachable!("the peeked token is a string");
+                    };
+                    return Ok(Expr::Literal(Literal::String(value), span));
+                }
                 if name == "text" && matches!(self.peek().kind, TokenKind::String(_)) {
                     let TokenKind::String(raw) = self.advance().kind.clone() else {
                         unreachable!("the peeked token is a string");
@@ -1634,7 +1636,7 @@ impl Parser {
                     value,
                     span: arm_span,
                 });
-                self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                self.matches(&[TokenKind::Comma]);
                 continue;
             }
             let edition_four = self.matches(&[TokenKind::Case]);
@@ -1673,7 +1675,7 @@ impl Parser {
             let field = self.consume_identifier("expected a field name")?;
             self.consume(&TokenKind::Set, "a field pattern uses 'set'")?;
             fields.push((field, self.arm_pattern()?));
-            self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+            self.matches(&[TokenKind::Comma]);
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after field patterns")?;
         Ok(fields)

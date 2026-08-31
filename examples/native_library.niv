@@ -6,7 +6,7 @@ gives Int or String
 needs Native
 {
     keep opened set std.native.open with { path set path } or give
-    using library = opened {
+    using library set opened {
         give std.native.call_int with {
             library set library
             symbol set "nivren_add"

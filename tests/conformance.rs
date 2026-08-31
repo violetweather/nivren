@@ -3,22 +3,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-fn edition_two_black_box_conformance_vectors() {
-    run_suite(
-        include_str!("../conformance/edition2-baseline.json"),
-        "edition2",
-    );
-}
-
-#[test]
-fn edition_three_black_box_conformance_vectors() {
-    run_suite(
-        include_str!("../conformance/edition3-baseline.json"),
-        "edition3",
-    );
-}
-
-#[test]
 fn edition_four_language_proof_conformance_vectors() {
     run_suite(
         include_str!("../conformance/edition4-language-proof.json"),

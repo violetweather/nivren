@@ -48,9 +48,9 @@ shape Person { name: String }
 define person_name(value: Person) gives String {
     give value.name
 }
-adopt Named for Person { name = person_name }
+adopt Named for Person { name set person_name }
 
-define present<Value: Named>(value: Value) gives String {
+define present<Value is Named>(value: Value) gives String {
     give Named.name(value)
 }
 define outer(value: Int) {
@@ -132,7 +132,7 @@ fn native_using_cleanup_closes_owned_foreign_handles_once() {
         r#"
 define query() gives Result<String, String> needs Native {
     keep opened = std.host.open("database", "configuration") or give
-    using handle = opened {
+    using handle set opened {
         give std.host.call(handle, "query", "select 42")
     }
 }

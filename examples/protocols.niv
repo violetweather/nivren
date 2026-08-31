@@ -13,9 +13,9 @@ gives String
     give value.name
 }
 
-adopt Named for User { name = user_name }
+adopt Named for User { name set user_name }
 
-define present<Value: Named>
+define present<Value is Named>
 takes { value is Value }
 gives String
 {
