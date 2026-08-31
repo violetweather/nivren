@@ -22,7 +22,7 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 zeroize = "1.8"
 csv = "1.4"
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
-getrandom = { version = "0.3", optional = true }
+getrandom = { version = "0.4", optional = true }
 webpki-roots = { version = "1.0.9", optional = true }
 nivren-jit = { path = "crates/nivren-jit", optional = true }
 nivren-native = { path = "crates/nivren-native", optional = true }

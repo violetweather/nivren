@@ -1019,7 +1019,7 @@ dependencies = [
  "csv",
  "ed25519-dalek",
  "flate2",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "jiff",
  "mio",
  "nivren-database-host",
