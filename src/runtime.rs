@@ -180,7 +180,7 @@ macro_rules! evaluate_part {
 pub enum Value {
     Int(i64),
     UInt(u64),
-    U128(u128),
+    U128(Box<u128>),
     /// A checked declaration built by `std.source` inside a generator; the
     /// expansion pass splices the carried statement into the module.
     SourceDeclaration(Arc<Stmt>),
@@ -223,7 +223,7 @@ pub enum Value {
     DateTime(Arc<jiff::Zoned>),
     BigInt(Arc<num_bigint::BigInt>),
     Decimal(rust_decimal::Decimal),
-    FixedInt(FixedInt),
+    FixedInt(Box<FixedInt>),
     Task(Arc<Task>),
     Channel(Arc<Channel>),
 }
@@ -299,7 +299,7 @@ impl PartialEq for Value {
             (Self::Iterator(a), Self::Iterator(b)) => Arc::ptr_eq(a, b),
             (Self::RecordType(a), Self::RecordType(b)) => Arc::ptr_eq(a, b),
             (Self::Record(a), Self::Record(b)) => {
-                a.type_name == b.type_name && a.fields == b.fields
+                a.type_name == b.type_name && a.names == b.names && a.values == b.values
             }
             (Self::EnumType(a), Self::EnumType(b)) => Arc::ptr_eq(a, b),
             (Self::EnumConstructor(a), Self::EnumConstructor(b)) => Arc::ptr_eq(a, b),
@@ -392,14 +392,14 @@ impl Display for Value {
             Self::Record(record) => {
                 // The builtin Problem shape displays as its message, so
                 // printed and interpolated failures stay readable.
-                if record.type_name == "Problem"
+                if &*record.type_name == "Problem"
                     && let Some((_, Value::String(message))) =
-                        record.fields.iter().find(|(name, _)| name == "message")
+                        record.fields().find(|(name, _)| *name == "message")
                 {
                     return write!(formatter, "{message}");
                 }
                 write!(formatter, "{} {{ ", record.type_name)?;
-                for (index, (name, value)) in record.fields.iter().enumerate() {
+                for (index, (name, value)) in record.fields().enumerate() {
                     if index > 0 {
                         write!(formatter, ", ")?;
                     }
@@ -549,16 +549,30 @@ type HostCallback = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sy
 
 pub struct RecordType {
     name: String,
+    /// Shared with every constructed value, so construction allocates no
+    /// name string.
+    shared_name: Arc<str>,
     fields: Vec<(String, String)>,
+    /// Shared with every constructed value of this shape.
+    field_names: Arc<[String]>,
     derives: Vec<String>,
     field_indices: Arc<HashMap<String, usize>>,
     catalog: BTreeMap<String, Vec<(String, String)>>,
     choices: BTreeMap<String, Vec<(String, bool)>>,
 }
 pub struct RecordValue {
-    type_name: String,
-    fields: Vec<(String, Value)>,
+    type_name: Arc<str>,
+    /// The declaration's field names, shared by every value of the shape so
+    /// construction never copies them.
+    names: Arc<[String]>,
+    values: Vec<Value>,
     field_indices: Arc<HashMap<String, usize>>,
+}
+
+impl RecordValue {
+    fn fields(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.names.iter().zip(self.values.iter())
+    }
 }
 
 /// Builds the builtin `Problem` shape every standard-library typed failure
@@ -570,6 +584,25 @@ impl Value {
     #[must_use]
     pub fn problem(kind: &str, message: &str) -> Value {
         problem_value(kind, message.to_string())
+    }
+}
+
+#[cfg(test)]
+mod value_size_probe {
+    #[test]
+    fn report_value_size() {
+        eprintln!("Value size: {}", std::mem::size_of::<super::Value>());
+        eprintln!(
+            "FixedInt: {}",
+            std::mem::size_of::<crate::fixed::FixedInt>()
+        );
+        eprintln!("Decimal: {}", std::mem::size_of::<rust_decimal::Decimal>());
+        eprintln!("String: {}", std::mem::size_of::<String>());
+        eprintln!("u128: {}", std::mem::size_of::<u128>());
+        eprintln!(
+            "Option<Value>: {}",
+            std::mem::size_of::<Option<super::Value>>()
+        );
     }
 }
 
@@ -594,11 +627,13 @@ fn builtin_record(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
             .collect::<HashMap<_, _>>(),
     );
     Value::Record(Arc::new(RecordValue {
-        type_name: type_name.to_string(),
-        fields: fields
-            .into_iter()
-            .map(|(name, value)| (name.to_string(), value))
-            .collect(),
+        type_name: Arc::from(type_name),
+        names: fields
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect::<Vec<_>>()
+            .into(),
+        values: fields.into_iter().map(|(_, value)| value).collect(),
         field_indices,
     }))
 }
@@ -2068,8 +2103,14 @@ impl Interpreter {
                 catalog.insert(type_name.clone(), record_fields.clone());
                 let choices = choice_catalog(&self.environment);
                 let value = Value::RecordType(Arc::new(RecordType {
+                    shared_name: Arc::from(type_name.as_str()),
                     name: type_name,
                     field_indices: record_field_indices(&record_fields),
+                    field_names: record_fields
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                        .into(),
                     fields: record_fields,
                     derives: derives.clone(),
                     catalog,
@@ -2365,7 +2406,7 @@ impl Interpreter {
                 Value::Record(record) => record
                     .field_indices
                     .get(name)
-                    .map(|index| record.fields[*index].1.clone())
+                    .map(|index| record.values[*index].clone())
                     .ok_or_else(|| {
                         NivError::new(
                             format!("{} has no field '{name}'", record.type_name),
@@ -2594,14 +2635,14 @@ impl Interpreter {
             },
             Pattern::Shape(name, fields, _) => match value {
                 Value::Record(record)
-                    if record.type_name == *name
+                    if *record.type_name == **name
                         || record.type_name.ends_with(&format!(".{name}")) =>
                 {
                     for (field, sub_pattern) in fields {
                         let Some(index) = record.field_indices.get(field).copied() else {
                             return false;
                         };
-                        let field_value = record.fields[index].1.clone();
+                        let field_value = record.values[index].clone();
                         if !self.pattern_matches(sub_pattern, &field_value, bindings) {
                             return false;
                         }
@@ -2705,8 +2746,8 @@ impl Interpreter {
                             span.column,
                         ));
                     };
-                    items.push(record.fields[item].1.clone());
-                    state = record.fields[next].1.clone();
+                    items.push(record.values[item].clone());
+                    state = record.values[next].clone();
                 }
                 other => {
                     return Err(NivError::new(
@@ -2759,7 +2800,9 @@ impl Interpreter {
             TokenKind::Plus => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => checked_int(a.checked_add(b), span),
                 (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
-                (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
+                (Value::U128(a), Value::U128(b)) => {
+                    u128_binary(*a.clone(), operator, *b.clone(), span)
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     Ok(Value::BigInt(Arc::new(a.as_ref() + b.as_ref())))
@@ -2768,7 +2811,9 @@ impl Interpreter {
                     .checked_add(b)
                     .map(Value::Decimal)
                     .ok_or_else(|| NivError::new("decimal overflow", span.line, span.column)),
-                (Value::FixedInt(a), Value::FixedInt(b)) => fixed_binary(a, operator, b, span),
+                (Value::FixedInt(a), Value::FixedInt(b)) => {
+                    fixed_binary(*a.clone(), operator, *b.clone(), span)
+                }
                 (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
                 (a, b) => Err(type_error(
                     "'+' requires two Ints, two Floats, or two Strings",
@@ -2781,13 +2826,17 @@ impl Interpreter {
                 match (left, right) {
                     (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
                     (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
-                    (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
+                    (Value::U128(a), Value::U128(b)) => {
+                        u128_binary(*a.clone(), operator, *b.clone(), span)
+                    }
                     (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                     (Value::BigInt(a), Value::BigInt(b)) => {
                         bigint_binary(a.as_ref(), operator, b.as_ref(), span)
                     }
                     (Value::Decimal(a), Value::Decimal(b)) => decimal_binary(a, operator, b, span),
-                    (Value::FixedInt(a), Value::FixedInt(b)) => fixed_binary(a, operator, b, span),
+                    (Value::FixedInt(a), Value::FixedInt(b)) => {
+                        fixed_binary(*a.clone(), operator, *b.clone(), span)
+                    }
                     (a, b) => Err(type_error(
                         "numeric operator requires operands of the same numeric type",
                         &a,
@@ -2802,13 +2851,17 @@ impl Interpreter {
             | TokenKind::LessEqual => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
                 (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
-                (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
+                (Value::U128(a), Value::U128(b)) => {
+                    u128_binary(*a.clone(), operator, *b.clone(), span)
+                }
                 (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     bigint_binary(a.as_ref(), operator, b.as_ref(), span)
                 }
                 (Value::Decimal(a), Value::Decimal(b)) => decimal_binary(a, operator, b, span),
-                (Value::FixedInt(a), Value::FixedInt(b)) => fixed_binary(a, operator, b, span),
+                (Value::FixedInt(a), Value::FixedInt(b)) => {
+                    fixed_binary(*a.clone(), operator, *b.clone(), span)
+                }
                 (Value::DateTime(a), Value::DateTime(b)) => Ok(Value::Bool(match operator {
                     TokenKind::Greater => a.timestamp() > b.timestamp(),
                     TokenKind::GreaterEqual => a.timestamp() >= b.timestamp(),
@@ -2993,14 +3046,10 @@ impl Interpreter {
             Value::RecordType(record) => {
                 check_arity(&record.name, record.fields.len(), arguments.len(), span)?;
                 Ok(Value::Record(Arc::new(RecordValue {
-                    type_name: record.name.clone(),
+                    type_name: record.shared_name.clone(),
                     field_indices: record.field_indices.clone(),
-                    fields: record
-                        .fields
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .zip(arguments)
-                        .collect(),
+                    names: record.field_names.clone(),
+                    values: arguments,
                 })))
             }
             Value::EnumConstructor(constructor) => {
@@ -4540,8 +4589,14 @@ impl Interpreter {
                 catalog.insert(type_name.clone(), fields.clone());
                 let choices = choice_catalog(&self.environment);
                 let value = Value::RecordType(Arc::new(RecordType {
+                    shared_name: Arc::from(type_name.as_str()),
                     name: type_name,
                     field_indices: record_field_indices(fields),
+                    field_names: fields
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                        .into(),
                     fields: fields.clone(),
                     derives: derives.clone(),
                     catalog,
@@ -5464,7 +5519,7 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
             }
         }
         Value::Record(record) => {
-            for (_, value) in &record.fields {
+            for value in &record.values {
                 mark_value(value, marked);
             }
         }
@@ -6004,10 +6059,10 @@ fn effect_value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         }
         Value::Record(record) => {
             let mut fields = serde_json::Map::new();
-            for (name, field) in &record.fields {
+            for (name, field) in record.fields() {
                 fields.insert(name.clone(), effect_value_to_json(field)?);
             }
-            serde_json::json!({ "$shape": record.type_name, "$fields": fields })
+            serde_json::json!({ "$shape": &*record.type_name, "$fields": fields })
         }
         Value::Enum(subject) => serde_json::json!({
             "$choice": subject.type_name,
@@ -6094,15 +6149,18 @@ fn effect_json_to_value(value: &serde_json::Value, span: Span) -> Result<Value, 
                 Some(serde_json::Value::Object(fields)),
             ) = (object.get("$shape"), object.get("$fields"))
             {
-                let mut decoded = Vec::with_capacity(fields.len());
+                let mut names = Vec::with_capacity(fields.len());
+                let mut values = Vec::with_capacity(fields.len());
                 let mut indices = HashMap::with_capacity(fields.len());
                 for (index, (name, field)) in fields.iter().enumerate() {
-                    decoded.push((name.clone(), effect_json_to_value(field, span)?));
+                    names.push(name.clone());
+                    values.push(effect_json_to_value(field, span)?);
                     indices.insert(name.clone(), index);
                 }
                 Value::Record(Arc::new(RecordValue {
-                    type_name: shape.clone(),
-                    fields: decoded,
+                    type_name: Arc::from(shape.as_str()),
+                    names: names.into(),
+                    values,
                     field_indices: Arc::new(indices),
                 }))
             } else if let (
@@ -6172,7 +6230,7 @@ fn negate(value: Value, span: Span) -> Result<Value, NivError> {
                     NivError::new("fixed-width integer overflow", span.line, span.column)
                 })
             })
-            .map(Value::FixedInt),
+            .map(|value| Value::FixedInt(Box::new(value))),
         other => Err(NivError::new(
             format!("expected a numeric value, found {}", other.type_name()),
             span.line,
@@ -6234,7 +6292,7 @@ fn uint_binary(a: u64, operator: &TokenKind, b: u64, span: Span) -> Result<Value
 fn u128_binary(a: u128, operator: &TokenKind, b: u128, span: Span) -> Result<Value, NivError> {
     let checked = |value: Option<u128>| {
         value
-            .map(Value::U128)
+            .map(|value| Value::U128(Box::new(value)))
             .ok_or_else(|| NivError::new("unsigned integer overflow", span.line, span.column))
     };
     match operator {
@@ -6263,7 +6321,7 @@ fn native_u128_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivErro
         return Ok(result_error("U128 text exceeds 40 bytes"));
     }
     Ok(match source.parse::<u128>() {
-        Ok(value) => Value::Ok(Arc::new(Value::U128(value))),
+        Ok(value) => Value::Ok(Arc::new(Value::U128(Box::new(value)))),
         Err(_) => result_error("invalid or out-of-range U128"),
     })
 }
@@ -6285,7 +6343,7 @@ fn native_u128_from_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
         ));
     };
     Ok(match u128::try_from(value) {
-        Ok(value) => Value::Ok(Arc::new(Value::U128(value))),
+        Ok(value) => Value::Ok(Arc::new(Value::U128(Box::new(value)))),
         Err(_) => result_error("negative Int cannot become U128"),
     })
 }
@@ -6299,7 +6357,7 @@ fn native_u128_to_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivErr
             span,
         ));
     };
-    Ok(match i64::try_from(*value) {
+    Ok(match i64::try_from(**value) {
         Ok(value) => Value::Ok(Arc::new(Value::Int(value))),
         Err(_) => result_error("U128 exceeds the Int range"),
     })
@@ -6504,7 +6562,7 @@ fn fixed_binary(
         .ok_or_else(|| NivError::new("fixed-width integer overflow", span.line, span.column))
         .and_then(|value| {
             FixedInt::new(a.kind, value)
-                .map(Value::FixedInt)
+                .map(|value| Value::FixedInt(Box::new(value)))
                 .map_err(|_| NivError::new("fixed-width integer overflow", span.line, span.column))
         })
 }
@@ -8003,18 +8061,46 @@ fn native_json_decode(arguments: Vec<Value>, span: Span) -> Result<Value, NivErr
     })
 }
 
+/// A JSON decode location, built on the stack and rendered only when an
+/// error message needs it, so successful decodes allocate no path strings.
+struct JsonPath<'a> {
+    parent: Option<&'a JsonPath<'a>>,
+    piece: PathPiece<'a>,
+}
+
+enum PathPiece<'a> {
+    Root(&'a str),
+    Field(&'a str),
+    Index(usize),
+    Key(&'a str),
+}
+
+impl Display for JsonPath<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(parent) = self.parent {
+            write!(formatter, "{parent}")?;
+        }
+        match &self.piece {
+            PathPiece::Root(name) => write!(formatter, "{name}"),
+            PathPiece::Field(name) => write!(formatter, ".{name}"),
+            PathPiece::Index(index) => write!(formatter, "[{index}]"),
+            PathPiece::Key(key) => write!(formatter, ".{key}"),
+        }
+    }
+}
+
 fn decode_record(schema: &RecordType, value: serde_json::Value) -> Result<Value, String> {
     let serde_json::Value::Object(mut object) = value else {
         return Err(format!("{} expects a JSON object", schema.name));
     };
-    let expected: BTreeSet<&str> = schema
-        .fields
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
     let unexpected: Vec<String> = object
         .keys()
-        .filter(|name| !expected.contains(name.as_str()))
+        .filter(|name| {
+            !schema
+                .fields
+                .iter()
+                .any(|(field, _)| field.as_str() == name.as_str())
+        })
         .cloned()
         .collect();
     if !unexpected.is_empty() {
@@ -8025,26 +8111,32 @@ fn decode_record(schema: &RecordType, value: serde_json::Value) -> Result<Value,
             unexpected.join(", ")
         ));
     }
-    let mut fields = Vec::with_capacity(schema.fields.len());
+    let mut values = Vec::with_capacity(schema.fields.len());
     for (name, expected_type) in &schema.fields {
         let value = object
             .remove(name)
             .ok_or_else(|| format!("{} is missing required field '{name}'", schema.name))?;
-        fields.push((
-            name.clone(),
-            decode_schema_value(
-                value,
-                expected_type,
-                &format!("{}.{}", schema.name, name),
-                &schema.catalog,
-                &schema.choices,
-                &schema.name,
-            )?,
-        ));
+        let root = JsonPath {
+            parent: None,
+            piece: PathPiece::Root(&schema.name),
+        };
+        let path = JsonPath {
+            parent: Some(&root),
+            piece: PathPiece::Field(name),
+        };
+        values.push(decode_schema_value(
+            value,
+            expected_type,
+            &path,
+            &schema.catalog,
+            &schema.choices,
+            &schema.name,
+        )?);
     }
     Ok(Value::Record(Arc::new(RecordValue {
-        type_name: schema.name.clone(),
-        fields,
+        type_name: schema.shared_name.clone(),
+        names: schema.field_names.clone(),
+        values,
         field_indices: schema.field_indices.clone(),
     })))
 }
@@ -8052,7 +8144,7 @@ fn decode_record(schema: &RecordType, value: serde_json::Value) -> Result<Value,
 fn decode_schema_value(
     value: serde_json::Value,
     schema: &str,
-    path: &str,
+    path: &JsonPath<'_>,
     catalog: &BTreeMap<String, Vec<(String, String)>>,
     choices: &BTreeMap<String, Vec<(String, bool)>>,
     owner: &str,
@@ -8078,14 +8170,11 @@ fn decode_schema_value(
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                decode_schema_value(
-                    value,
-                    inner,
-                    &format!("{path}[{index}]"),
-                    catalog,
-                    choices,
-                    owner,
-                )
+                let element = JsonPath {
+                    parent: Some(path),
+                    piece: PathPiece::Index(index),
+                };
+                decode_schema_value(value, inner, &element, catalog, choices, owner)
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Value::Array(Arc::new(values)));
@@ -8138,17 +8227,13 @@ fn decode_schema_value(
         return values
             .into_iter()
             .map(|(key, value)| {
-                Ok((
-                    Value::String(key.clone()),
-                    decode_schema_value(
-                        value,
-                        &arguments[1],
-                        &format!("{path}.{key}"),
-                        catalog,
-                        choices,
-                        owner,
-                    )?,
-                ))
+                let entry = JsonPath {
+                    parent: Some(path),
+                    piece: PathPiece::Key(&key),
+                };
+                let decoded =
+                    decode_schema_value(value, &arguments[1], &entry, catalog, choices, owner)?;
+                Ok((Value::String(key.clone()), decoded))
             })
             .collect::<Result<Vec<_>, String>>()
             .map(|entries| Value::Map(Arc::new(entries)));
@@ -8276,7 +8361,13 @@ fn decode_schema_value(
             };
             decode_record(
                 &RecordType {
+                    shared_name: Arc::from(name.as_str()),
                     name,
+                    field_names: fields
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                        .into(),
                     fields: fields.clone(),
                     derives: Vec::new(),
                     field_indices: record_field_indices(fields),
@@ -8289,12 +8380,16 @@ fn decode_schema_value(
     }
 }
 
-fn decode_fixed(value: serde_json::Value, kind: FixedKind, path: &str) -> Result<Value, String> {
+fn decode_fixed(
+    value: serde_json::Value,
+    kind: FixedKind,
+    path: &JsonPath<'_>,
+) -> Result<Value, String> {
     let number = json_number_text(&value)
         .and_then(|text| text.parse::<i128>().ok())
         .ok_or_else(|| format!("{path} expects an integer for {}", kind.name()))?;
     FixedInt::new(kind, number)
-        .map(Value::FixedInt)
+        .map(|value| Value::FixedInt(Box::new(value)))
         .map_err(|error| format!("{path}: {error}"))
 }
 
@@ -8498,7 +8593,7 @@ fn call_derived_method(
         arguments.len(),
         span,
     )?;
-    let record_matches = |value: &Value| matches!(value, Value::Record(record) if record.type_name == method.schema.name);
+    let record_matches = |value: &Value| matches!(value, Value::Record(record) if *record.type_name == *method.schema.name);
     match method.name.as_str() {
         "to_json" | "key" => {
             if !record_matches(&arguments[0]) {
@@ -8701,7 +8796,7 @@ fn value_to_json(value: &Value, span: Span) -> Result<serde_json::Value, NivErro
         }
         Value::Record(record) => {
             let mut object = serde_json::Map::new();
-            for (name, value) in &record.fields {
+            for (name, value) in record.fields() {
                 object.insert(name.clone(), value_to_json(value, span)?);
             }
             Ok(serde_json::Value::Object(object))
@@ -9135,7 +9230,7 @@ fn binary_fixed_encode(
     kind: FixedKind,
     endian: BinaryEndian,
 ) -> Result<Value, NivError> {
-    let Value::FixedInt(value) = arguments[0] else {
+    let Value::FixedInt(ref value) = arguments[0] else {
         return Err(expected_value(name, kind.name(), &arguments[0], span));
     };
     if value.kind != kind {
@@ -9243,7 +9338,7 @@ fn binary_fixed_decode(
     };
     let fixed =
         FixedInt::new(kind, value).map_err(|error| NivError::new(error, span.line, span.column))?;
-    Ok(Value::Ok(Arc::new(Value::FixedInt(fixed))))
+    Ok(Value::Ok(Arc::new(Value::FixedInt(Box::new(fixed)))))
 }
 
 macro_rules! binary_fixed_functions {
@@ -10353,7 +10448,7 @@ fn fixed_from_int(
         ref other => return Err(expected_value(name, "Int", other, span)),
     };
     Ok(match FixedInt::new(kind, value) {
-        Ok(value) => Value::Ok(Arc::new(Value::FixedInt(value))),
+        Ok(value) => Value::Ok(Arc::new(Value::FixedInt(Box::new(value)))),
         Err(error) => result_error(error),
     })
 }
@@ -10371,7 +10466,7 @@ fn fixed_parse(
             .map_err(|_| format!("invalid {} integer", kind.name()))
             .and_then(|value| FixedInt::new(kind, value))
         {
-            Ok(value) => Value::Ok(Arc::new(Value::FixedInt(value))),
+            Ok(value) => Value::Ok(Arc::new(Value::FixedInt(Box::new(value)))),
             Err(error) => result_error(error),
         },
     )
@@ -10485,9 +10580,9 @@ fn fixed_format(
     name: &str,
     span: Span,
 ) -> Result<Value, NivError> {
-    match arguments[0] {
+    match &arguments[0] {
         Value::FixedInt(value) if value.kind == kind => Ok(Value::String(value.value.to_string())),
-        ref other => Err(expected_value(name, kind.name(), other, span)),
+        other => Err(expected_value(name, kind.name(), other, span)),
     }
 }
 
@@ -10497,12 +10592,12 @@ fn fixed_to_int(
     name: &str,
     span: Span,
 ) -> Result<Value, NivError> {
-    match arguments[0] {
+    match &arguments[0] {
         Value::FixedInt(value) if value.kind == kind => Ok(match i64::try_from(value.value) {
             Ok(value) => Value::Ok(Arc::new(Value::Int(value))),
             Err(_) => result_error("fixed-width value is outside the Int range"),
         }),
-        ref other => Err(expected_value(name, kind.name(), other, span)),
+        other => Err(expected_value(name, kind.name(), other, span)),
     }
 }
 
@@ -11515,7 +11610,7 @@ fn native_websocket_accept(arguments: Vec<Value>, span: Span) -> Result<Value, N
     };
     let mut method = None;
     let mut headers = BTreeMap::new();
-    for (name, value) in &request.fields {
+    for (name, value) in request.fields() {
         match (name.as_str(), value) {
             ("method", Value::String(value)) => method = Some(value.to_string()),
             ("headers", Value::Map(entries)) => {
@@ -11611,7 +11706,7 @@ fn native_plans_encode(arguments: Vec<Value>, span: Span) -> Result<Value, NivEr
         ));
     };
     let mut fields = serde_json::Map::new();
-    for (name, field) in &record.fields {
+    for (name, field) in record.fields() {
         match effect_value_to_json(field) {
             Ok(json) => {
                 fields.insert(name.clone(), json);
@@ -11625,7 +11720,7 @@ fn native_plans_encode(arguments: Vec<Value>, span: Span) -> Result<Value, NivEr
     }
     let envelope = serde_json::json!({
         "schema": "org.nivren.portable-plan.v1",
-        "shape": record.type_name,
+        "shape": &*record.type_name,
         "fields": fields,
     });
     let bytes = serde_json::to_string(&envelope)
@@ -11704,9 +11799,11 @@ fn native_plans_decode(arguments: Vec<Value>, span: Span) -> Result<Value, NivEr
             Err(error) => return Ok(result_error(error.message)),
         }
     }
+    let (names, values): (Vec<String>, Vec<Value>) = decoded.into_iter().unzip();
     Ok(Value::Ok(Arc::new(Value::Record(Arc::new(RecordValue {
-        type_name: record_type.name.clone(),
-        fields: decoded,
+        type_name: Arc::from(record_type.name.as_str()),
+        names: names.into(),
+        values,
         field_indices: record_type.field_indices.clone(),
     })))))
 }
@@ -12076,8 +12173,7 @@ fn native_reflect_fields(arguments: Vec<Value>, _: Span) -> Result<Value, NivErr
     Ok(match &arguments[0] {
         Value::Record(record) => Value::Ok(Arc::new(Value::Map(Arc::new(
             record
-                .fields
-                .iter()
+                .fields()
                 .map(|(name, value)| {
                     (
                         Value::String(name.clone()),
@@ -13872,7 +13968,7 @@ fn transferable(value: &Value) -> bool {
             .iter()
             .all(|(key, value)| transferable(key) && transferable(value)),
         Value::Set(values) => values.iter().all(transferable),
-        Value::Record(record) => record.fields.iter().all(|(_, value)| transferable(value)),
+        Value::Record(record) => record.values.iter().all(transferable),
         Value::Ok(value) | Value::Err(value) => transferable(value),
         Value::Lock(lock) => transferable(&lock.value.lock().unwrap()),
         Value::Function(_)
@@ -14160,7 +14256,7 @@ fn stable_key(value: &Value) -> bool {
         Value::Map(entries) => entries
             .iter()
             .all(|(key, value)| stable_key(key) && stable_key(value)),
-        Value::Record(record) => record.fields.iter().all(|(_, value)| stable_key(value)),
+        Value::Record(record) => record.values.iter().all(stable_key),
         Value::Ok(value) | Value::Err(value) => stable_key(value),
         Value::Function(_)
         | Value::Native(_)
@@ -14218,7 +14314,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
                 .saturating_add(estimated_value_bytes(key))
                 .saturating_add(estimated_value_bytes(value))
         }),
-        Value::Record(record) => record.fields.iter().fold(32, |total, (name, value)| {
+        Value::Record(record) => record.fields().fold(32, |total, (name, value)| {
             total
                 .saturating_add(name.len() as u64)
                 .saturating_add(estimated_value_bytes(value))
@@ -14377,17 +14473,33 @@ fn index_value(collection: Value, index: usize, span: Span) -> Result<Value, Niv
 
 fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
     match object {
-        Value::Record(record) => record
-            .field_indices
-            .get(name)
-            .map(|index| record.fields[*index].1.clone())
-            .ok_or_else(|| {
-                NivError::new(
+        Value::Record(record) => {
+            // Shapes hold few fields, so a linear scan over the shared name
+            // table beats hashing the name on every access.
+            if record.names.len() <= 8 {
+                for (index, field) in record.names.iter().enumerate() {
+                    if field == name {
+                        return Ok(record.values[index].clone());
+                    }
+                }
+                return Err(NivError::new(
                     format!("{} has no field '{name}'", record.type_name),
                     span.line,
                     span.column,
-                )
-            }),
+                ));
+            }
+            record
+                .field_indices
+                .get(name)
+                .map(|index| record.values[*index].clone())
+                .ok_or_else(|| {
+                    NivError::new(
+                        format!("{} has no field '{name}'", record.type_name),
+                        span.line,
+                        span.column,
+                    )
+                })
+        }
         Value::RecordType(record) => {
             let method = crate::derive_methods::named(name).ok_or_else(|| {
                 NivError::new(

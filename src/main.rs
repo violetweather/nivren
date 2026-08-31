@@ -11,6 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nivren::error::NivError;
 use nivren::runtime::{Interpreter, Value};
 
+/// The interpreter allocates managed values constantly; mimalloc turns those
+/// small allocations from system-heap calls into fast thread-local bumps.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     if let Some(code) = run_embedded_application() {
         return code;
