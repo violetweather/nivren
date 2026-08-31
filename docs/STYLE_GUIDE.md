@@ -27,14 +27,14 @@ gives String
 
 define load_name
 takes { path is String }
-gives String or String
+gives String or Problem
 needs FileRead
 {
     give perform std.files.read with { path set path }
 }
 
 define main
-gives Nothing or String
+gives Nothing or Problem
 needs FileRead, Log
 {
     keep name set perform load_name with { path set "name.txt" } or give
@@ -52,11 +52,11 @@ Return `Result<Success, Problem>` for expected failure. Error strings should say
 ```nivren
 define title
 takes { document is Map<String, String> }
-gives String or String
+gives String or Problem
 {
     keep value set std.map.get with { map set document key set "title" }
     when value == none {
-        give err("document has no title")
+        give err(std.problems.create("app", "document has no title"))
     }
     give ok(value ?? "")
 }

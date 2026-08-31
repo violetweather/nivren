@@ -67,14 +67,14 @@ Effects are visible in source and authorized in the project manifest. For a file
 ```nivren
 define load
 takes { path is String }
-gives String or String
+gives String or Problem
 needs FileRead
 {
     give perform std.files.read with { path set path }
 }
 
 define main
-gives Nothing or String
+gives Nothing or Problem
 needs FileRead
 {
     keep text set perform load with { path set "message.txt" } or give
