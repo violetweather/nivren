@@ -4500,7 +4500,7 @@ fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
 define probe takes {{ }} gives Result<Bool, String> needs Network {{
     keep stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set stream {{
-        give std.net.wait_ready(connection, "read", 2.0)
+        give std.net.wait_ready(connection, Interest.Read, 2.0)
     }}
 }}
 choose probe() {{ case Ok carries ready => ready, case Err carries problem => no }}
@@ -4546,7 +4546,7 @@ define exchange takes {{ }} gives Result<Int, String> needs Network {{
     using first set first_opened {{
         keep second_opened set std.net.connect("127.0.0.1", {second_port}, 2.0) or give
         using second set second_opened {{
-            keep selected set std.net.wait_ready_any([first, second], "read", 2.0) or give
+            keep selected set std.net.wait_ready_any([first, second], Interest.Read, 2.0) or give
             keep index set selected ?? -1
             keep message set std.net.read_ready(second, 5, 2.0) or give
             keep written set std.net.write_ready(second, "ack", 1, 2.0) or give
@@ -4600,7 +4600,7 @@ fn web_requests_are_bounded_typed_and_preserve_status_headers_and_body() {
 keep headers set std.map.of("X-Nivren", "Edition3")
 keep response set std.web.request("POST", "http://127.0.0.1:{port}/echo", headers, "hello", 2.0, 1024)
 choose response {{
-    case Ok carries data => (std.map.get(data, "status") ?? "missing") + ":" + (std.map.get(data, "body") ?? "missing") + ":" + (std.map.get(data, "header:content-type") ?? "missing"),
+    case Ok carries data => text "{{data.status}}:{{data.body}}:{{std.map.get(data.headers, \"content-type\") ?? \"missing\"}}",
     case Err carries problem => problem
 }}
 "#
@@ -5053,8 +5053,8 @@ define serve takes {{ listener is TcpListener }} gives Result<String, String> ne
         keep accepted set std.net.accept(server, 2.0)
         using connection set accepted or give {{
             keep request set std.web.read_request(connection, 1024) or give
-            keep path set std.map.get(request, "path") ?? ""
-            keep body set std.map.get(request, "body") ?? ""
+            keep path set request.path
+            keep body set request.body
             keep headers set std.map.of("Content-Type", "text/plain")
             keep sent set std.web.respond(connection, 201, headers, "created") or give
             give ok(path + ":" + body)

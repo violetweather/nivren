@@ -296,6 +296,13 @@ impl Checker {
         let namespace_is_root = namespace.is_empty();
         let unknown = Type::Unknown;
         let mut global = HashMap::new();
+        global.insert(
+            "Interest".to_string(),
+            Binding {
+                ty: Type::EnumNamespace("Interest".into()),
+                mutable: false,
+            },
+        );
         let mut native = |name: &str, params: Vec<Type>, result: Type| {
             global.insert(
                 name.into(),
@@ -1147,7 +1154,11 @@ impl Checker {
                             (
                                 "wait_ready",
                                 effect(
-                                    vec![Type::TcpStream, Type::String, Type::Float],
+                                    vec![
+                                        Type::TcpStream,
+                                        Type::Enum("Interest".into(), vec![]),
+                                        Type::Float,
+                                    ],
                                     Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
                                     "Network",
                                 ),
@@ -1157,7 +1168,7 @@ impl Checker {
                                 effect(
                                     vec![
                                         Type::Array(Box::new(Type::TcpStream)),
-                                        Type::String,
+                                        Type::Enum("Interest".into(), vec![]),
                                         Type::Float,
                                     ],
                                     Type::Result(
@@ -1269,10 +1280,7 @@ impl Checker {
                                         Type::Int,
                                     ],
                                     Type::Result(
-                                        Box::new(Type::Map(
-                                            Box::new(Type::String),
-                                            Box::new(Type::String),
-                                        )),
+                                        Box::new(Type::Record("Response".into(), vec![])),
                                         Box::new(Type::String),
                                     ),
                                     "Network",
@@ -1283,10 +1291,7 @@ impl Checker {
                                 effect(
                                     vec![Type::TcpStream, Type::Int],
                                     Type::Result(
-                                        Box::new(Type::Map(
-                                            Box::new(Type::String),
-                                            Box::new(Type::String),
-                                        )),
+                                        Box::new(Type::Record("Request".into(), vec![])),
                                         Box::new(Type::String),
                                     ),
                                     "Network",
@@ -1370,10 +1375,7 @@ impl Checker {
                             (
                                 "websocket_accept",
                                 effect(
-                                    vec![
-                                        Type::TcpStream,
-                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
-                                    ],
+                                    vec![Type::TcpStream, Type::Record("Request".into(), vec![])],
                                     Type::Result(Box::new(Type::WebSocket), Box::new(Type::String)),
                                     "Network",
                                 ),
@@ -1821,6 +1823,34 @@ impl Checker {
                 mutable: false,
             },
         );
+        let mut records = HashMap::new();
+        let text_map = Type::Map(Box::new(Type::String), Box::new(Type::String));
+        records.insert(
+            "Response".to_string(),
+            HashMap::from([
+                ("status".to_string(), Type::Int),
+                ("body".to_string(), Type::String),
+                ("headers".to_string(), text_map.clone()),
+            ]),
+        );
+        records.insert(
+            "Request".to_string(),
+            HashMap::from([
+                ("method".to_string(), Type::String),
+                ("path".to_string(), Type::String),
+                ("body".to_string(), Type::String),
+                ("headers".to_string(), text_map),
+            ]),
+        );
+        let mut enums = HashMap::new();
+        enums.insert(
+            "Interest".to_string(),
+            vec![
+                ("Read".to_string(), None),
+                ("Write".to_string(), None),
+                ("ReadWrite".to_string(), None),
+            ],
+        );
         Self {
             scopes: vec![global],
             errors: vec![],
@@ -1828,12 +1858,16 @@ impl Checker {
             needs: vec![],
             generics: vec![],
             constraints: vec![],
-            records: HashMap::new(),
+            records,
             record_derives: HashMap::new(),
-            enums: HashMap::new(),
+            enums,
             type_parameters: HashMap::new(),
             type_constraints: HashMap::new(),
-            type_names: HashMap::new(),
+            type_names: HashMap::from([
+                ("Response".to_string(), "Response".to_string()),
+                ("Request".to_string(), "Request".to_string()),
+                ("Interest".to_string(), "Interest".to_string()),
+            ]),
             protocols: HashSet::new(),
             protocol_members: HashMap::new(),
             adoptions: HashSet::new(),
@@ -2443,13 +2477,20 @@ impl Checker {
                 derives,
                 span,
             } => {
+                // The builtin web shapes are defaults: a user declaration of
+                // the same name shadows them instead of colliding.
                 if self.type_names.contains_key(name) {
-                    self.errors.push(NivError::new(
-                        format!("shape '{name}' is already declared"),
-                        span.line,
-                        span.column,
-                    ));
-                    return;
+                    if builtin_default_type(name) {
+                        self.records.remove(name);
+                        self.enums.remove(name);
+                    } else {
+                        self.errors.push(NivError::new(
+                            format!("shape '{name}' is already declared"),
+                            span.line,
+                            span.column,
+                        ));
+                        return;
+                    }
                 }
                 let qualified = self.qualified(name);
                 self.type_names.insert(name.clone(), qualified.clone());
@@ -2554,12 +2595,17 @@ impl Checker {
                 span,
             } => {
                 if self.type_names.contains_key(name) {
-                    self.errors.push(NivError::new(
-                        format!("choice '{name}' is already declared"),
-                        span.line,
-                        span.column,
-                    ));
-                    return;
+                    if builtin_default_type(name) {
+                        self.records.remove(name);
+                        self.enums.remove(name);
+                    } else {
+                        self.errors.push(NivError::new(
+                            format!("choice '{name}' is already declared"),
+                            span.line,
+                            span.column,
+                        ));
+                        return;
+                    }
                 }
                 let qualified = self.qualified(name);
                 self.type_names.insert(name.clone(), qualified.clone());
@@ -4329,6 +4375,12 @@ fn declared_name(statement: &Stmt) -> Option<&str> {
         | Stmt::Module { name, .. } => Some(name),
         _ => None,
     }
+}
+
+/// The builtin web/net defaults: a user declaration of the same name
+/// shadows them instead of colliding.
+fn builtin_default_type(name: &str) -> bool {
+    matches!(name, "Response" | "Request" | "Interest")
 }
 
 fn known_builtin_protocol(name: &str) -> bool {

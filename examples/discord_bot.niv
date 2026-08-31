@@ -27,7 +27,7 @@ needs Environment, Network
         timeout set 10.0
         maximum set 1048576
     } or give
-    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+    give ok(text "{response.status}")
 }
 
 send_message with { text set "Hello from Nivren" }

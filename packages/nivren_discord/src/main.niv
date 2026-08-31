@@ -198,7 +198,7 @@ needs Network within "discord.com"
         timeout set 10.0
         maximum set 1048576
     } or give
-    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+    give ok(text "{response.status}")
 }
 
 expose { Message, Command, RetryPolicy, RetryDecision, GatewayPlan, GatewayEvent, message_body, bot_headers, validate_command, command_body, validate_retry_policy, retry_decision, validate_gateway, identify_body, decode_event, send_message }

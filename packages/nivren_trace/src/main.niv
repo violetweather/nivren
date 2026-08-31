@@ -144,7 +144,7 @@ needs Network
     keep body set encode_otlp_json with { span set span } or give
     keep typed set std.map.set with { map set request_headers key set "Content-Type" value set "application/json" }
     keep response set perform std.web.request with { method set "POST" url set endpoint headers set typed body set body timeout set timeout maximum set 1048576 } or give
-    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+    give ok(text "{response.status}")
 }
 
 expose { Context, OtlpValue, OtlpAttribute, OtlpSpan, context, fresh, child, parse, traceparent, headers, otlp_attribute, otlp_span, encode_otlp_json, export_otlp_json }

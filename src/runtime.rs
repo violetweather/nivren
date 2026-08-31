@@ -546,6 +546,26 @@ pub struct RecordValue {
     field_indices: Arc<HashMap<String, usize>>,
 }
 
+/// Builds a value of one of the builtin shapes (`Response`, `Request`) that
+/// the standard library gives back in place of stringly-keyed maps.
+fn builtin_record(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
+    let field_indices = Arc::new(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.to_string(), index))
+            .collect::<HashMap<_, _>>(),
+    );
+    Value::Record(Arc::new(RecordValue {
+        type_name: type_name.to_string(),
+        fields: fields
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect(),
+        field_indices,
+    }))
+}
+
 pub enum ManagedFile {
     Reader(BufReader<File>),
     Writer(File),
@@ -1117,6 +1137,17 @@ impl Interpreter {
             "std".into(),
             Binding {
                 value: standard_library(),
+                mutable: false,
+            },
+        );
+        globals.lock().unwrap().values.insert(
+            "Interest".into(),
+            Binding {
+                value: Value::EnumType(Arc::new(EnumType {
+                    name: "Interest".into(),
+                    variants: vec!["Read".into(), "Write".into(), "ReadWrite".into()],
+                    payload_variants: BTreeSet::new(),
+                })),
                 mutable: false,
             },
         );
@@ -10508,23 +10539,22 @@ fn native_web_request(arguments: Vec<Value>, span: Span) -> Result<Value, NivErr
     Ok(
         match http_request(method, url, &request_headers, body, timeout, maximum) {
             Ok(response) => {
-                let mut entries = vec![
-                    (
-                        Value::String("status".into()),
-                        Value::String(response.code.to_string()),
-                    ),
-                    (
-                        Value::String("body".into()),
-                        Value::String(String::from_utf8_lossy(&response.body).into_owned()),
-                    ),
-                ];
-                entries.extend(response.headers.into_iter().map(|(name, value)| {
-                    (
-                        Value::String(format!("header:{name}")),
-                        Value::String(value),
-                    )
-                }));
-                Value::Ok(Arc::new(Value::Map(Arc::new(entries))))
+                let headers = response
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| (Value::String(name), Value::String(value)))
+                    .collect::<Vec<_>>();
+                Value::Ok(Arc::new(builtin_record(
+                    "Response",
+                    vec![
+                        ("status", Value::Int(i64::from(response.code))),
+                        (
+                            "body",
+                            Value::String(String::from_utf8_lossy(&response.body).into_owned()),
+                        ),
+                        ("headers", Value::Map(Arc::new(headers))),
+                    ],
+                )))
             }
             Err(error) => result_error(error),
         },
@@ -10611,24 +10641,23 @@ fn native_web_read_request(arguments: Vec<Value>, span: Span) -> Result<Value, N
     Ok(
         match read_http_request(&mut stream.lock().unwrap(), maximum) {
             Ok(request) => {
-                let mut entries = vec![
-                    (
-                        Value::String("method".into()),
-                        Value::String(request.method),
-                    ),
-                    (Value::String("path".into()), Value::String(request.path)),
-                    (
-                        Value::String("body".into()),
-                        Value::String(String::from_utf8_lossy(&request.body).into_owned()),
-                    ),
-                ];
-                entries.extend(request.headers.into_iter().map(|(name, value)| {
-                    (
-                        Value::String(format!("header:{name}")),
-                        Value::String(value),
-                    )
-                }));
-                Value::Ok(Arc::new(Value::Map(Arc::new(entries))))
+                let headers = request
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| (Value::String(name), Value::String(value)))
+                    .collect::<Vec<_>>();
+                Value::Ok(Arc::new(builtin_record(
+                    "Request",
+                    vec![
+                        ("method", Value::String(request.method)),
+                        ("path", Value::String(request.path)),
+                        (
+                            "body",
+                            Value::String(String::from_utf8_lossy(&request.body).into_owned()),
+                        ),
+                        ("headers", Value::Map(Arc::new(headers))),
+                    ],
+                )))
             }
             Err(error) => result_error(error),
         },
@@ -10840,16 +10869,27 @@ fn native_tls_options(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivE
 #[cfg(feature = "host-runtime")]
 fn native_websocket_accept(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let stream = expect_stream(&arguments[0], "std.web.websocket_accept", span)?;
-    let entries = expect_map(&arguments[1], "std.web.websocket_accept", span)?;
+    let Value::Record(request) = &arguments[1] else {
+        return Err(NivError::new(
+            "std.web.websocket_accept takes the Request shape from std.web.read_request",
+            span.line,
+            span.column,
+        ));
+    };
     let mut method = None;
     let mut headers = BTreeMap::new();
-    for (key, value) in entries.iter() {
-        let key = expect_string(key, "std.web.websocket_accept request key", span)?;
-        let value = expect_string(value, "std.web.websocket_accept request value", span)?;
-        if key == "method" {
-            method = Some(value.to_string());
-        } else if let Some(name) = key.strip_prefix("header:") {
-            headers.insert(name.to_ascii_lowercase(), value.to_string());
+    for (name, value) in &request.fields {
+        match (name.as_str(), value) {
+            ("method", Value::String(value)) => method = Some(value.to_string()),
+            ("headers", Value::Map(entries)) => {
+                for (key, value) in entries.iter() {
+                    let key = expect_string(key, "std.web.websocket_accept header name", span)?;
+                    let value =
+                        expect_string(value, "std.web.websocket_accept header value", span)?;
+                    headers.insert(key.to_ascii_lowercase(), value.to_string());
+                }
+            }
+            _ => {}
         }
     }
     let Some(method) = method else {
@@ -12212,16 +12252,20 @@ fn native_net_write_ready(arguments: Vec<Value>, span: Span) -> Result<Value, Ni
 }
 
 fn net_interest(value: &Value, name: &str, span: Span) -> Result<NetInterest, NivError> {
-    match expect_string(value, name, span)? {
-        "read" => Ok(NetInterest::READABLE),
-        "write" => Ok(NetInterest::WRITABLE),
-        "read_write" => Ok(NetInterest::READABLE | NetInterest::WRITABLE),
-        _ => Err(NivError::new(
-            format!("{name} interest must be 'read', 'write', or 'read_write'"),
-            span.line,
-            span.column,
-        )),
+    if let Value::Enum(choice) = value
+        && choice.type_name == "Interest"
+    {
+        return Ok(match choice.variant.as_str() {
+            "Read" => NetInterest::READABLE,
+            "Write" => NetInterest::WRITABLE,
+            _ => NetInterest::READABLE | NetInterest::WRITABLE,
+        });
     }
+    Err(NivError::new(
+        format!("{name} interest must be Interest.Read, Interest.Write, or Interest.ReadWrite"),
+        span.line,
+        span.column,
+    ))
 }
 
 #[cfg(feature = "host-runtime")]

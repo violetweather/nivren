@@ -12,7 +12,7 @@ needs Network
                 stream set connection
                 maximum set 1048576
             } or give
-            keep path set std.map.get with { map set request key set "path" } ?? "/"
+            keep path set request.path
             keep headers set std.map.of with {
                 key set "Content-Type"
                 value set "text/plain; charset=utf-8"

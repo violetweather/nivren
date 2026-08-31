@@ -23,10 +23,7 @@ needs Network within "discord.com"
         timeout set plan.timeout
         maximum set 1048576
     } or give
-    give ok(std.map.get with {
-        map set response
-        key set "status"
-    } ?? "missing")
+    give ok(text "{response.status}")
 }
 
 prepare message as MessagePlan with {
