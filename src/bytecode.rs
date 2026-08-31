@@ -286,13 +286,29 @@ impl Compiler {
                 body,
                 span,
             } => {
-                self.emit(
-                    Op::Repeat {
-                        condition: compile_expression(condition),
-                        body: compile_statement(body),
-                    },
-                    *span,
-                );
+                if contains_loop_exit(body) {
+                    // `stop`/`skip` thread through the chunk-signal machinery.
+                    self.emit(
+                        Op::Repeat {
+                            condition: compile_expression(condition),
+                            body: compile_statement(body),
+                        },
+                        *span,
+                    );
+                } else {
+                    // Exit-free loops take the jump-based fast path: no
+                    // per-iteration chunk entry, no signal plumbing.
+                    self.emit(Op::Constant(Literal::Null), *span);
+                    let start = self.code.len();
+                    self.expression(condition);
+                    let end = self.emit(Op::JumpIfFalse(usize::MAX), *span);
+                    self.emit(Op::Pop, *span);
+                    self.emit(Op::Pop, *span);
+                    self.statement(body);
+                    self.emit(Op::Jump(start), *span);
+                    self.patch(end, self.code.len());
+                    self.emit(Op::Pop, *span);
+                }
             }
             Stmt::IfCarries {
                 subject,
@@ -1096,6 +1112,32 @@ fn pattern_text(pattern: &Pattern) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+/// True when the statement subtree holds a `stop` or `skip` that targets the
+/// enclosing loop. Nested loops own their exits, and function or generator
+/// bodies cannot legally reach an outer loop (the checker rejects that), so
+/// both cut the walk.
+fn contains_loop_exit(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Stop(_) | Stmt::Skip(_) => true,
+        Stmt::Block(statements, _) => statements.iter().any(contains_loop_exit),
+        Stmt::If {
+            then_branch,
+            else_branch,
+            ..
+        }
+        | Stmt::IfCarries {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            contains_loop_exit(then_branch)
+                || else_branch.as_deref().is_some_and(contains_loop_exit)
+        }
+        Stmt::Using { body, .. } => contains_loop_exit(body),
+        _ => false,
     }
 }
 
