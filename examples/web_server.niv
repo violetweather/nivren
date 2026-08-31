@@ -13,7 +13,7 @@ needs Network
                 maximum set 1048576
             } or give
             keep path set std.map.get with { map set request key set "path" } ?? "/"
-            keep headers set std.map.single with {
+            keep headers set std.map.of with {
                 key set "Content-Type"
                 value set "text/plain; charset=utf-8"
             }

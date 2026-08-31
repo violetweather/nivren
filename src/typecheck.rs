@@ -331,7 +331,14 @@ impl Checker {
                                     "FileWrite",
                                 ),
                             ),
-                            ("exists", effect(vec![Type::String], Type::Bool, "FileRead")),
+                            (
+                                "exists",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
+                                    "FileRead",
+                                ),
+                            ),
                             (
                                 "open_read",
                                 effect(
@@ -349,7 +356,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "read_open",
+                                "read_from",
                                 effect(
                                     vec![Type::File, Type::Int],
                                     string_result.clone(),
@@ -357,7 +364,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "write_open",
+                                "write_to",
                                 effect(
                                     vec![Type::File, Type::String],
                                     Type::Result(Box::new(Type::Null), Box::new(Type::String)),
@@ -513,7 +520,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "stringify",
+                                "encode",
                                 function(
                                     vec![Type::Unknown],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
@@ -887,7 +894,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "verify_hmac_sha256",
+                                "hmac_sha256_verify",
                                 function(
                                     vec![Type::Bytes, Type::Bytes, Type::Bytes],
                                     Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
@@ -1112,7 +1119,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "ready",
+                                "wait_ready",
                                 effect(
                                     vec![Type::TcpStream, Type::String, Type::Float],
                                     Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
@@ -1120,7 +1127,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "ready_any",
+                                "wait_ready_any",
                                 effect(
                                     vec![
                                         Type::Array(Box::new(Type::TcpStream)),
@@ -1678,7 +1685,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "gunzip",
+                                "gzip_decode",
                                 function(
                                     vec![Type::Bytes, Type::Int],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
@@ -1692,7 +1699,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "unzlib",
+                                "zlib_decode",
                                 function(
                                     vec![Type::Bytes, Type::Int],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
@@ -1741,42 +1748,42 @@ impl Checker {
                         "encoding",
                         module(vec![
                             (
-                                "hex",
+                                "hex_encode",
                                 function(
                                     vec![Type::Bytes],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "unhex",
+                                "hex_decode",
                                 function(
                                     vec![Type::String],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "base64",
+                                "base64_encode",
                                 function(
                                     vec![Type::Bytes],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "unbase64",
+                                "base64_decode",
                                 function(
                                     vec![Type::String],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "base64url",
+                                "base64url_encode",
                                 function(
                                     vec![Type::Bytes],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "unbase64url",
+                                "base64url_decode",
                                 function(
                                     vec![Type::String],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
@@ -3122,7 +3129,7 @@ impl Checker {
                 } else {
                     None
                 };
-                if member_path(callee, &["std", "json", "stringify"])
+                if member_path(callee, &["std", "json", "encode"])
                     && let Some(Type::Record(name, _)) = argument_types.first()
                     && !self.record_supports_derive(name, "Json")
                 {
@@ -4708,7 +4715,7 @@ fn transaction_type_module() -> Type {
     let result = |ok: Type| Type::Result(Box::new(ok), Box::new(Type::String));
     Type::Module(HashMap::from([
         (
-            "begin".into(),
+            "create".into(),
             generic(vec![map.clone()], transaction.clone()),
         ),
         (
@@ -4758,10 +4765,7 @@ fn map_functions() -> Vec<(&'static str, Type)> {
         )
     };
     vec![
-        (
-            "single",
-            generic(vec![key.clone(), value.clone()], map.clone()),
-        ),
+        ("of", generic(vec![key.clone(), value.clone()], map.clone())),
         (
             "set",
             generic(vec![map.clone(), key.clone(), value.clone()], map.clone()),
@@ -4886,7 +4890,7 @@ fn set_functions() -> Vec<(&'static str, Type)> {
         )
     };
     vec![
-        ("single", generic(vec![element.clone()], set.clone())),
+        ("of", generic(vec![element.clone()], set.clone())),
         (
             "add",
             generic(vec![set.clone(), element.clone()], set.clone()),

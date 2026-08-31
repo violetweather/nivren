@@ -12,4 +12,4 @@ gives Int
 }
 
 show("Hello, " + language + "!")
-show(values through std.list.fold with { initial set 0 combine set add })
+show(values through std.list.fold with { initial set 0 by set add })

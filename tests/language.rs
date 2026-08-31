@@ -341,7 +341,7 @@ shape Release holds {
 keep first set Release with { name set "beta" build set 4 }
 keep second set Release with { name set "beta" build set 4 }
 assert(first == second, "Compare derive")
-std.json.stringify(first)
+std.json.encode(first)
 "#;
     assert!(nivren::check(complete).is_ok());
     assert_eq!(eval_tree(complete), eval_vm(complete));
@@ -362,7 +362,7 @@ std.json.stringify(first)
 
     let missing_json = r#"
 shape Visible holds { value is Int } with Display
-std.json.stringify(Visible with { value set 1 })
+std.json.encode(Visible with { value set 1 })
 "#;
     let errors = nivren::check(missing_json).unwrap_err();
     assert!(errors[0].message.contains("must derive Json"));
@@ -727,8 +727,8 @@ choose failure { Ok(previous) => -1, Err(observed) => old + observed + std.atomi
 fn transactions_commit_or_rollback_and_close_deterministically() {
     let commit = r#"
 define update() gives Result<Int, String> {
-    keep original = std.map.single("count", 1)
-    keep transaction: Transaction<String, Int> = std.transactions.begin(original)
+    keep original = std.map.of("count", 1)
+    keep transaction: Transaction<String, Int> = std.transactions.create(original)
     keep changed = std.transactions.set(transaction, "count", 2) or give
     keep committed = std.transactions.commit(transaction) or give
     give ok(std.map.get(committed, "count") ?? 0)
@@ -740,8 +740,8 @@ choose update() { Ok(value) => value, Err(problem) => 0 }
 
     let rollback = r#"
 define update() gives Result<Int, String> {
-    keep original = std.map.single("count", 1)
-    keep transaction = std.transactions.begin(original)
+    keep original = std.map.of("count", 1)
+    keep transaction = std.transactions.create(original)
     keep changed = std.transactions.set(transaction, "count", 9) or give
     keep restored = std.transactions.rollback(transaction) or give
     give ok(std.map.get(restored, "count") ?? 0)
@@ -758,7 +758,7 @@ define abandon(transaction: Transaction<String, Int>) gives Result<Null, String>
         give err("abandoned")
     }
 }
-keep transaction = std.transactions.begin(std.map.single("count", 1))
+keep transaction = std.transactions.create(std.map.of("count", 1))
 keep abandoned = abandon(transaction)
 keep closed = std.transactions.get(transaction, "count")
 keep first_close = std.transactions.close(transaction)
@@ -768,7 +768,12 @@ choose closed { Ok(value) => no, Err(problem) => yes }
     assert_eq!(eval_tree(scoped), Value::Bool(true));
     assert_eq!(eval_vm(scoped), Value::Bool(true));
 
-    assert!(nivren::check("std.transactions.set(std.transactions.begin(std.map.single(1, \"a\")), \"wrong\", \"b\")").is_err());
+    assert!(
+        nivren::check(
+            "std.transactions.set(std.transactions.create(std.map.of(1, \"a\")), \"wrong\", \"b\")"
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1297,11 +1302,11 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
     );
 
     nivren::check(
-        "define entry<Key is Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
+        "define entry<Key is Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.of(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
     )
     .unwrap();
     assert!(nivren::check(
-        "define entry<Key, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) }",
+        "define entry<Key, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.of(key, value) }",
     )
     .is_err());
     assert!(
@@ -1637,7 +1642,7 @@ score(Response.Array([Response.Text("ok"), Response.Number(5)]))
             .unwrap(),
         Value::Int(2)
     );
-    let json = r#"choice Value { Text(String), Nil } std.json.stringify(Value.Text("ok"))"#;
+    let json = r#"choice Value { Text(String), Nil } std.json.encode(Value.Text("ok"))"#;
     let expected_json = Value::Ok(Arc::new(Value::String(
         r#"{"$value":"ok","$variant":"Text"}"#.into(),
     )));
@@ -1958,7 +1963,7 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
         .with_capabilities(vec!["FileRead".to_string()])
         .run_bytecode(&chunk)
         .unwrap();
-    assert_eq!(allowed, Value::Bool(false));
+    assert_eq!(allowed, Value::Ok(Value::Bool(false).into()));
 
     let directory = module_fixture("scoped-capabilities");
     let allowed_file = directory.join("allowed.txt");
@@ -1988,7 +1993,7 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
         .with_capability_scopes(scoped.capability_scopes.clone())
         .run_bytecode(&chunk)
         .unwrap();
-    assert_eq!(inside, Value::Bool(true));
+    assert_eq!(inside, Value::Ok(Value::Bool(true).into()));
 
     let outside_source = "std.files.exists(\"/definitely-outside-nivren-scope\")";
     let outside_program =
@@ -3139,7 +3144,7 @@ fn typed_standard_library_handles_files_paths_time_and_process_errors() {
     let file = directory.join("message.txt");
     let path = file.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
-        "keep writeResult: Result<Null, String> = std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ Ok(value) => yes, Err(error) => no }}, \"write\"); keep readResult: Result<String, String> = std.files.read(\"{path}\"); keep text = choose (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(std.files.exists(\"{path}\"), \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
+        "keep writeResult: Result<Null, String> = std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ Ok(value) => yes, Err(error) => no }}, \"write\"); keep readResult: Result<String, String> = std.files.read(\"{path}\"); keep text = choose (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(choose (std.files.exists(\"{path}\")) {{ Ok(present) => present, Err(error) => no }}, \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
 
@@ -3181,7 +3186,7 @@ fn json_values_round_trip_through_nivren_collections() {
     let source = r#"
 keep decoded = std.json.parse("{\"name\":\"Nivren\",\"stable\":true,\"versions\":[2,3]}")
 choose decoded {
-    Ok(value) => std.json.stringify(value),
+    Ok(value) => std.json.encode(value),
     Err(problem) => err(problem)
 }
 "#;
@@ -3192,7 +3197,7 @@ choose decoded {
     assert_eq!(eval_vm(source), expected);
 
     assert_eq!(
-        eval("std.json.stringify(std.set.single(1))"),
+        eval("std.json.encode(std.set.of(1))"),
         Value::Err(Arc::new(Value::String("JSON cannot represent Set".into())))
     );
 }
@@ -3219,7 +3224,7 @@ define display_name(source: String) gives Result<String, String> {
 
 keep decoded = std.json.decode(User, "{\"name\":\"Ada\",\"score\":255,\"tags\":[\"compiler\"],\"alias\":null,\"address\":{\"city\":\"London\",\"postal\":12345},\"role\":\"Admin\"}")
 choose decoded {
-    Ok(user) => std.json.stringify(user),
+    Ok(user) => std.json.encode(user),
     Err(problem) => err(problem),
 }
 "#;
@@ -3269,7 +3274,7 @@ define load(path: String) gives Result<String, String> needs FileRead {{
         keep first_item = first ?? Item(0)
         keep second_item = second ?? Item(0)
         assert(first_item.id + second_item.id == 3, "typed streamed fields")
-        give std.json.stringify([first_item, second_item])
+        give std.json.encode([first_item, second_item])
     }}
 }}
 load({:?})
@@ -3292,7 +3297,7 @@ define recover(path: String) gives Result<String, String> needs FileRead {{
             Err(problem) => std.json.read_next(file, 64),
         }}
         keep next = recovered or give
-        give std.json.stringify(next)
+        give std.json.encode(next)
     }}
 }}
 recover({:?})
@@ -3487,8 +3492,8 @@ define verify() gives Result<Int, String> {
     assert(std.bytes.length(digest) == 32, "SHA-256 width")
 
     keep tag = std.crypto.hmac_sha256(key, message) or give
-    keep valid = std.crypto.verify_hmac_sha256(key, message, tag) or give
-    keep invalid = std.crypto.verify_hmac_sha256(key, std.bytes.from_string("other"), tag) or give
+    keep valid = std.crypto.hmac_sha256_verify(key, message, tag) or give
+    keep invalid = std.crypto.hmac_sha256_verify(key, std.bytes.from_string("other"), tag) or give
     assert(valid, "valid HMAC")
     assert(!invalid, "invalid HMAC")
     give ok(std.bytes.length(tag))
@@ -3504,7 +3509,7 @@ verify()
 keep key = std.bytes.from_string("key")
 keep message = std.bytes.from_string("message")
 keep tag = std.bytes.from_string("short")
-choose std.crypto.verify_hmac_sha256(key, message, tag) {
+choose std.crypto.hmac_sha256_verify(key, message, tag) {
     Ok(valid) => no,
     Err(problem) => yes,
 }
@@ -3602,7 +3607,7 @@ protect()
     assert_eq!(imported.to_string(), "Ok(<secret-key>)");
     assert_eq!(
         eval_vm(
-            "choose std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\")) { Ok(key) => choose std.json.stringify(key) { Ok(text) => no, Err(problem) => yes }, Err(problem) => no }"
+            "choose std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\")) { Ok(key) => choose std.json.encode(key) { Ok(text) => no, Err(problem) => yes }, Err(problem) => no }"
         ),
         Value::Bool(true)
     );
@@ -3612,14 +3617,14 @@ protect()
 fn ed25519_matches_rfc8032_and_rejects_tampering_in_both_engines() {
     let source = r#"
 define verify_vector() gives Result<Bool, String> {
-    keep seed = std.encoding.unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
+    keep seed = std.encoding.hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
     keep key = std.crypto.key_import(seed) or give
     keep public = std.crypto.ed25519_public(key) or give
-    keep expected_public = std.encoding.unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a") or give
+    keep expected_public = std.encoding.hex_decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a") or give
     assert(public == expected_public, "RFC 8032 public key")
     keep message = std.bytes.from_string("")
     keep signature = std.crypto.ed25519_sign(key, message) or give
-    keep expected_signature = std.encoding.unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b") or give
+    keep expected_signature = std.encoding.hex_decode("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b") or give
     assert(signature == expected_signature, "RFC 8032 signature")
     keep valid = std.crypto.ed25519_verify(public, message, signature) or give
     keep changed = std.crypto.ed25519_verify(public, std.bytes.from_string("changed"), signature) or give
@@ -3645,9 +3650,9 @@ define roundtrip() gives Result<Bool, String> {
     keep first = std.compression.gzip(input, 6) or give
     keep second = std.compression.gzip(input, 6) or give
     assert(first == second, "gzip output is deterministic")
-    keep restored = std.compression.gunzip(first, 1024) or give
+    keep restored = std.compression.gzip_decode(first, 1024) or give
     keep packed = std.compression.zlib(input, 9) or give
-    keep inflated = std.compression.unzlib(packed, 1024) or give
+    keep inflated = std.compression.zlib_decode(packed, 1024) or give
     give ok(restored == input and inflated == input)
 }
 roundtrip()
@@ -3660,7 +3665,7 @@ roundtrip()
 keep input = std.bytes.from_string("a long value")
 keep packed = std.compression.gzip(input, 6)
 choose packed {
-    Ok(bytes) => choose std.compression.gunzip(bytes, 2) {
+    Ok(bytes) => choose std.compression.gzip_decode(bytes, 2) {
         Ok(value) => no,
         Err(problem) => yes,
     },
@@ -3670,7 +3675,7 @@ choose packed {
     assert_eq!(eval_vm(limited), Value::Bool(true));
     assert_eq!(
         eval_vm(
-            "choose std.compression.gunzip(std.bytes.from_string(\"invalid\"), 1024) { Ok(value) => no, Err(problem) => yes }"
+            "choose std.compression.gzip_decode(std.bytes.from_string(\"invalid\"), 1024) { Ok(value) => no, Err(problem) => yes }"
         ),
         Value::Bool(true)
     );
@@ -3682,15 +3687,15 @@ fn hex_and_base64_encodings_are_canonical_bounded_and_portable() {
     let source = r#"
 define roundtrip() gives Result<Bool, String> {
     keep bytes = std.bytes.from_string("Nivren?")
-    keep hex = std.encoding.hex(bytes) or give
-    keep standard = std.encoding.base64(bytes) or give
-    keep url = std.encoding.base64url(bytes) or give
+    keep hex = std.encoding.hex_encode(bytes) or give
+    keep standard = std.encoding.base64_encode(bytes) or give
+    keep url = std.encoding.base64url_encode(bytes) or give
     assert(hex == "4e697672656e3f", "lowercase canonical hex")
     assert(standard == "Tml2cmVuPw==", "padded standard base64")
     assert(url == "Tml2cmVuPw", "unpadded URL-safe base64")
-    keep from_hex = std.encoding.unhex("4E697672656E3F") or give
-    keep from_standard = std.encoding.unbase64(standard) or give
-    keep from_url = std.encoding.unbase64url(url) or give
+    keep from_hex = std.encoding.hex_decode("4E697672656E3F") or give
+    keep from_standard = std.encoding.base64_decode(standard) or give
+    keep from_url = std.encoding.base64url_decode(url) or give
     give ok(from_hex == bytes and from_standard == bytes and from_url == bytes)
 }
 roundtrip()
@@ -3699,16 +3704,16 @@ roundtrip()
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
     assert_eq!(
-        eval_vm("choose std.encoding.unhex(\"xyz\") { Ok(bytes) => no, Err(problem) => yes }"),
+        eval_vm("choose std.encoding.hex_decode(\"xyz\") { Ok(bytes) => no, Err(problem) => yes }"),
         Value::Bool(true)
     );
     assert_eq!(
         eval_vm(
-            "choose std.encoding.unbase64(\"not base64\") { Ok(bytes) => no, Err(problem) => yes }"
+            "choose std.encoding.base64_decode(\"not base64\") { Ok(bytes) => no, Err(problem) => yes }"
         ),
         Value::Bool(true)
     );
-    assert!(nivren::check("std.encoding.hex(\"text\")").is_err());
+    assert!(nivren::check("std.encoding.hex_encode(\"text\")").is_err());
 }
 
 #[test]
@@ -3748,10 +3753,10 @@ roundtrip()
 #[test]
 fn persistent_maps_and_sets_are_generic_and_deterministic() {
     let source = r#"
-keep first: Map<String, Int> = std.map.single("nivren", 1)
+keep first: Map<String, Int> = std.map.of("nivren", 1)
 keep scores: Map<String, Int> = std.map.set(first, "nivren", 2)
 keep score: Int = std.map.get(scores, "nivren") ?? 0
-keep names: Set<String> = std.set.add(std.set.single("nivren"), "language")
+keep names: Set<String> = std.set.add(std.set.of("nivren"), "language")
 assert(std.map.length(first) == 1, "persistent source map")
 assert(std.map.contains(scores, "nivren"), "map contains")
 assert(std.set.contains(names, "language"), "set contains")
@@ -3760,11 +3765,11 @@ score + std.set.length(names)
     assert_eq!(eval_tree(source), Value::Int(4));
     assert_eq!(eval_vm(source), Value::Int(4));
 
-    assert!(nivren::check("std.set.add(std.set.single(1), \"two\")").is_err());
-    assert!(nivren::check("keep wrong: Map<String> = std.map.single(\"a\", 1)").is_err());
+    assert!(nivren::check("std.set.add(std.set.of(1), \"two\")").is_err());
+    assert!(nivren::check("keep wrong: Map<String> = std.map.of(\"a\", 1)").is_err());
 
     let unstable = nivren::run(
-        "define identity<Value>(value: Value) gives Value { give value } std.map.single(identity, 1)",
+        "define identity<Value>(value: Value) gives Value { give value } std.map.of(identity, 1)",
     )
     .unwrap_err();
     assert!(
@@ -4465,7 +4470,7 @@ fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
 define probe() gives Result<Bool, String> needs Network {{
     keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set stream {{
-        give std.net.ready(connection, "read", 2.0)
+        give std.net.wait_ready(connection, "read", 2.0)
     }}
 }}
 choose probe() {{ Ok(ready) => ready, Err(problem) => no }}
@@ -4511,7 +4516,7 @@ define exchange() gives Result<Int, String> needs Network {{
     using first set first_opened {{
         keep second_opened = std.net.connect("127.0.0.1", {second_port}, 2.0) or give
         using second set second_opened {{
-            keep selected = std.net.ready_any([first, second], "read", 2.0) or give
+            keep selected = std.net.wait_ready_any([first, second], "read", 2.0) or give
             keep index = selected ?? -1
             keep message = std.net.read_ready(second, 5, 2.0) or give
             keep written = std.net.write_ready(second, "ack", 1, 2.0) or give
@@ -4562,7 +4567,7 @@ fn web_requests_are_bounded_typed_and_preserve_status_headers_and_body() {
         });
         let source = format!(
             r#"
-keep headers = std.map.single("X-Nivren", "Edition3")
+keep headers = std.map.of("X-Nivren", "Edition3")
 keep response = std.web.request("POST", "http://127.0.0.1:{port}/echo", headers, "hello", 2.0, 1024)
 choose response {{
     Ok(data) => (std.map.get(data, "status") ?? "missing") + ":" + (std.map.get(data, "body") ?? "missing") + ":" + (std.map.get(data, "header:content-type") ?? "missing"),
@@ -5020,7 +5025,7 @@ define serve(listener: TcpListener) gives Result<String, String> needs Network {
             keep request = std.web.read_request(connection, 1024) or give
             keep path = std.map.get(request, "path") ?? ""
             keep body = std.map.get(request, "body") ?? ""
-            keep headers = std.map.single("Content-Type", "text/plain")
+            keep headers = std.map.of("Content-Type", "text/plain")
             keep sent = std.web.respond(connection, 201, headers, "created") or give
             give ok(path + ":" + body)
         }}
@@ -5108,7 +5113,7 @@ fn using_scopes_close_bounded_file_handles_in_both_engines() {
 define save(path: String) gives Result<Int, String> needs FileWrite {{
     keep opened = std.files.open_write(path)
     using file set opened or give {{
-        keep written = std.files.write_open(file, "nivren") or give
+        keep written = std.files.write_to(file, "nivren") or give
         give ok(7)
     }}
 }}
@@ -5132,7 +5137,7 @@ save("{}")
 define load(path: String) gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path)
     using file set opened or give {{
-        give std.files.read_open(file, 64)
+        give std.files.read_from(file, 64)
     }}
 }}
 load("{}")
@@ -5172,7 +5177,7 @@ define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
         keep opened_file = std.files.open_read(path) or give
         using file set opened_file {{
             keep closed = std.files.close(file) or give
-            keep rejected = choose std.files.read_open(file, 1) {{ Ok(value) => no, Err(problem) => yes }}
+            keep rejected = choose std.files.read_from(file, 1) {{ Ok(value) => no, Err(problem) => yes }}
             when !rejected {{ give err("closed file accepted a read") }}
         }}
         keep opened_stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
@@ -5330,7 +5335,7 @@ fn structured_log_events_are_machine_readable_and_capability_checked() {
     let source = directory.join("event.niv");
     fs::write(
         &source,
-        "std.log.event(\"info\", \"started\", std.map.single(\"request\", \"42\"))",
+        "std.log.event(\"info\", \"started\", std.map.of(\"request\", \"42\"))",
     )
     .unwrap();
     let source_text = source.display().to_string();
@@ -5345,7 +5350,7 @@ fn structured_log_events_are_machine_readable_and_capability_checked() {
     assert_eq!(event["fields"]["request"], "42");
 
     let missing = nivren::check(
-        "define emit() gives Null { give std.log.event(\"info\", \"x\", std.map.single(\"key\", \"value\")) }",
+        "define emit() gives Null { give std.log.event(\"info\", \"x\", std.map.of(\"key\", \"value\")) }",
     )
     .unwrap_err();
     assert!(
@@ -5744,7 +5749,7 @@ keep wav_value = nivren_wav.encode_pcm16(nivren_wav.Audio(48000, 1, [0, 42]))
 keep wav_ok = choose wav_value { Ok(bytes) => choose nivren_wav.decode_pcm16(bytes) { Ok(audio) => audio.samples == [0, 42], Err(problem) => no }, Err(problem) => no }
 keep image_pixels = std.bytes.from_values([255, 0, 0])
 keep image_ok = choose image_pixels { Ok(pixels) => choose nivren_image.image(1, 1, pixels) { Ok(value) => choose nivren_image.encode_ppm(value) { Ok(bytes) => nivren_image.decode_ppm(bytes) == ok(value), Err(problem) => no }, Err(problem) => no }, Err(problem) => no }
-keep metric_value = nivren_metrics.sample("nivren_ready", "Readiness", "gauge", 1.0, std.map.single("edition", "3"))
+keep metric_value = nivren_metrics.sample("nivren_ready", "Readiness", "gauge", 1.0, std.map.of("edition", "3"))
 keep metrics_ok = choose metric_value { Ok(value) => choose nivren_metrics.encode([value]) { Ok(text) => text != "", Err(problem) => no }, Err(problem) => no }
 keep trace_value = nivren_trace.parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 keep trace_ok = choose trace_value { Ok(value) => nivren_trace.traceparent(value) == ok("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), Err(problem) => no }
@@ -6516,7 +6521,7 @@ len(std.iter.collect(advanced))
 #[test]
 fn when_carries_unwraps_present_maybe_values_in_both_engines() {
     let source = r#"
-keep table set std.map.single(1, "one")
+keep table set std.map.of(1, "one")
 change seen set ""
 when std.map.get(table, 1) carries value {
     change seen to value
@@ -6532,7 +6537,7 @@ seen
 #[test]
 fn when_carries_takes_the_otherwise_branch_for_none_in_both_engines() {
     let source = r#"
-keep table set std.map.single(1, "one")
+keep table set std.map.of(1, "one")
 change seen set ""
 when std.map.get(table, 2) carries value {
     change seen to value
@@ -6548,7 +6553,7 @@ seen
 #[test]
 fn when_carries_bindings_stay_inside_the_matched_branch() {
     let source = r#"
-keep table set std.map.single(1, "one")
+keep table set std.map.of(1, "one")
 when std.map.get(table, 1) carries value {
     show value
 }
@@ -6567,7 +6572,7 @@ fn when_carries_rejects_subjects_that_are_not_maybe_values() {
 #[test]
 fn loop_exits_pass_through_when_carries_branches_in_both_engines() {
     let source = r#"
-keep table set std.map.single(3, "three")
+keep table set std.map.of(3, "three")
 change total set 0
 each item in [1, 2, 3, 4] {
     when std.map.get(table, item) carries found {
@@ -7303,7 +7308,7 @@ flip with {}
 fn generators_expand_into_checked_declarations() {
     let source = r#"
 generate schemas {
-    keep fields set std.map.set(std.map.single("x", "Int"), "y", "Int")
+    keep fields set std.map.set(std.map.of("x", "Int"), "y", "Int")
     keep point set choose std.source.shape("Point", fields, ["Compare"]) {
         case Ok carries declaration => declaration
         otherwise as problem => problem
@@ -7354,7 +7359,7 @@ expand sized with { size set 3 }
 fn generated_choices_join_pattern_matching() {
     let source = r#"
 generate signals {
-    keep cases set std.map.set(std.map.single("Go", ""), "Wait", "Int")
+    keep cases set std.map.set(std.map.of("Go", ""), "Wait", "Int")
     keep signal set choose std.source.choice("Signal", cases) {
         case Ok carries declaration => declaration
         otherwise as problem => problem
@@ -7571,7 +7576,7 @@ total
 #[test]
 fn text_holes_may_contain_string_literals_in_both_engines() {
     let source = r#"
-keep table set std.map.single("kind", "demo")
+keep table set std.map.of("kind", "demo")
 text "value {std.map.get(table, "kind") ?? "?"} end"
 "#;
     let expected = Value::String("value demo end".into());

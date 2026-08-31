@@ -28,7 +28,7 @@ takes {
 }
 gives Bool or String
 {
-    give std.crypto.verify_hmac_sha256 with {
+    give std.crypto.hmac_sha256_verify with {
         key set std.bytes.from_string with { value set key }
         message set std.bytes.from_string with { value set message }
         expected set tag

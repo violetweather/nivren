@@ -87,7 +87,7 @@ gives maybe RouteMatch or String
         give ok(none)
     }
     change parameters set std.map.remove with {
-        map set std.map.single with { key set "__empty__" value set "" }
+        map set std.map.of with { key set "__empty__" value set "" }
         key set "__empty__"
     }
     change index set 0
@@ -172,7 +172,7 @@ gives Response or String
     }
     give ok(Response with {
         status set status
-        headers set std.map.single with { key set "content-type" value set "text/plain; charset=utf-8" }
+        headers set std.map.of with { key set "content-type" value set "text/plain; charset=utf-8" }
         body set body
     })
 }

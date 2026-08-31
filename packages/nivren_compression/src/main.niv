@@ -3,20 +3,20 @@ takes { data is Bytes level is Int }
 gives Bytes or String
 { give std.compression.gzip with { bytes set data level set level } }
 
-define gunzip
+define gzip_decode
 takes { data is Bytes maximum is Int }
 gives Bytes or String
-{ give std.compression.gunzip with { bytes set data maximum set maximum } }
+{ give std.compression.gzip_decode with { bytes set data maximum set maximum } }
 
 define zlib
 takes { data is Bytes level is Int }
 gives Bytes or String
 { give std.compression.zlib with { bytes set data level set level } }
 
-define unzlib
+define zlib_decode
 takes { data is Bytes maximum is Int }
 gives Bytes or String
-{ give std.compression.unzlib with { bytes set data maximum set maximum } }
+{ give std.compression.zlib_decode with { bytes set data maximum set maximum } }
 
 define gzip_text
 takes { text is String level is Int }
@@ -27,8 +27,8 @@ define gunzip_text
 takes { data is Bytes maximum is Int }
 gives String or String
 {
-    keep restored set gunzip with { data set data maximum set maximum } or give
+    keep restored set gzip_decode with { data set data maximum set maximum } or give
     give std.bytes.to_string with { bytes set restored }
 }
 
-expose { gzip, gunzip, zlib, unzlib, gzip_text, gunzip_text }
+expose { gzip, gzip_decode, zlib, zlib_decode, gzip_text, gunzip_text }

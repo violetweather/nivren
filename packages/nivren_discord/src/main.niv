@@ -56,7 +56,7 @@ takes {
 }
 gives Map<String, String>
 {
-    keep authorization set std.map.single with { key set "Authorization" value set "Bot " + token }
+    keep authorization set std.map.of with { key set "Authorization" value set "Bot " + token }
     give std.map.set with { map set authorization key set "Content-Type" value set "application/json" }
 }
 

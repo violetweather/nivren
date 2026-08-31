@@ -6093,15 +6093,15 @@ fn standard_library() -> Value {
                     Some("FileWrite"),
                 ),
                 (
-                    "read_open",
-                    "read_open",
+                    "read_from",
+                    "read_from",
                     2,
                     native_fs_read_open,
                     Some("FileRead"),
                 ),
                 (
-                    "write_open",
-                    "write_open",
+                    "write_to",
+                    "write_to",
                     2,
                     native_fs_write_open,
                     Some("FileWrite"),
@@ -6173,7 +6173,7 @@ fn standard_library() -> Value {
                 ("compact", 1, native_json_compact, None),
                 ("pretty", 1, native_json_pretty, None),
                 ("parse", 1, native_json_parse, None),
-                ("stringify", 1, native_json_stringify, None),
+                ("encode", 1, native_json_stringify, None),
                 ("decode", 2, native_json_decode, None),
                 ("read_next", 2, native_json_read_next, Some("FileRead")),
                 (
@@ -6287,7 +6287,7 @@ fn standard_library() -> Value {
                 ("sha256", 1, native_crypto_sha256, None),
                 ("hmac_sha256", 2, native_crypto_hmac_sha256, None),
                 (
-                    "verify_hmac_sha256",
+                    "hmac_sha256_verify",
                     3,
                     native_crypto_verify_hmac_sha256,
                     None,
@@ -6318,9 +6318,9 @@ fn standard_library() -> Value {
             "compression".into(),
             native_module(&[
                 ("gzip", 2, native_compression_gzip, None),
-                ("gunzip", 2, native_compression_gunzip, None),
+                ("gzip_decode", 2, native_compression_gunzip, None),
                 ("zlib", 2, native_compression_zlib, None),
-                ("unzlib", 2, native_compression_unzlib, None),
+                ("zlib_decode", 2, native_compression_unzlib, None),
             ]),
         ),
         (
@@ -6333,12 +6333,12 @@ fn standard_library() -> Value {
         (
             "encoding".into(),
             native_module(&[
-                ("hex", 1, native_encoding_hex, None),
-                ("unhex", 1, native_encoding_unhex, None),
-                ("base64", 1, native_encoding_base64, None),
-                ("unbase64", 1, native_encoding_unbase64, None),
-                ("base64url", 1, native_encoding_base64url, None),
-                ("unbase64url", 1, native_encoding_unbase64url, None),
+                ("hex_encode", 1, native_encoding_hex, None),
+                ("hex_decode", 1, native_encoding_unhex, None),
+                ("base64_encode", 1, native_encoding_base64, None),
+                ("base64_decode", 1, native_encoding_unbase64, None),
+                ("base64url_encode", 1, native_encoding_base64url, None),
+                ("base64url_decode", 1, native_encoding_unbase64url, None),
             ]),
         ),
         (
@@ -6443,7 +6443,7 @@ fn standard_library() -> Value {
         (
             "map".into(),
             native_module(&[
-                ("single", 2, native_map_single, None),
+                ("of", 2, native_map_single, None),
                 ("set", 3, native_map_set, None),
                 ("get", 2, native_map_get, None),
                 ("contains", 2, native_map_contains, None),
@@ -6456,7 +6456,7 @@ fn standard_library() -> Value {
         (
             "set".into(),
             native_module(&[
-                ("single", 1, native_set_single, None),
+                ("of", 1, native_set_single, None),
                 ("add", 2, native_set_add, None),
                 ("contains", 2, native_set_contains, None),
                 ("remove", 2, native_set_remove, None),
@@ -6525,8 +6525,8 @@ fn standard_library() -> Value {
                 ("read_line", 3, native_net_read_line, Some("Network")),
                 ("write", 2, native_net_write, Some("Network")),
                 ("write_some", 4, native_net_write_some, Some("Network")),
-                ("ready", 3, native_net_ready, Some("Network")),
-                ("ready_any", 3, native_net_ready_any, Some("Network")),
+                ("wait_ready", 3, native_net_ready, Some("Network")),
+                ("wait_ready_any", 3, native_net_ready_any, Some("Network")),
                 ("read_ready", 3, native_net_read_ready, Some("Network")),
                 ("write_ready", 4, native_net_write_ready, Some("Network")),
                 (
@@ -6664,8 +6664,8 @@ fn standard_library() -> Value {
             "transactions".into(),
             named_native_module(&[
                 (
-                    "begin",
-                    "transactions.begin",
+                    "create",
+                    "transactions.create",
                     1,
                     native_transaction_begin,
                     None,
@@ -6961,7 +6961,13 @@ fn native_fs_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivError>
 
 fn native_fs_exists(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let path = expect_string(&arguments[0], "std.files.exists", span)?;
-    Ok(Value::Bool(Path::new(path).exists()))
+    Ok(match std::fs::metadata(path) {
+        Ok(_) => Value::Ok(Arc::new(Value::Bool(true))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Value::Ok(Arc::new(Value::Bool(false)))
+        }
+        Err(error) => result_error(format!("cannot inspect '{path}': {error}")),
+    })
 }
 
 fn native_fs_open_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -6992,11 +6998,11 @@ fn native_fs_open_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
 }
 
 fn native_fs_read_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let file = expect_file(&arguments[0], "std.files.read_open", span)?;
-    let maximum = expect_nonnegative(&arguments[1], "std.files.read_open", span)?;
+    let file = expect_file(&arguments[0], "std.files.read_from", span)?;
+    let maximum = expect_nonnegative(&arguments[1], "std.files.read_from", span)?;
     if maximum > 16 * 1024 * 1024 {
         return Err(NivError::new(
-            "std.files.read_open byte limit must be at most 16777216",
+            "std.files.read_from byte limit must be at most 16777216",
             span.line,
             span.column,
         ));
@@ -7026,8 +7032,8 @@ fn native_fs_read_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivEr
 }
 
 fn native_fs_write_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let file = expect_file(&arguments[0], "std.files.write_open", span)?;
-    let contents = expect_string(&arguments[1], "std.files.write_open", span)?;
+    let file = expect_file(&arguments[0], "std.files.write_to", span)?;
+    let contents = expect_string(&arguments[1], "std.files.write_to", span)?;
     let mut slot = file.lock().unwrap();
     let Some(ManagedFile::Writer(file)) = slot.as_mut() else {
         if slot.is_none() {
@@ -8894,11 +8900,11 @@ fn decode_compressed(decoder: impl Read, limit: usize, format: &str) -> Result<V
 }
 
 fn native_compression_gunzip(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let bytes = expect_bytes(&arguments[0], "std.compression.gunzip", span)?;
+    let bytes = expect_bytes(&arguments[0], "std.compression.gzip_decode", span)?;
     if bytes.len() > 16 * 1024 * 1024 {
         return Ok(result_error("gzip input exceeds 16 MiB"));
     }
-    let limit = decompression_limit(&arguments[1], "std.compression.gunzip", span)?;
+    let limit = decompression_limit(&arguments[1], "std.compression.gzip_decode", span)?;
     decode_compressed(
         flate2::read::GzDecoder::new(bytes.as_slice()),
         limit,
@@ -8907,11 +8913,11 @@ fn native_compression_gunzip(arguments: Vec<Value>, span: Span) -> Result<Value,
 }
 
 fn native_compression_unzlib(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let bytes = expect_bytes(&arguments[0], "std.compression.unzlib", span)?;
+    let bytes = expect_bytes(&arguments[0], "std.compression.zlib_decode", span)?;
     if bytes.len() > 16 * 1024 * 1024 {
         return Ok(result_error("zlib input exceeds 16 MiB"));
     }
-    let limit = decompression_limit(&arguments[1], "std.compression.unzlib", span)?;
+    let limit = decompression_limit(&arguments[1], "std.compression.zlib_decode", span)?;
     decode_compressed(
         flate2::read::ZlibDecoder::new(bytes.as_slice()),
         limit,
@@ -9111,7 +9117,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 fn native_encoding_unhex(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let source = expect_string(&arguments[0], "std.encoding.unhex", span)?;
+    let source = expect_string(&arguments[0], "std.encoding.hex_decode", span)?;
     if source.len() > 16 * 1024 * 1024 {
         return Ok(result_error("hex input exceeds 16 MiB"));
     }
@@ -9167,7 +9173,7 @@ fn native_encoding_base64(arguments: Vec<Value>, span: Span) -> Result<Value, Ni
 }
 
 fn native_encoding_unbase64(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    decode_base64(&arguments[0], "std.encoding.unbase64", false, span)
+    decode_base64(&arguments[0], "std.encoding.base64_decode", false, span)
 }
 
 fn native_encoding_base64url(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -9175,7 +9181,7 @@ fn native_encoding_base64url(arguments: Vec<Value>, span: Span) -> Result<Value,
 }
 
 fn native_encoding_unbase64url(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    decode_base64(&arguments[0], "std.encoding.unbase64url", true, span)
+    decode_base64(&arguments[0], "std.encoding.base64url_decode", true, span)
 }
 
 fn bounded_crypto_input<'a>(
@@ -9559,13 +9565,13 @@ fn native_crypto_hmac_sha256(arguments: Vec<Value>, span: Span) -> Result<Value,
 
 fn native_crypto_verify_hmac_sha256(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let (key, message) =
-        match crypto_hmac_inputs(&arguments, "std.crypto.verify_hmac_sha256", span)? {
+        match crypto_hmac_inputs(&arguments, "std.crypto.hmac_sha256_verify", span)? {
             Ok(inputs) => inputs,
             Err(error) => return Ok(error),
         };
     let tag = match bounded_crypto_input(
         &arguments[2],
-        "std.crypto.verify_hmac_sha256",
+        "std.crypto.hmac_sha256_verify",
         "HMAC tag",
         32,
         span,
@@ -12078,9 +12084,9 @@ fn native_net_write_some(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
 }
 
 fn native_net_ready(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let stream = expect_stream(&arguments[0], "std.net.ready", span)?;
-    let interest = net_interest(&arguments[1], "std.net.ready", span)?;
-    let timeout = expect_duration(&arguments[2], "std.net.ready", span)?;
+    let stream = expect_stream(&arguments[0], "std.net.wait_ready", span)?;
+    let interest = net_interest(&arguments[1], "std.net.wait_ready", span)?;
+    let timeout = expect_duration(&arguments[2], "std.net.wait_ready", span)?;
     Ok(
         match poll_streams(std::slice::from_ref(stream), interest, timeout) {
             Ok(index) => Value::Ok(Arc::new(Value::Bool(index.is_some()))),
@@ -12470,10 +12476,10 @@ fn expect_transaction<'a>(
 }
 
 fn native_transaction_begin(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let values = expect_map(&arguments[0], "std.transactions.begin", span)?;
+    let values = expect_map(&arguments[0], "std.transactions.create", span)?;
     if values.len() > 1_000_000 {
         return Err(NivError::new(
-            "std.transactions.begin supports at most 1000000 entries",
+            "std.transactions.create supports at most 1000000 entries",
             span.line,
             span.column,
         ));

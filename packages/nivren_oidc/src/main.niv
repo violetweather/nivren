@@ -23,7 +23,7 @@ gives String or String
     keep encoded set std.web.encode_component with { value set verifier } or give
     when encoded != verifier { give err("PKCE verifier must use only RFC 3986 unreserved characters") }
     keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set verifier } } or give
-    give std.encoding.base64url with { bytes set digest }
+    give std.encoding.base64url_encode with { bytes set digest }
 }
 
 define authorization_url

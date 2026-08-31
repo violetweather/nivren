@@ -61,7 +61,7 @@
   },
   {
     "name": "when-carries-unwraps-maybe",
-    "source": "keep table set std.map.single(1, \"one\")\nchange seen set \"missing\"\nwhen std.map.get(table, 1) carries value {\n    change seen to value\n}\nshow(seen)",
+    "source": "keep table set std.map.of(1, \"one\")\nchange seen set \"missing\"\nwhen std.map.get(table, 1) carries value {\n    change seen to value\n}\nshow(seen)",
     "arguments": [
       "run",
       "{source}"
@@ -131,7 +131,7 @@
   },
   {
     "name": "generator-expansion",
-    "source": "generate schemas {\n    keep fields set std.map.set(std.map.single(\"x\", \"Int\"), \"y\", \"Int\")\n    keep point set choose std.source.shape(\"Point\", fields, [\"Compare\"]) {\n        case Ok carries declaration => declaration\n        otherwise as problem => problem\n    }\n    give [point]\n}\nexpand schemas\nkeep origin set Point with { x set 1, y set 2 }\nshow(origin.x + origin.y)",
+    "source": "generate schemas {\n    keep fields set std.map.set(std.map.of(\"x\", \"Int\"), \"y\", \"Int\")\n    keep point set choose std.source.shape(\"Point\", fields, [\"Compare\"]) {\n        case Ok carries declaration => declaration\n        otherwise as problem => problem\n    }\n    give [point]\n}\nexpand schemas\nkeep origin set Point with { x set 1, y set 2 }\nshow(origin.x + origin.y)",
     "arguments": [
       "run",
       "{source}"

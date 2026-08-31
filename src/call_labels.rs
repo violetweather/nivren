@@ -50,12 +50,12 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.compression",
-        "gzip:bytes,level;gunzip:bytes,maximum;zlib:bytes,level;unzlib:bytes,maximum",
+        "gzip:bytes,level;gzip_decode:bytes,maximum;zlib:bytes,level;zlib_decode:bytes,maximum",
     );
     add(
         &mut labels,
         "std.crypto",
-        "sha256:bytes;hmac_sha256:key,message;verify_hmac_sha256:key,message,expected;random_bytes:length;password_hash:password,salt,memory_kib,iterations,lanes;password_verify:password,encoded;key_import:bytes;key_generate:;encrypt:key,nonce,associated,plaintext;decrypt:key,nonce,associated,ciphertext;ed25519_public:key;ed25519_sign:key,message;ed25519_verify:public_key,message,signature",
+        "sha256:bytes;hmac_sha256:key,message;hmac_sha256_verify:key,message,expected;random_bytes:length;password_hash:password,salt,memory_kib,iterations,lanes;password_verify:password,encoded;key_import:bytes;key_generate:;encrypt:key,nonce,associated,plaintext;decrypt:key,nonce,associated,ciphertext;ed25519_public:key;ed25519_sign:key,message;ed25519_verify:public_key,message,signature",
     );
     add(
         &mut labels,
@@ -65,13 +65,13 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.encoding",
-        "hex:bytes;unhex:source;base64:bytes;unbase64:source;base64url:bytes;unbase64url:source",
+        "hex_encode:bytes;hex_decode:source;base64_encode:bytes;base64_decode:source;base64url_encode:bytes;base64url_decode:source",
     );
     add(&mut labels, "std.env", "get:name");
     add(
         &mut labels,
         "std.files",
-        "read:path;write:path,contents;exists:path;open_read:path;open_write:path;read_open:file,maximum;write_open:file,contents;close:file",
+        "read:path;write:path,contents;exists:path;open_read:path;open_write:path;read_from:file,maximum;write_to:file,contents;close:file",
     );
     add(
         &mut labels,
@@ -88,17 +88,17 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.iter",
-        "from:values;range:start,end,step;lines:file,maximum_bytes;tcp_lines:stream,maximum_bytes,timeout;next:iterator;take:iterator,count;skip:iterator,count;transform:iterator,transform;select:iterator,predicate;collect:iterator;chain:left,right;count:iterator;fold:iterator,initial,combine;any:iterator,predicate;every:iterator,predicate;find:iterator,predicate",
+        "from:values;range:start,end,step;lines:file,maximum_bytes;tcp_lines:stream,maximum_bytes,timeout;next:iterator;take:iterator,count;skip:iterator,count;transform:iterator,by;select:iterator,by;collect:iterator;chain:left,right;count:iterator;fold:iterator,initial,by;any:iterator,by;every:iterator,by;find:iterator,by",
     );
     add(
         &mut labels,
         "std.json",
-        "valid:source;compact:source;pretty:source;parse:source;stringify:value;decode:schema,source;read_next:file,maximum;read_next_as:schema,file,maximum",
+        "valid:source;compact:source;pretty:source;parse:source;encode:value;decode:schema,source;read_next:file,maximum;read_next_as:schema,file,maximum",
     );
     add(
         &mut labels,
         "std.list",
-        "batch:values,size;transform:values,transform;select:values,predicate;fold:values,initial,combine;any:values,predicate;every:values,predicate",
+        "batch:values,count;transform:values,by;select:values,by;fold:values,initial,by;any:values,by;every:values,by",
     );
     add(
         &mut labels,
@@ -113,7 +113,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.map",
-        "single:key,value;set:map,key,value;get:map,key;contains:map,key;remove:map,key;length:map;keys:map;values:map",
+        "of:key,value;set:map,key,value;get:map,key;contains:map,key;remove:map,key;length:map;keys:map;values:map",
     );
     add(
         &mut labels,
@@ -123,7 +123,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.net",
-        "listen:host,port;accept:listener,timeout;connect:host,port,timeout;tls_connect:host,port,timeout,options;read:stream,maximum;read_exact_bytes:stream,length,timeout;read_line:stream,maximum,timeout;write:stream,value;write_some:stream,value,maximum,timeout;ready:stream,interest,timeout;ready_any:streams,interest,timeout;read_ready:stream,maximum,timeout;write_ready:stream,value,chunk_size,timeout;tls_read_exact_bytes:stream,length,timeout;tls_read_line:stream,maximum,timeout;tls_write_ready:stream,value,chunk_size,timeout;tls_close:stream;close:stream",
+        "listen:host,port;accept:listener,timeout;connect:host,port,timeout;tls_connect:host,port,timeout,options;read:stream,maximum;read_exact_bytes:stream,length,timeout;read_line:stream,maximum,timeout;write:stream,value;write_some:stream,value,maximum,timeout;wait_ready:stream,interest,timeout;wait_ready_any:streams,interest,timeout;read_ready:stream,maximum,timeout;write_ready:stream,value,chunk_size,timeout;tls_read_exact_bytes:stream,length,timeout;tls_read_line:stream,maximum,timeout;tls_write_ready:stream,value,chunk_size,timeout;tls_close:stream;close:stream",
     );
     add(
         &mut labels,
@@ -151,7 +151,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.set",
-        "single:value;add:set,value;contains:set,value;remove:set,value;length:set;values:set",
+        "of:value;add:set,value;contains:set,value;remove:set,value;length:set;values:set",
     );
     add(
         &mut labels,
@@ -171,7 +171,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.transactions",
-        "begin:map;get:transaction,key;set:transaction,key,value;remove:transaction,key;commit:transaction;rollback:transaction;close:transaction",
+        "create:map;get:transaction,key;set:transaction,key,value;remove:transaction,key;commit:transaction;rollback:transaction;close:transaction",
     );
     add(
         &mut labels,

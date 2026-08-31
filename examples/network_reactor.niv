@@ -5,7 +5,7 @@ takes {
 gives maybe Int or String
 needs Network
 {
-    give std.net.ready_any with { streams set streams interest set "read" timeout set 5.0 }
+    give std.net.wait_ready_any with { streams set streams interest set "read" timeout set 5.0 }
 }
 
 define exchange

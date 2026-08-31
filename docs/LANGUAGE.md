@@ -7,8 +7,8 @@ Nivren is an intent-first application language: source says what it keeps, chang
 ```nivren
 keep name is String set "Nivren"
 keep bytes set std.bytes.from_string with { value set name }
-keep scores set std.map.single with { key set "clarity" value set 10 }
-keep tags set std.set.single with { value set "safe" }
+keep scores set std.map.of with { key set "clarity" value set 10 }
+keep tags set std.set.of with { value set "safe" }
 change attempts is Int set 0
 change attempts to attempts + 1
 ```

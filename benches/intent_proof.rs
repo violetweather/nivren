@@ -140,7 +140,7 @@ fn main() {
     direct_server.join().unwrap();
     intent_server.join().unwrap();
 
-    let database_body = "keep original set std.map.single with { key set \"count\" value set 1 }\nchange count set 0\nrepeat while count < 512 { keep transaction set std.transactions.begin with { map set original }\nkeep changed set std.transactions.set with { transaction set transaction key set \"count\" value set count } or give\nkeep committed set std.transactions.commit with { transaction set transaction } or give\nchange count to count + 1 }\ngive ok(count)";
+    let database_body = "keep original set std.map.of with { key set \"count\" value set 1 }\nchange count set 0\nrepeat while count < 512 { keep transaction set std.transactions.create with { map set original }\nkeep changed set std.transactions.set with { transaction set transaction key set \"count\" value set count } or give\nkeep committed set std.transactions.commit with { transaction set transaction } or give\nchange count to count + 1 }\ngive ok(count)";
     let direct_database =
         format!("define work takes {{}} gives Int or String {{ {database_body} }}\nwork with {{}}");
     let intent_database = format!(

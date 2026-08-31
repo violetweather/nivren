@@ -9,7 +9,7 @@ gives String or String
 needs Environment, Network
 {
     keep token set std.env.get with { name set "DISCORD_BOT_TOKEN" } ?? ""
-    keep authorized set std.map.single with {
+    keep authorized set std.map.of with {
         key set "Authorization"
         value set "Bot " + token
     }

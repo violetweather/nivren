@@ -103,7 +103,7 @@ fn runtime_effect_sequence_matches_source_and_excludes_unauthorized_calls() {
 fn explain_reports_file_http_database_and_concurrency_resources() {
     let sources = [
         (
-            "define file takes {} gives Bool needs FileRead { give perform std.files.exists with { path set \"/tmp/nivren-intent\" } }",
+            "define file takes {} gives Bool or String needs FileRead { give perform std.files.exists with { path set \"/tmp/nivren-intent\" } }",
             "filesystem",
         ),
         (
@@ -111,7 +111,7 @@ fn explain_reports_file_http_database_and_concurrency_resources() {
             "network-socket",
         ),
         (
-            "define database takes {} gives Transaction<String, Int> { give std.transactions.begin with { map set std.map.single with { key set \"id\" value set 1 } } }",
+            "define database takes {} gives Transaction<String, Int> { give std.transactions.create with { map set std.map.of with { key set \"id\" value set 1 } } }",
             "database-transaction",
         ),
         (
@@ -136,7 +136,7 @@ fn explain_reports_file_http_database_and_concurrency_resources() {
 
 #[test]
 fn through_batches_and_parallel_task_plans_remain_bounded() {
-    let batching = "define batches takes {} gives [[Int]] or String { give [1, 2, 3, 4, 5] through std.list.batch with { size set 2 } }\nbatches with {}";
+    let batching = "define batches takes {} gives [[Int]] or String { give [1, 2, 3, 4, 5] through std.list.batch with { count set 2 } }\nbatches with {}";
     let chunk = compiled(batching);
     assert_eq!(
         Interpreter::new().run_bytecode(&chunk).unwrap().to_string(),

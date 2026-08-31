@@ -20,7 +20,7 @@ takes { value is String }
 gives String or String
 {
     keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set value } } or give
-    give std.encoding.hex with { bytes set digest }
+    give std.encoding.hex_encode with { bytes set digest }
 }
 
 define hmac
@@ -62,7 +62,7 @@ gives Signature or String
     keep service_key set hmac with { key set region_key value set service } or give
     keep signing_key set hmac with { key set service_key value set "aws4_request" } or give
     keep signature_bytes set hmac with { key set signing_key value set string_to_sign } or give
-    keep signature set std.encoding.hex with { bytes set signature_bytes } or give
+    keep signature set std.encoding.hex_encode with { bytes set signature_bytes } or give
     keep authorization set combine with { parts set ["AWS4-HMAC-SHA256 Credential=", access_key, "/", scope, ", SignedHeaders=", signed_headers, ", Signature=", signature] } or give
     give ok(Signature(authorization, payload_hash, request_hash))
 }

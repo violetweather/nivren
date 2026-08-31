@@ -11,7 +11,7 @@ takes {
 gives String or String
 needs Network within "discord.com"
 {
-    keep headers set std.map.single with {
+    keep headers set std.map.of with {
         key set "Content-Type"
         value set "application/json"
     }
