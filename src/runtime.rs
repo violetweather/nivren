@@ -6797,6 +6797,11 @@ fn standard_library() -> Value {
                 ("shape", 3, native_source_shape, None),
                 ("choice", 2, native_source_choice, None),
                 ("binding", 2, native_source_binding, None),
+                ("function", 4, native_source_function, None),
+                ("give", 1, native_source_give, None),
+                ("call", 1, native_source_call, None),
+                ("when", 3, native_source_when, None),
+                ("each", 3, native_source_each, None),
             ]),
         ),
     ]);
@@ -11239,6 +11244,169 @@ fn native_source_binding(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
             mutable: false,
             annotation: None,
             initializer: Expr::Literal(literal, span),
+            span,
+        },
+    )))))
+}
+
+/// Collects `[SourceStatement]` builder output into a statement body.
+fn source_statement_body(value: &Value, builder: &str, span: Span) -> Result<Vec<Stmt>, String> {
+    let Value::Array(items) = value else {
+        return Err(format!(
+            "{builder} takes a [SourceStatement] body, found {}",
+            value.type_name()
+        ));
+    };
+    let mut body = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let Value::SourceDeclaration(statement) = item else {
+            return Err(format!(
+                "{builder} bodies hold std.source statement values, found {}",
+                item.type_name()
+            ));
+        };
+        body.push(statement.as_ref().clone());
+    }
+    let _ = span;
+    Ok(body)
+}
+
+fn native_source_function(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.function", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let Value::Map(parameters) = &arguments[1] else {
+        return Err(expected_value(
+            "std.source.function",
+            "Map<String, String>",
+            &arguments[1],
+            span,
+        ));
+    };
+    let mut params = Vec::with_capacity(parameters.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in parameters.iter() {
+        let (Value::String(parameter), Value::String(type_text)) = (key, value) else {
+            return Ok(result_error(
+                "function parameters map names to type text, both String",
+            ));
+        };
+        if let Some(invalid) = validate_source_name(parameter, span)? {
+            return Ok(invalid);
+        }
+        if !seen.insert(parameter.clone()) {
+            return Ok(result_error(format!(
+                "parameter '{parameter}' appears more than once"
+            )));
+        }
+        let ty = match crate::parser::parse_type(type_text) {
+            Ok(ty) => ty,
+            Err(error) => return Ok(result_error(error.message)),
+        };
+        params.push(crate::ast::Param {
+            name: parameter.clone(),
+            ty: Some(ty),
+            span,
+        });
+    }
+    let gives = expect_string(&arguments[2], "std.source.function", span)?;
+    let return_type = if gives.is_empty() {
+        None
+    } else {
+        match crate::parser::parse_type(gives) {
+            Ok(ty) => Some(ty),
+            Err(error) => return Ok(result_error(error.message)),
+        }
+    };
+    let body = match source_statement_body(&arguments[3], "std.source.function", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Function {
+            name: name.to_string(),
+            type_params: vec![],
+            params,
+            return_type,
+            needs: vec![],
+            capability_needs: vec![],
+            body,
+            span,
+        },
+    )))))
+}
+
+fn native_source_give(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let text = expect_string(&arguments[0], "std.source.give", span)?;
+    let expression = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Return(Some(expression), span),
+    )))))
+}
+
+fn native_source_call(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let text = expect_string(&arguments[0], "std.source.call", span)?;
+    let expression = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Expression(expression),
+    )))))
+}
+
+fn native_source_when(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let text = expect_string(&arguments[0], "std.source.when", span)?;
+    let condition = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    let then_branch = match source_statement_body(&arguments[1], "std.source.when", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    let otherwise = match source_statement_body(&arguments[2], "std.source.when", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::If {
+            condition,
+            then_branch: Box::new(Stmt::Block(then_branch, span)),
+            else_branch: if otherwise.is_empty() {
+                None
+            } else {
+                Some(Box::new(Stmt::Block(otherwise, span)))
+            },
+            span,
+        },
+    )))))
+}
+
+fn native_source_each(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.each", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let text = expect_string(&arguments[1], "std.source.each", span)?;
+    let iterable = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    let body = match source_statement_body(&arguments[2], "std.source.each", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::For {
+            name: name.to_string(),
+            pattern: None,
+            iterable,
+            body: Box::new(Stmt::Block(body, span)),
             span,
         },
     )))))

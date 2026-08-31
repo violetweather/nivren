@@ -45,6 +45,31 @@ pub fn parse_type(source: &str) -> Result<TypeRef, NivError> {
     }
 }
 
+/// Parses one complete expression from builder-provided text, so generated
+/// statement bodies flow through the real grammar (`std.source.give`,
+/// `std.source.when`, `std.source.each`, `std.source.call`).
+pub fn parse_expression(source: &str) -> Result<crate::ast::Expr, NivError> {
+    let tokens = crate::lexer::scan(source).map_err(|mut errors| errors.remove(0))?;
+    let mut parser = Parser {
+        tokens,
+        current: 0,
+        errors: vec![],
+        depth: 0,
+        callables: HashMap::new(),
+        pending: vec![],
+    };
+    let expression = parser.expression()?;
+    if parser.is_at_end() {
+        Ok(expression)
+    } else {
+        Err(NivError::new(
+            format!("'{source}' is not a single expression"),
+            1,
+            1,
+        ))
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     current: usize,
@@ -1402,6 +1427,9 @@ impl Parser {
                     TokenKind::While => Some("repeat"),
                     TokenKind::Record => Some("shape"),
                     TokenKind::Enum => Some("choice"),
+                    TokenKind::If => Some("when"),
+                    TokenKind::Return => Some("give"),
+                    TokenKind::For => Some("each"),
                     _ => None,
                 };
                 let name = match keyword_name {

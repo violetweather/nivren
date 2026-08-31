@@ -1686,6 +1686,54 @@ impl Checker {
                                     Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
                                 ),
                             ),
+                            (
+                                "function",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Unknown)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "give",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "call",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "when",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Unknown)),
+                                        Type::Array(Box::new(Type::Unknown)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "each",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Unknown)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (

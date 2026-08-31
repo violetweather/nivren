@@ -7353,6 +7353,28 @@ show(origin.x + origin.y)
 }
 
 #[test]
+fn generators_build_functions_from_statement_builders() {
+    let source = r#"
+generate doubling {
+    keep params set std.map.of("value", "Int")
+    keep body set [
+        std.source.when("value < 0", [std.source.give("0 - value * 2") or give], []) or give,
+        std.source.give("value * 2") or give
+    ]
+    keep doubled set std.source.function("double", params, "Int", body) or give
+    give [doubled]
+}
+expand doubling
+double(21) + double(0 - 5)
+"#;
+    assert_eq!(eval(source), Value::Int(52));
+
+    let invalid = source.replace("value * 2", "value +");
+    let errors = nivren::run(&invalid).unwrap_err();
+    assert!(errors[0].message.contains("doubling"));
+}
+
+#[test]
 fn generators_stay_pure_bounded_and_validated() {
     let errors = nivren::check("expand missing").unwrap_err();
     assert!(errors[0].to_string().contains("unknown generator"));
