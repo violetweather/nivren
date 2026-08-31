@@ -656,10 +656,9 @@ fn completions() -> Vec<&'static str> {
         "U16",
         "U32",
         "U64",
-        "Comparable",
+        "Equal",
         "Number",
         "Ordered",
-        "Iterable",
         "Closable",
         "Sendable",
     ]

@@ -337,7 +337,7 @@ impl Parser {
                 span: field_span,
             });
             if !edition_four
-                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+                && !self.matches(&[TokenKind::Comma])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after shape field"));
@@ -467,7 +467,7 @@ impl Parser {
             });
             if !edition_four
                 && !uses_case
-                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+                && !self.matches(&[TokenKind::Comma])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after choice variant"));

@@ -1304,7 +1304,7 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
     );
 
     nivren::check(
-        "define entry<Key is Comparable, Value> takes { key is Key, value is Value } gives Map<Key, Value> { give std.map.of(key, value) } keep item is Map<String, Int> set entry(\"answer\", 42)",
+        "define entry<Key is Equal, Value> takes { key is Key, value is Value } gives Map<Key, Value> { give std.map.of(key, value) } keep item is Map<String, Int> set entry(\"answer\", 42)",
     )
     .unwrap();
     assert!(nivren::check(
@@ -1364,7 +1364,7 @@ preserve(Project(2))
             .any(|error| error.message.contains("already adopted"))
     );
 
-    let sealed = nivren::check("adopt Comparable for String").unwrap_err();
+    let sealed = nivren::check("adopt Equal for String").unwrap_err();
     assert!(
         sealed
             .iter()
@@ -1702,11 +1702,11 @@ unwrap(present) + unwrap(absent)
         nivren::check("shape Box<Value> { value is Value } keep value is Box set Box(1)").is_err()
     );
     assert!(
-        nivren::check("shape Keyed<Key is Comparable> { key is Key } Keyed(std.iter.from([1]))")
+        nivren::check("shape Keyed<Key is Equal> { key is Key } Keyed(std.iter.from([1]))")
             .is_err()
     );
     assert!(nivren::check(
-        "shape Keyed<Key is Comparable> { key is Key } define invalid takes { value is Keyed<Iterator<Int>> } { show(value) }"
+        "shape Keyed<Key is Equal> { key is Key } define invalid takes { value is Keyed<Iterator<Int>> } { show(value) }"
     )
     .is_err());
 }
@@ -2814,7 +2814,7 @@ fn documentation_includes_declared_capabilities() {
 
 #[test]
 fn documentation_preserves_generic_function_signatures() {
-    let source = "define identity<Value is Comparable> takes { value is Value } gives Value { give value } expose { identity }";
+    let source = "define identity<Value is Equal> takes { value is Value } gives Value { give value } expose { identity }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "generic".into(),
@@ -2823,9 +2823,7 @@ fn documentation_preserves_generic_function_signatures() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(
-        docs.contains("define identity<Value is Comparable> takes { value is Value } gives Value")
-    );
+    assert!(docs.contains("define identity<Value is Equal> takes { value is Value } gives Value"));
 }
 
 #[test]
@@ -3792,12 +3790,8 @@ score + std.set.length(names)
         "define identity<Value> takes { value is Value } gives Value { give value } std.map.of(identity, 1)",
     )
     .unwrap_err();
-    assert!(
-        unstable
-            .iter()
-            .any(|error| error.message.contains("Comparable")
-                || error.message.contains("immutable comparable key"))
-    );
+    assert!(unstable.iter().any(|error| error.message.contains("Equal")
+        || error.message.contains("immutable comparable key")));
 }
 
 #[test]

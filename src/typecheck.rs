@@ -4144,40 +4144,36 @@ impl Checker {
             | Type::BigInt
             | Type::Decimal
             | Type::Fixed(_) => {
-                matches!(protocol, "Comparable" | "Number" | "Ordered" | "Sendable")
+                matches!(protocol, "Equal" | "Number" | "Ordered" | "Sendable")
             }
             Type::String | Type::Bytes => {
-                matches!(protocol, "Comparable" | "Ordered" | "Iterable" | "Sendable")
+                matches!(protocol, "Equal" | "Ordered" | "Sendable")
             }
             Type::DateTime => {
-                matches!(protocol, "Comparable" | "Ordered" | "Sendable")
+                matches!(protocol, "Equal" | "Ordered" | "Sendable")
             }
             Type::Bool | Type::Null => {
-                matches!(protocol, "Comparable" | "Sendable")
+                matches!(protocol, "Equal" | "Sendable")
             }
             Type::Array(element) | Type::Set(element) => match protocol {
-                "Comparable" => self.satisfies(element, "Comparable"),
-                "Iterable" => true,
+                "Equal" => self.satisfies(element, "Equal"),
                 "Sendable" => self.satisfies(element, "Sendable"),
                 _ => false,
             },
-            Type::Iterator(_) => protocol == "Iterable",
+            Type::Iterator(_) => false,
             Type::Map(key, value) => match protocol {
-                "Comparable" => {
-                    self.satisfies(key, "Comparable") && self.satisfies(value, "Comparable")
-                }
-                "Iterable" => true,
+                "Equal" => self.satisfies(key, "Equal") && self.satisfies(value, "Equal"),
                 "Sendable" => self.satisfies(key, "Sendable") && self.satisfies(value, "Sendable"),
                 _ => false,
             },
             Type::Nullable(inner) => self.satisfies(inner, protocol),
             Type::Result(ok, error) => {
-                matches!(protocol, "Comparable" | "Sendable")
+                matches!(protocol, "Equal" | "Sendable")
                     && self.satisfies(ok, protocol)
                     && self.satisfies(error, protocol)
             }
             Type::Record(_, arguments) | Type::Enum(_, arguments) => {
-                matches!(protocol, "Comparable" | "Sendable")
+                matches!(protocol, "Equal" | "Sendable")
                     && arguments
                         .iter()
                         .all(|argument| self.satisfies(argument, protocol))
@@ -4335,7 +4331,7 @@ fn declared_name(statement: &Stmt) -> Option<&str> {
 fn known_builtin_protocol(name: &str) -> bool {
     matches!(
         name,
-        "Comparable" | "Number" | "Ordered" | "Iterable" | "Closable" | "Sendable"
+        "Equal" | "Number" | "Ordered" | "Closable" | "Sendable"
     )
 }
 
@@ -4742,7 +4738,7 @@ fn transaction_type_module() -> Type {
     let generic = |parameters: Vec<Type>, result: Type| {
         Type::Function(
             vec!["Key".into(), "Value".into()],
-            vec![("Key".into(), "Comparable".into())],
+            vec![("Key".into(), "Equal".into())],
             parameters,
             Box::new(result),
             vec![],
@@ -4794,7 +4790,7 @@ fn map_functions() -> Vec<(&'static str, Type)> {
     let generic = |params: Vec<Type>, result: Type| {
         Type::Function(
             vec!["Key".into(), "Value".into()],
-            vec![("Key".into(), "Comparable".into())],
+            vec![("Key".into(), "Equal".into())],
             params,
             Box::new(result),
             vec![],
@@ -4919,7 +4915,7 @@ fn set_functions() -> Vec<(&'static str, Type)> {
     let generic = |params: Vec<Type>, result: Type| {
         Type::Function(
             vec!["Element".into()],
-            vec![("Element".into(), "Comparable".into())],
+            vec![("Element".into(), "Equal".into())],
             params,
             Box::new(result),
             vec![],
