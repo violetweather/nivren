@@ -37,7 +37,7 @@ Bytes, maps, sets, arrays, strings, shapes, choices, BigInts, Decimals, fixed-wi
 `std.iter.tcp_lines(stream, maximum_bytes, timeout_seconds)` provides the same single-pass shape for CRLF-framed TCP protocols under `Network`. Each pull has its own finite timeout, payloads are capped at 64 KiB, oversized frames are drained so iteration can recover, clean EOF ends the iterator, and partial frames or transport errors end it with a typed error.
 
 - `std.files.read` and `exists` need `FileRead`; `std.files.write` needs `FileWrite`.
-- `std.files.open_read`, `open_write`, `read_open`, `write_open`, and `close` expose bounded, deterministic `File` resources for `using` scopes.
+- `std.files.open_read`, `open_write`, `read_from`, `write_to`, and `close` expose bounded, deterministic `File` resources for `using` scopes.
 - `std.files.read_async(path, maximum)` and `write_async(path, contents)` enqueue bounded work and return `Result<Task,String>`. `wait` produces the file result without blocking the caller thread. Payloads are capped at 16 MiB; the shared executor uses 2 through 8 workers with 32 queued jobs each, reports saturation instead of growing without limit, wakes the runtime event loop, and checks cancellation before and after work.
 - `std.path.join`, `basename`, and `dirname` are pure.
 - `std.env.get` needs `Environment`.
