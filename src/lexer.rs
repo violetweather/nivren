@@ -398,7 +398,7 @@ impl Lexer {
             }
             return;
         }
-        let mut digits = |lexer: &mut Self| {
+        let digits = |lexer: &mut Self| {
             while lexer.peek().is_ascii_digit() || lexer.peek() == '_' {
                 lexer.advance();
             }
