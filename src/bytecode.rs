@@ -224,6 +224,9 @@ pub struct IntegerProgramPlan {
     /// Instruction indices of the top-level `MakeFunction` ops, so the
     /// runtime can still materialize the function values afterwards.
     pub function_sites: Vec<usize>,
+    /// Instruction indices of the top-level DefineRecord ops, so the
+    /// runtime can still materialize the shape types afterwards.
+    pub shape_sites: Vec<usize>,
 }
 
 /// Plans a complete top-level chunk, including its integer-only top-level
@@ -236,16 +239,37 @@ pub fn integer_program_plan(chunk: &Chunk) -> Option<IntegerProgramPlan> {
     };
     let reachable = reachable_instructions_of(code);
 
-    // Assign function indices in instruction order, then plan each body.
+    // Register the plannable shapes and assign function indices in
+    // instruction order, then plan each function body.
     let mut planned = BTreeMap::new();
+    let mut shapes: BTreeMap<String, (u32, PlannedShape)> = BTreeMap::new();
     let mut functions = Vec::new();
     let mut function_sites = Vec::new();
+    let mut shape_sites = Vec::new();
     for (index, instruction) in code.iter().enumerate() {
         if !reachable[index] {
             continue;
         }
+        if let Op::DefineRecord { name, fields, .. } = &instruction.op {
+            if shapes.contains_key(name) || planned.contains_key(name) {
+                return None;
+            }
+            let sid = u32::try_from(shapes.len()).ok()?;
+            let all_int = fields.iter().all(|(_, ty)| ty == "Int");
+            shapes.insert(
+                name.clone(),
+                (
+                    sid,
+                    PlannedShape {
+                        fields: all_int
+                            .then(|| fields.iter().map(|(name, _)| name.clone()).collect()),
+                    },
+                ),
+            );
+            shape_sites.push(index);
+        }
         if let Op::MakeFunction { name, params, body } = &instruction.op {
-            if planned.contains_key(name) {
+            if planned.contains_key(name) || shapes.contains_key(name) {
                 return None;
             }
             let function_index = u32::try_from(functions.len()).ok()?;
@@ -257,19 +281,27 @@ pub fn integer_program_plan(chunk: &Chunk) -> Option<IntegerProgramPlan> {
                 operations: vec![],
             });
             function_sites.push(index);
-            let (slots, operations, _) = lower_integer_code(params, &body.code, &planned, false)?;
+            let empty_shapes = BTreeMap::new();
+            let (slots, operations, _) = lower_integer_code(
+                params,
+                &body.code,
+                &planned,
+                &functions,
+                &empty_shapes,
+                false,
+            )?;
             verify_integer_kinds(params.len(), &operations, false)?;
             let entry = &mut functions[function_index as usize];
             entry.slots = slots;
             entry.operations = operations;
         }
     }
-    if functions.is_empty() {
+    if functions.is_empty() && shapes.is_empty() {
         return None;
     }
 
     let (root_slots, mut root_operations, persistent) =
-        lower_integer_code(&[], code, &planned, true)?;
+        lower_integer_code(&[], code, &planned, &functions, &shapes, true)?;
     root_operations.push(IntOp::Return);
     verify_integer_kinds(0, &root_operations, true)?;
     Some(IntegerProgramPlan {
@@ -279,53 +311,150 @@ pub fn integer_program_plan(chunk: &Chunk) -> Option<IntegerProgramPlan> {
         prints_result,
         persistent,
         function_sites,
+        shape_sites,
     })
 }
 
+/// One lowered element: a plain operation (jump targets in source index
+/// space), or a pre-flattened inline segment (targets segment-relative,
+/// with u32::MAX marking jumps to the segment end).
+#[cfg(feature = "host-runtime")]
+enum LoweredItem {
+    Op(IntOp),
+    InlineSegment(Vec<IntOp>),
+}
+
+/// Flattens per-source-instruction groups into one operation stream,
+/// rebasing every jump target from source index space to final index space.
+#[cfg(feature = "host-runtime")]
+fn flatten_groups(groups: Vec<Vec<LoweredItem>>) -> Option<Vec<IntOp>> {
+    let mut starts = Vec::with_capacity(groups.len() + 1);
+    let mut total = 0usize;
+    for group in &groups {
+        starts.push(total);
+        for item in group {
+            total += match item {
+                LoweredItem::Op(_) => 1,
+                LoweredItem::InlineSegment(ops) => ops.len(),
+            };
+        }
+    }
+    starts.push(total);
+    let rebase = |target: u32| -> Option<u32> { u32::try_from(*starts.get(target as usize)?).ok() };
+    let mut operations = Vec::with_capacity(total);
+    for group in groups {
+        for item in group {
+            match item {
+                LoweredItem::Op(IntOp::Jump(target)) => {
+                    operations.push(IntOp::Jump(rebase(target)?));
+                }
+                LoweredItem::Op(IntOp::JumpIfFalse(target)) => {
+                    operations.push(IntOp::JumpIfFalse(rebase(target)?));
+                }
+                LoweredItem::Op(op) => operations.push(op),
+                LoweredItem::InlineSegment(ops) => {
+                    let base = u32::try_from(operations.len()).ok()?;
+                    let end = base.checked_add(u32::try_from(ops.len()).ok()?)?;
+                    for op in ops {
+                        operations.push(match op {
+                            IntOp::Jump(u32::MAX) => IntOp::Jump(end),
+                            IntOp::JumpIfFalse(u32::MAX) => IntOp::JumpIfFalse(end),
+                            IntOp::Jump(target) => IntOp::Jump(base.checked_add(target)?),
+                            IntOp::JumpIfFalse(target) => {
+                                IntOp::JumpIfFalse(base.checked_add(target)?)
+                            }
+                            other => other,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Some(operations)
+}
+
 /// What one bytecode stack position holds during lowering: an ordinary
-/// integer value, or a planned function awaiting its call.
+/// integer value, a planned function or shape type awaiting use, a
+/// constructed shape spread wide across the stack, or a zero-width ghost
+/// standing where the interpreter would keep a shape or type value.
 #[cfg(feature = "host-runtime")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShapeEntry {
     Value,
     Function(u32),
+    ShapeType(u32),
+    /// A constructed shape occupying `width` stack slots.
+    ShapeWide(u32),
+    /// A named shape variable loaded for field access; occupies nothing.
+    ShapeGhost(u32),
+    /// The statement value of a shape binding or type declaration;
+    /// occupies nothing and can only be popped.
+    Phantom,
 }
 
-/// Lowers bytecode to integer operations with planned-function calls. A
-/// worklist shape analysis proves every instruction sees one consistent
-/// stack shape, and forbids function values from crossing branches.
+/// One plannable top-level shape: its name and Int-only field names, or
+/// `None` for shapes the integer planner cannot flatten.
+#[cfg(feature = "host-runtime")]
+struct PlannedShape {
+    fields: Option<Vec<String>>,
+}
+
+/// Lowers bytecode to integer operations with planned-function calls,
+/// leaf-call inlining, and Int-only shape flattening. A worklist shape
+/// analysis proves every instruction sees one consistent stack shape and
+/// forbids non-value entries from crossing branches.
 #[cfg(feature = "host-runtime")]
 #[allow(clippy::too_many_lines)]
 fn lower_integer_code(
     parameters: &[String],
     code: &[Instruction],
     planned: &BTreeMap<String, u32>,
+    functions: &[PlannedProgramFunction],
+    shapes: &BTreeMap<String, (u32, PlannedShape)>,
     allow_functions: bool,
 ) -> Option<(usize, Vec<IntOp>, Vec<PersistentSlot>)> {
+    const INLINE_LIMIT: usize = 32;
     let reachable = reachable_instructions_of(code);
 
-    // Phase 1: shape analysis over reachable instructions.
-    let mut shapes: Vec<Option<Vec<ShapeEntry>>> = vec![None; code.len()];
+    // Phase 1: stack-shape analysis over reachable instructions.
+    let mut shapes_by_name: BTreeMap<&str, (u32, &PlannedShape)> = BTreeMap::new();
+    for (name, (sid, shape)) in shapes {
+        shapes_by_name.insert(name.as_str(), (*sid, shape));
+    }
+    let shape_width = |sid: u32| -> Option<usize> {
+        shapes
+            .values()
+            .find(|(id, _)| *id == sid)
+            .and_then(|(_, shape)| shape.fields.as_ref().map(Vec::len))
+    };
+    let mut states: Vec<Option<Vec<ShapeEntry>>> = vec![None; code.len()];
+    // Shape variables are resolved structurally in phase 2; phase 1 only
+    // tracks stack entries, so shape-variable loads are recognized by name
+    // through a pre-pass that mirrors phase 2's scope walk.
+    let shape_vars = collect_shape_variables(code, &reachable, &shapes_by_name)?;
     let mut worklist = vec![(0usize, Vec::new())];
     while let Some((index, mut shape)) = worklist.pop() {
         if index >= code.len() {
-            // Falling off the end is legal only for a root chunk, whose
-            // synthesized return consumes the final value.
             if !(parameters.is_empty() && shape.len() == 1 && shape[0] == ShapeEntry::Value) {
                 return None;
             }
             continue;
         }
-        match &shapes[index] {
+        match &states[index] {
             Some(existing) if *existing == shape => continue,
             Some(_) => return None,
-            None => shapes[index] = Some(shape.clone()),
+            None => states[index] = Some(shape.clone()),
         }
         match &code[index].op {
             Op::Constant(Literal::Int(_) | Literal::Null) => shape.push(ShapeEntry::Value),
             Op::Load(name) => {
                 if let Some(function) = planned.get(name) {
                     shape.push(ShapeEntry::Function(*function));
+                } else if let Some(sid) = shape_vars.get(&index) {
+                    shape.push(ShapeEntry::ShapeGhost(*sid));
+                } else if let Some((sid, planned_shape)) = shapes_by_name.get(name.as_str()) {
+                    planned_shape.fields.as_ref()?;
+                    shape.push(ShapeEntry::ShapeType(*sid));
                 } else {
                     shape.push(ShapeEntry::Value);
                 }
@@ -339,14 +468,47 @@ fn lower_integer_code(
                 };
                 shape.push(ShapeEntry::Function(*planned.get(name)?));
             }
-            Op::Define { .. } | Op::Store(_) => {
-                // Peeks; a function value may be defined only by the
-                // MakeFunction/Define pair, handled in the emit phase.
-                shape.last()?;
+            Op::DefineRecord { name, .. } => {
+                if !allow_functions {
+                    return None;
+                }
+                // Registered ahead of lowering; unplannable shapes only
+                // fail when constructed.
+                shapes_by_name.get(name.as_str())?;
+                shape.push(ShapeEntry::Phantom);
             }
-            Op::Pop => {
-                shape.pop()?;
-            }
+            Op::Get(_) => match shape.pop()? {
+                ShapeEntry::ShapeGhost(sid) => {
+                    shape_width(sid)?;
+                    shape.push(ShapeEntry::Value);
+                }
+                _ => return None,
+            },
+            Op::Define { .. } | Op::Store(_) => match shape.last()? {
+                ShapeEntry::Value => {}
+                ShapeEntry::ShapeWide(sid) => {
+                    if !matches!(&code[index].op, Op::Define { .. }) {
+                        return None;
+                    }
+                    let sid = *sid;
+                    shape.pop();
+                    shape_width(sid)?;
+                    shape.push(ShapeEntry::Phantom);
+                }
+                ShapeEntry::Function(_) => {
+                    if !matches!(&code[index].op, Op::Define { .. }) {
+                        return None;
+                    }
+                }
+                _ => return None,
+            },
+            Op::Pop => match shape.pop()? {
+                ShapeEntry::Value
+                | ShapeEntry::Function(_)
+                | ShapeEntry::Phantom
+                | ShapeEntry::ShapeGhost(_) => {}
+                _ => return None,
+            },
             Op::Unary(TokenKind::Minus | TokenKind::Bang) => {
                 if *shape.last()? != ShapeEntry::Value {
                     return None;
@@ -379,10 +541,16 @@ fn lower_integer_code(
                         return None;
                     }
                 }
-                let ShapeEntry::Function(_) = shape.pop()? else {
-                    return None;
-                };
-                shape.push(ShapeEntry::Value);
+                match shape.pop()? {
+                    ShapeEntry::Function(_) => shape.push(ShapeEntry::Value),
+                    ShapeEntry::ShapeType(sid) => {
+                        if shape_width(sid)? != *arity {
+                            return None;
+                        }
+                        shape.push(ShapeEntry::ShapeWide(sid));
+                    }
+                    _ => return None,
+                }
             }
             Op::EnterScope | Op::ExitScope => {}
             Op::Jump(target) => {
@@ -411,7 +579,7 @@ fn lower_integer_code(
         worklist.push((index + 1, shape));
     }
 
-    // Phase 2: linear lowering with the proven shapes.
+    // Phase 2: linear lowering into per-instruction groups.
     let mut slots = BTreeMap::new();
     for (index, parameter) in parameters.iter().enumerate() {
         if planned.contains_key(parameter) {
@@ -421,33 +589,89 @@ fn lower_integer_code(
     }
     let mut next_slot = u32::try_from(parameters.len()).ok()?;
     let mut scopes = vec![parameters.to_vec()];
+    let mut shape_bindings: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+    let mut pending_ghost: Option<(u32, u32)> = None;
     let mut persistent = Vec::new();
-    let mut operations = Vec::with_capacity(code.len());
+    let mut groups: Vec<Vec<LoweredItem>> = Vec::with_capacity(code.len());
     for (index, instruction) in code.iter().enumerate() {
         if !reachable[index] {
-            operations.push(IntOp::Nop);
+            groups.push(vec![LoweredItem::Op(IntOp::Nop)]);
             continue;
         }
-        let shape = shapes[index].as_ref()?;
-        let operation = match &instruction.op {
-            Op::Constant(Literal::Int(value)) => IntOp::Constant(*value),
-            Op::Constant(Literal::Null) => IntOp::NullConstant,
-            Op::MakeFunction { .. } => IntOp::Nop,
+        let state = states[index].as_ref()?;
+        let group: Vec<LoweredItem> = match &instruction.op {
+            Op::Constant(Literal::Int(value)) => {
+                vec![LoweredItem::Op(IntOp::Constant(*value))]
+            }
+            Op::Constant(Literal::Null) => vec![LoweredItem::Op(IntOp::NullConstant)],
+            Op::MakeFunction { .. } | Op::DefineRecord { .. } | Op::EnterScope => {
+                if let Op::EnterScope = &instruction.op {
+                    scopes.push(Vec::new());
+                }
+                vec![LoweredItem::Op(IntOp::Nop)]
+            }
+            Op::ExitScope => {
+                let ended = scopes.pop()?;
+                if scopes.is_empty() {
+                    return None;
+                }
+                for name in ended {
+                    slots.remove(&name);
+                    shape_bindings.remove(&name);
+                }
+                vec![LoweredItem::Op(IntOp::Nop)]
+            }
             Op::Load(name) => {
-                if planned.contains_key(name) {
-                    IntOp::Nop
+                if let Some((sid, base)) = shape_bindings.get(name) {
+                    pending_ghost = Some((*sid, *base));
+                    vec![LoweredItem::Op(IntOp::Nop)]
+                } else if planned.contains_key(name) || shapes_by_name.contains_key(name.as_str()) {
+                    vec![LoweredItem::Op(IntOp::Nop)]
                 } else {
-                    IntOp::Load(*slots.get(name)?)
+                    vec![LoweredItem::Op(IntOp::Load(*slots.get(name)?))]
                 }
             }
-            Op::Define { name, mutable } => {
-                if matches!(shape.last(), Some(ShapeEntry::Function(_))) {
-                    // The MakeFunction/Define pair; the function only
-                    // exists natively.
+            Op::Get(field) => {
+                let Some(ShapeEntry::ShapeGhost(sid)) = state.last() else {
+                    return None;
+                };
+                let (ghost_sid, base) = pending_ghost?;
+                if ghost_sid != *sid {
+                    return None;
+                }
+                let (_, planned_shape) = shapes.values().find(|(id, _)| id == sid)?;
+                let fields = planned_shape.fields.as_ref()?;
+                let position = fields.iter().position(|name| name == field)?;
+                vec![LoweredItem::Op(IntOp::Load(
+                    base.checked_add(u32::try_from(position).ok()?)?,
+                ))]
+            }
+            Op::Define { name, mutable } => match state.last() {
+                Some(ShapeEntry::ShapeWide(sid)) => {
+                    let width = u32::try_from(shape_width(*sid)?).ok()?;
+                    let base = next_slot;
+                    next_slot = next_slot.checked_add(width)?;
+                    scopes.last_mut()?.push(name.clone());
+                    shape_bindings.insert(name.clone(), (*sid, base));
+                    let mut ops = Vec::with_capacity(width as usize * 2);
+                    for offset in (0..width).rev() {
+                        ops.push(LoweredItem::Op(IntOp::Store(base.checked_add(offset)?)));
+                        ops.push(LoweredItem::Op(IntOp::Pop));
+                    }
+                    if ops.is_empty() {
+                        ops.push(LoweredItem::Op(IntOp::Nop));
+                    }
+                    ops
+                }
+                Some(ShapeEntry::Function(_)) => {
                     planned.get(name)?;
-                    IntOp::Nop
-                } else {
-                    if slots.contains_key(name) || planned.contains_key(name) {
+                    vec![LoweredItem::Op(IntOp::Nop)]
+                }
+                _ => {
+                    if slots.contains_key(name)
+                        || planned.contains_key(name)
+                        || shape_bindings.contains_key(name)
+                    {
                         return None;
                     }
                     let slot = next_slot;
@@ -457,62 +681,155 @@ fn lower_integer_code(
                     if scopes.len() == 1 {
                         persistent.push((name.clone(), slot as usize, *mutable));
                     }
-                    IntOp::Define(slot)
+                    vec![LoweredItem::Op(IntOp::Define(slot))]
                 }
-            }
-            Op::Store(name) => IntOp::Store(*slots.get(name)?),
-            Op::Pop => {
-                if matches!(shape.last(), Some(ShapeEntry::Function(_))) {
-                    IntOp::Nop
-                } else {
-                    IntOp::Pop
+            },
+            Op::Store(name) => vec![LoweredItem::Op(IntOp::Store(*slots.get(name)?))],
+            Op::Pop => match state.last() {
+                Some(ShapeEntry::Function(_) | ShapeEntry::Phantom | ShapeEntry::ShapeGhost(_)) => {
+                    vec![LoweredItem::Op(IntOp::Nop)]
                 }
+                _ => vec![LoweredItem::Op(IntOp::Pop)],
+            },
+            Op::Unary(TokenKind::Minus) => vec![LoweredItem::Op(IntOp::Negate)],
+            Op::Unary(TokenKind::Bang) => vec![LoweredItem::Op(IntOp::Not)],
+            Op::Binary(TokenKind::Plus) => vec![LoweredItem::Op(IntOp::Add)],
+            Op::Binary(TokenKind::Minus) => vec![LoweredItem::Op(IntOp::Subtract)],
+            Op::Binary(TokenKind::Star) => vec![LoweredItem::Op(IntOp::Multiply)],
+            Op::Binary(TokenKind::Slash) => vec![LoweredItem::Op(IntOp::Divide)],
+            Op::Binary(TokenKind::Percent) => vec![LoweredItem::Op(IntOp::Modulo)],
+            Op::Binary(TokenKind::EqualEqual) => {
+                vec![LoweredItem::Op(IntOp::Compare(IntCondition::Equal))]
             }
-            Op::Unary(TokenKind::Minus) => IntOp::Negate,
-            Op::Unary(TokenKind::Bang) => IntOp::Not,
-            Op::Binary(TokenKind::Plus) => IntOp::Add,
-            Op::Binary(TokenKind::Minus) => IntOp::Subtract,
-            Op::Binary(TokenKind::Star) => IntOp::Multiply,
-            Op::Binary(TokenKind::Slash) => IntOp::Divide,
-            Op::Binary(TokenKind::Percent) => IntOp::Modulo,
-            Op::Binary(TokenKind::EqualEqual) => IntOp::Compare(IntCondition::Equal),
-            Op::Binary(TokenKind::BangEqual) => IntOp::Compare(IntCondition::NotEqual),
-            Op::Binary(TokenKind::Less) => IntOp::Compare(IntCondition::Less),
-            Op::Binary(TokenKind::LessEqual) => IntOp::Compare(IntCondition::LessEqual),
-            Op::Binary(TokenKind::Greater) => IntOp::Compare(IntCondition::Greater),
-            Op::Binary(TokenKind::GreaterEqual) => IntOp::Compare(IntCondition::GreaterEqual),
+            Op::Binary(TokenKind::BangEqual) => {
+                vec![LoweredItem::Op(IntOp::Compare(IntCondition::NotEqual))]
+            }
+            Op::Binary(TokenKind::Less) => {
+                vec![LoweredItem::Op(IntOp::Compare(IntCondition::Less))]
+            }
+            Op::Binary(TokenKind::LessEqual) => {
+                vec![LoweredItem::Op(IntOp::Compare(IntCondition::LessEqual))]
+            }
+            Op::Binary(TokenKind::Greater) => {
+                vec![LoweredItem::Op(IntOp::Compare(IntCondition::Greater))]
+            }
+            Op::Binary(TokenKind::GreaterEqual) => {
+                vec![LoweredItem::Op(IntOp::Compare(IntCondition::GreaterEqual))]
+            }
             Op::Call(arity) => {
-                let callee_position = shape.len().checked_sub(arity + 1)?;
-                let ShapeEntry::Function(function) = shape.get(callee_position)? else {
-                    return None;
-                };
-                IntOp::CallPlanned {
-                    function: *function,
-                    arity: u32::try_from(*arity).ok()?,
+                let callee_position = state.len().checked_sub(arity + 1)?;
+                match state.get(callee_position)? {
+                    ShapeEntry::Function(function) => {
+                        let callee = functions.get(*function as usize);
+                        let arity32 = u32::try_from(*arity).ok()?;
+                        let inlinable = callee.is_some_and(|callee| {
+                            callee.parameters == *arity
+                                && !callee.operations.is_empty()
+                                && callee.operations.len() <= INLINE_LIMIT
+                                && !callee
+                                    .operations
+                                    .iter()
+                                    .any(|op| matches!(op, IntOp::CallPlanned { .. }))
+                        });
+                        if inlinable {
+                            let callee = callee?;
+                            let base = next_slot;
+                            next_slot = next_slot.checked_add(u32::try_from(callee.slots).ok()?)?;
+                            let prefix = u32::try_from(*arity * 2).ok()?;
+                            let mut segment =
+                                Vec::with_capacity(*arity * 2 + callee.operations.len());
+                            for offset in (0..arity32).rev() {
+                                segment.push(IntOp::Store(base.checked_add(offset)?));
+                                segment.push(IntOp::Pop);
+                            }
+                            for op in &callee.operations {
+                                segment.push(match op {
+                                    IntOp::Load(slot) => IntOp::Load(base.checked_add(*slot)?),
+                                    IntOp::Store(slot) => IntOp::Store(base.checked_add(*slot)?),
+                                    IntOp::Define(slot) => IntOp::Define(base.checked_add(*slot)?),
+                                    IntOp::Jump(target) => IntOp::Jump(target.checked_add(prefix)?),
+                                    IntOp::JumpIfFalse(target) => {
+                                        IntOp::JumpIfFalse(target.checked_add(prefix)?)
+                                    }
+                                    IntOp::Return => IntOp::Jump(u32::MAX),
+                                    other => other.clone(),
+                                });
+                            }
+                            vec![LoweredItem::InlineSegment(segment)]
+                        } else {
+                            vec![LoweredItem::Op(IntOp::CallPlanned {
+                                function: *function,
+                                arity: arity32,
+                            })]
+                        }
+                    }
+                    ShapeEntry::ShapeType(_) => vec![LoweredItem::Op(IntOp::Nop)],
+                    _ => return None,
                 }
             }
-            Op::Jump(target) => IntOp::Jump(u32::try_from(*target).ok()?),
-            Op::JumpIfFalse(target) => IntOp::JumpIfFalse(u32::try_from(*target).ok()?),
-            Op::EnterScope => {
-                scopes.push(Vec::new());
-                IntOp::Nop
+            Op::Jump(target) => {
+                vec![LoweredItem::Op(IntOp::Jump(u32::try_from(*target).ok()?))]
             }
+            Op::JumpIfFalse(target) => {
+                vec![LoweredItem::Op(IntOp::JumpIfFalse(
+                    u32::try_from(*target).ok()?,
+                ))]
+            }
+            Op::Return => vec![LoweredItem::Op(IntOp::Return)],
+            _ => return None,
+        };
+        groups.push(group);
+    }
+    let operations = flatten_groups(groups)?;
+    Some((next_slot as usize, operations, persistent))
+}
+
+/// Marks which `Load` instructions read a shape-typed binding, tracking
+/// only names and scopes; slot bases come from phase 2's own bookkeeping.
+#[cfg(feature = "host-runtime")]
+fn collect_shape_variables(
+    code: &[Instruction],
+    reachable: &[bool],
+    shapes_by_name: &BTreeMap<&str, (u32, &PlannedShape)>,
+) -> Option<BTreeMap<usize, u32>> {
+    let mut result = BTreeMap::new();
+    let mut bindings: BTreeMap<String, u32> = BTreeMap::new();
+    let mut construction: Option<u32> = None;
+    let mut scopes: Vec<Vec<String>> = vec![Vec::new()];
+    for (index, instruction) in code.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        match &instruction.op {
+            Op::Load(name) => {
+                if let Some(sid) = bindings.get(name) {
+                    result.insert(index, *sid);
+                } else if let Some((sid, shape)) = shapes_by_name.get(name.as_str())
+                    && shape.fields.is_some()
+                {
+                    construction = Some(*sid);
+                }
+            }
+            Op::Define { name, .. } => {
+                if let Some(sid) = construction.take() {
+                    bindings.insert(name.clone(), sid);
+                    scopes.last_mut()?.push(name.clone());
+                }
+            }
+            Op::EnterScope => scopes.push(Vec::new()),
             Op::ExitScope => {
                 let ended = scopes.pop()?;
                 if scopes.is_empty() {
                     return None;
                 }
                 for name in ended {
-                    slots.remove(&name);
+                    bindings.remove(&name);
                 }
-                IntOp::Nop
             }
-            Op::Return => IntOp::Return,
-            _ => return None,
-        };
-        operations.push(operation);
+            _ => {}
+        }
     }
-    Some((next_slot as usize, operations, persistent))
+    Some(result)
 }
 
 /// Lowers verified bytecode to integer operations one-to-one (scope markers

@@ -378,6 +378,109 @@ impl AotObject {
         )?;
         module.finish().emit().map_err(|error| error.to_string())
     }
+
+    /// Compiles a whole planned program — every planned function plus the
+    /// root chunk — into one relocatable object. The root is exported under
+    /// `name` with the memory-argument ABI (`*const i64` slots, `*mut u8`
+    /// fault) and slot write-back; planned functions stay module-local.
+    pub fn compile_program(
+        name: &str,
+        functions: &[PlanFunction],
+        root: &PlanRoot,
+        depth_limit: i64,
+    ) -> Result<Vec<u8>, String> {
+        check_export_name(name)?;
+        if functions.len() > 1024 || root.slots > 4096 {
+            return Err("invalid AOT program limits".into());
+        }
+        for function in functions {
+            if function.parameters > function.slots
+                || function.slots > 4096
+                || function.operations.len() > 1_000_000
+            {
+                return Err("invalid AOT function limits".into());
+            }
+        }
+        let mut flags = settings::builder();
+        flags
+            .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("is_pic", "true")
+            .map_err(|error| error.to_string())?;
+        let isa = cranelift_native::builder()
+            .map_err(|error| error.to_string())?
+            .finish(settings::Flags::new(flags))
+            .map_err(|error| error.to_string())?;
+        let builder = ObjectBuilder::new(isa, "nivren_aot_program", default_libcall_names())
+            .map_err(|error| error.to_string())?;
+        let mut module = ObjectModule::new(builder);
+        let pointer = module.target_config().pointer_type();
+
+        let mut function_ids = Vec::with_capacity(functions.len());
+        for (index, function) in functions.iter().enumerate() {
+            let mut signature = module.make_signature();
+            for _ in 0..function.parameters {
+                signature.params.push(AbiParam::new(types::I64));
+            }
+            signature.params.push(AbiParam::new(types::I64)); // depth
+            signature.params.push(AbiParam::new(pointer)); // fault
+            signature.returns.push(AbiParam::new(types::I64));
+            let id = module
+                .declare_function(&format!("nivren_plan_{index}"), Linkage::Local, &signature)
+                .map_err(|error| error.to_string())?;
+            function_ids.push(id);
+        }
+        let mut root_signature = module.make_signature();
+        root_signature.params.push(AbiParam::new(pointer));
+        root_signature.params.push(AbiParam::new(pointer));
+        root_signature.returns.push(AbiParam::new(types::I64));
+        let root_id = module
+            .declare_function(name, Linkage::Export, &root_signature)
+            .map_err(|error| error.to_string())?;
+
+        for (index, function) in functions.iter().enumerate() {
+            let mut context = module.make_context();
+            context.func.signature = module
+                .declarations()
+                .get_function_decl(function_ids[index])
+                .signature
+                .clone();
+            context.func.name = UserFuncName::user(0, index as u32 + 1);
+            emit_plan_body(
+                &mut module,
+                &mut context,
+                &function_ids,
+                EntryKind::Registers { depth_limit },
+                function.parameters,
+                function.slots,
+                &function.operations,
+            )?;
+            module
+                .define_function(function_ids[index], &mut context)
+                .map_err(|error| error.to_string())?;
+            module.clear_context(&mut context);
+        }
+        {
+            let mut context = module.make_context();
+            context.func.signature = root_signature;
+            context.func.name = UserFuncName::user(0, 0);
+            emit_plan_body(
+                &mut module,
+                &mut context,
+                &function_ids,
+                EntryKind::Memory { writeback: true },
+                root.slots,
+                root.slots,
+                &root.operations,
+            )?;
+            module
+                .define_function(root_id, &mut context)
+                .map_err(|error| error.to_string())?;
+            module.clear_context(&mut context);
+        }
+        module.finish().emit().map_err(|error| error.to_string())
+    }
 }
 
 // SAFETY: The finalized module is never mutated after construction, its code and data
@@ -894,42 +997,10 @@ fn emit_plan_body<M: Module>(
             IntOp::Add | IntOp::Subtract | IntOp::Multiply => {
                 let right = stack.pop().ok_or("JIT stack underflow")?;
                 let left = stack.pop().ok_or("JIT stack underflow")?;
-                let result = match operation {
-                    IntOp::Add => function.ins().iadd(left, right),
-                    IntOp::Subtract => function.ins().isub(left, right),
-                    IntOp::Multiply => function.ins().imul(left, right),
-                    _ => unreachable!(),
-                };
-                let overflowed = match operation {
-                    IntOp::Add => {
-                        let first = function.ins().bxor(left, result);
-                        let second = function.ins().bxor(right, result);
-                        let both = function.ins().band(first, second);
-                        function.ins().icmp_imm(
-                            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                            both,
-                            0,
-                        )
-                    }
-                    IntOp::Subtract => {
-                        let first = function.ins().bxor(left, right);
-                        let second = function.ins().bxor(left, result);
-                        let both = function.ins().band(first, second);
-                        function.ins().icmp_imm(
-                            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                            both,
-                            0,
-                        )
-                    }
-                    IntOp::Multiply => {
-                        let high = function.ins().smulhi(left, right);
-                        let sign = function.ins().sshr_imm(result, 63);
-                        function.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                            high,
-                            sign,
-                        )
-                    }
+                let (result, overflowed) = match operation {
+                    IntOp::Add => function.ins().sadd_overflow(left, right),
+                    IntOp::Subtract => function.ins().ssub_overflow(left, right),
+                    IntOp::Multiply => function.ins().smul_overflow(left, right),
                     _ => unreachable!(),
                 };
                 branch_if_fault(&mut function, overflowed, fault, 1);
@@ -1142,7 +1213,10 @@ fn define_integer_function<M: Module>(
 mod tests {
     use std::sync::Arc;
 
-    use super::{AotObject, CallError, CompiledFunction, CompiledTrace, IntOp, TraceObject};
+    use super::{
+        AotObject, CallError, CompiledFunction, CompiledTrace, IntOp, PlanFunction, PlanRoot,
+        TraceObject,
+    };
 
     struct TraceState {
         visited: Vec<u64>,
@@ -1342,6 +1416,38 @@ mod tests {
         assert!(first.len() > 64);
         assert_eq!(first, second);
         assert!(AotObject::compile("invalid-name", 1, 1, &operations).is_err());
+    }
+
+    #[test]
+    fn native_aot_program_objects_are_deterministic_and_nonempty() {
+        let functions = [PlanFunction {
+            parameters: 1,
+            slots: 1,
+            operations: vec![
+                IntOp::Load(0),
+                IntOp::Constant(2),
+                IntOp::Multiply,
+                IntOp::Return,
+            ],
+        }];
+        let root = PlanRoot {
+            slots: 1,
+            operations: vec![
+                IntOp::Constant(21),
+                IntOp::CallPlanned {
+                    function: 0,
+                    arity: 1,
+                },
+                IntOp::Return,
+            ],
+        };
+        let first =
+            AotObject::compile_program("nivren_program_native", &functions, &root, 256).unwrap();
+        let second =
+            AotObject::compile_program("nivren_program_native", &functions, &root, 256).unwrap();
+        assert!(first.len() > 64);
+        assert_eq!(first, second);
+        assert!(AotObject::compile_program("invalid-name", &functions, &root, 256).is_err());
     }
 
     #[test]

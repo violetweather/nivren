@@ -1415,13 +1415,20 @@ impl Interpreter {
         if total_operations < 16 {
             return Ok(None);
         }
-        let (slot_count, persistent, prints_result, function_sites) = match &plan {
-            Plan::Chunk(plan) => (plan.slot_count, &plan.persistent, plan.prints_result, None),
+        let (slot_count, persistent, prints_result, function_sites, shape_sites) = match &plan {
+            Plan::Chunk(plan) => (
+                plan.slot_count,
+                &plan.persistent,
+                plan.prints_result,
+                None,
+                None,
+            ),
             Plan::Program(plan) => (
                 plan.root_slots,
                 &plan.persistent,
                 plan.prints_result,
                 Some(&plan.function_sites),
+                Some(&plan.shape_sites),
             ),
         };
         {
@@ -1489,6 +1496,44 @@ impl Interpreter {
             return Ok(None);
         };
         self.jit_executions = self.jit_executions.saturating_add(1);
+        // Materialize top-level shape types so later chunks, derives, and
+        // reflection still see them.
+        if let Some(sites) = shape_sites {
+            for site in sites {
+                if let Some(instruction) = chunk.code.get(*site)
+                    && let Op::DefineRecord {
+                        name,
+                        fields,
+                        derives,
+                    } = &instruction.op
+                {
+                    let mut catalog = record_catalog(&self.environment);
+                    catalog.insert(name.clone(), fields.clone());
+                    let choices = choice_catalog(&self.environment);
+                    let value = Value::RecordType(Arc::new(RecordType {
+                        shared_name: Arc::from(name.as_str()),
+                        name: name.clone(),
+                        field_indices: record_field_indices(fields),
+                        field_names: fields
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>()
+                            .into(),
+                        fields: fields.clone(),
+                        derives: derives.clone(),
+                        catalog,
+                        choices,
+                    }));
+                    self.environment.lock().unwrap().values.insert(
+                        name.clone(),
+                        Binding {
+                            value,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
+        }
         // Materialize top-level function values so later chunks in the same
         // interpreter still see them.
         if let Some(sites) = function_sites {
