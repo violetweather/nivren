@@ -34,7 +34,7 @@ needs FileRead
 }
 
 define main
-gives Null or String
+gives Nothing or String
 needs FileRead, Log
 {
     keep name set perform load_name with { path set "name.txt" } or give

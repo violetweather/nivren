@@ -1,7 +1,7 @@
 shape LibraryPlan holds {
     path is String
     symbol is String
-} with Display, Validate
+} derives Display, Validate
 
 define inspect_library
 takes {

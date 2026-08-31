@@ -1,14 +1,14 @@
-type UserId from Int
+type UserId is Int
 
 shape User holds {
     id is UserId
     name is String
-} with Json, Compare, Display, Validate, DatabaseRow
+} derives Json, Compare, Display, Validate, DatabaseRow
 
 shape QueryPlan holds {
     statement is String
     maximum_rows is Int
-} with Display, Validate
+} derives Display, Validate
 
 define query_users
 takes {

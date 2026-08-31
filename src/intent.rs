@@ -72,6 +72,79 @@ impl IntentGraph {
         output
     }
 
+    /// Deterministic plain-language rendering of the same validated graph:
+    /// equal graphs produce equal stories, and every sentence comes from
+    /// graph data rather than heuristics.
+    pub fn story(&self) -> String {
+        if self.nodes.is_empty() {
+            return "This program declares no external intent: it is pure computation.\n".into();
+        }
+        let mut output = String::from("This program's intent, in source order:\n");
+        for node in &self.nodes {
+            let line = node.line;
+            let sentence = match node.kind.as_str() {
+                "effect" => {
+                    let verb = effect_verb(&node.capabilities);
+                    let needs = if node.capabilities.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (needs {})", node.capabilities.join(", "))
+                    };
+                    let order = node
+                        .effect_order
+                        .map(|order| format!(" as effect {order}"))
+                        .unwrap_or_default();
+                    format!(
+                        "- It {verb} {}{needs}{order} at line {line}.",
+                        node.operation
+                    )
+                }
+                "prepared-plan" => {
+                    let portability = if node.serializable {
+                        "the plan is portable data"
+                    } else {
+                        "the plan stays local because it holds authority, a handle, a callback, a secret, or an effect"
+                    };
+                    format!(
+                        "- It prepares one immutable {} plan at line {line}; {portability}.",
+                        node.operation
+                    )
+                }
+                "pipeline" => {
+                    let fusion = match node.fusion.as_str() {
+                        "verified-pure" => "pure and fused",
+                        "disabled" => "pure with fusion disabled",
+                        _ => "with effect stages kept in source order",
+                    };
+                    format!(
+                        "- It flows values through {} at line {line}, {fusion}.",
+                        node.operation
+                    )
+                }
+                "perform-boundary" => {
+                    format!("- It marks a visible effect boundary at line {line}.")
+                }
+                other => format!(
+                    "- It records {other} intent for {} at line {line}.",
+                    node.operation
+                ),
+            };
+            output.push_str(&sentence);
+            output.push('\n');
+        }
+        let summary = &self.summary;
+        let capabilities = if summary.required_capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            summary.required_capabilities.join(", ")
+        };
+        output.push_str(&format!(
+            "Altogether: {} effect(s), {} materialized plan(s), {} fused pipeline(s); required capabilities: {capabilities}.\n",
+            summary.effect_count, summary.materialized_plans, summary.fused_pipelines,
+        ));
+        output
+    }
+
     /// Rejects malformed graphs before they can reach optimization or tooling.
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA {
@@ -215,6 +288,7 @@ impl Analyzer {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Doc { .. } => {}
             Stmt::Prepare {
                 plan_type,
                 initializer,
@@ -257,7 +331,9 @@ impl Analyzer {
                 }
                 self.expression(initializer, false);
             }
-            Stmt::Let { initializer, .. } => self.expression(initializer, false),
+            Stmt::Let { initializer, .. } | Stmt::LetPattern { initializer, .. } => {
+                self.expression(initializer, false)
+            }
             Stmt::Expression(expression) | Stmt::Print(expression, _) => {
                 self.expression(expression, false);
             }
@@ -279,6 +355,25 @@ impl Analyzer {
             } => {
                 self.expression(condition, false);
                 self.statement(body);
+            }
+            Stmt::Stop(_)
+            | Stmt::Skip(_)
+            | Stmt::Promise { .. }
+            | Stmt::Trusted { .. }
+            | Stmt::Sample { .. }
+            | Stmt::Generator { .. }
+            | Stmt::Expand { .. } => {}
+            Stmt::IfCarries {
+                subject,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expression(subject, false);
+                self.statement(then_branch);
+                if let Some(branch) = else_branch {
+                    self.statement(branch);
+                }
             }
             Stmt::For { iterable, body, .. } => {
                 self.expression(iterable, false);
@@ -306,6 +401,13 @@ impl Analyzer {
                 let capabilities = self.expression_capabilities(value);
                 self.push(boundary_node(*span, capabilities));
                 self.expression(value, true);
+            }
+            Expr::Text(pieces, _) => {
+                for piece in pieces {
+                    if let crate::ast::TextPiece::Hole(hole) = piece {
+                        self.expression(hole, within_perform);
+                    }
+                }
             }
             Expr::Through(input, stage, span) => {
                 let capabilities = self.expression_capabilities(expression);
@@ -423,6 +525,9 @@ impl Analyzer {
             Expr::Match(subject, arms, _) => {
                 self.expression(subject, within_perform);
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.expression(guard, within_perform);
+                    }
                     self.expression(&arm.value, within_perform);
                 }
             }
@@ -465,6 +570,24 @@ impl Analyzer {
         node.resources.dedup();
         self.nodes.push(node);
     }
+}
+
+fn effect_verb(capabilities: &[String]) -> &'static str {
+    for capability in capabilities {
+        match capability.as_str() {
+            "FileRead" => return "reads through",
+            "FileWrite" => return "writes through",
+            "Network" => return "talks to the network through",
+            "Process" => return "runs a process through",
+            "Time" => return "reads or waits on the clock through",
+            "Random" => return "draws randomness through",
+            "Environment" => return "reads the environment through",
+            "Log" => return "logs through",
+            "Native" => return "crosses the native boundary through",
+            _ => {}
+        }
+    }
+    "uses"
 }
 
 fn boundary_node(span: Span, capabilities: Vec<String>) -> IntentNode {
@@ -529,7 +652,17 @@ fn collect_capabilities(
         Expr::Match(subject, arms, _) => {
             collect_capabilities(subject, standard, functions, output);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_capabilities(guard, standard, functions, output);
+                }
                 collect_capabilities(&arm.value, standard, functions, output);
+            }
+        }
+        Expr::Text(pieces, _) => {
+            for piece in pieces {
+                if let crate::ast::TextPiece::Hole(hole) = piece {
+                    collect_capabilities(hole, standard, functions, output);
+                }
             }
         }
         Expr::Literal(_, _) | Expr::Variable(_, _) => {}
@@ -606,8 +739,16 @@ fn portable_expression(expression: &Expr) -> bool {
         }
         Expr::Array(values, _) => values.iter().all(portable_expression),
         Expr::Match(subject, arms, _) => {
-            portable_expression(subject) && arms.iter().all(|arm| portable_expression(&arm.value))
+            portable_expression(subject)
+                && arms.iter().all(|arm| {
+                    portable_expression(&arm.value)
+                        && arm.guard.as_ref().is_none_or(portable_expression)
+                })
         }
+        Expr::Text(pieces, _) => pieces.iter().all(|piece| match piece {
+            crate::ast::TextPiece::Literal(_) => true,
+            crate::ast::TextPiece::Hole(hole) => portable_expression(hole),
+        }),
     }
 }
 
@@ -685,7 +826,7 @@ mod tests {
 
     #[test]
     fn explain_is_deterministic_and_orders_effects() {
-        let source = "define read_both takes { left is String right is String } gives String or String needs FileRead { keep first set perform std.fs.read with { path set left } or give\nkeep second set perform std.fs.read with { path set right } or give\ngive ok(first + second) }";
+        let source = "define read_both takes { left is String right is String } gives String or String needs FileRead { keep first set perform std.files.read with { path set left } or give\nkeep second set perform std.files.read with { path set right } or give\ngive ok(first + second) }";
         let program = program(source);
         let first = analyze(&program, Optimization::Enabled);
         let second = analyze(&program, Optimization::Enabled);

@@ -10,7 +10,7 @@ assert with { condition set restored == ok("Nivren Nivren") message set "gzip te
 keep input set std.bytes.from_string with { value set "portable" }
 keep packed_zlib set main.zlib with { data set input level set 9 }
 keep restored_zlib set choose packed_zlib {
-    case Ok carries bytes => main.unzlib with { data set bytes maximum set 1024 }
+    case Ok carries bytes => main.zlib_decode with { data set bytes maximum set 1024 }
     case Err carries problem => err(problem)
 }
 assert with { condition set restored_zlib == ok(input) message set "zlib roundtrip" }

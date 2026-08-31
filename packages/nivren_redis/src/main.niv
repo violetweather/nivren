@@ -116,7 +116,7 @@ needs Network
 
 define write_connection
 takes { connection is Connection, encoded is String, timeout is Float }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     give choose connection {
@@ -149,7 +149,7 @@ needs Network
 
 define close
 takes { connection is Connection }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     give choose connection {
@@ -334,7 +334,7 @@ needs Network
 
 define auth_status
 takes { message is String }
-gives Null or String
+gives Nothing or String
 {
     when message == "OK" { give ok with { value set none } }
     give err with { problem set "Redis AUTH returned an unexpected status" }
@@ -342,7 +342,7 @@ gives Null or String
 
 define authenticate
 takes { connection is Connection, username is String, password is String, timeout is Float, maximum is Int }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     change parts set ["AUTH", password]
@@ -494,7 +494,7 @@ needs Network
                 case Push carries values => no
                 case Null => no
             }
-            when !accepted { give err with { problem set "Redis cluster ASKING was rejected" } }
+            when not accepted { give err with { problem set "Redis cluster ASKING was rejected" } }
         }
         keep responses set pipeline with { connection set connection commands set [parts] timeout set client_value.timeout maximum set client_value.maximum } or give
         keep response set responses[0]
@@ -516,7 +516,7 @@ needs Network
         }
         keep moved set std.text.starts_with with { value set problem prefix set "MOVED " }
         keep asked set std.text.starts_with with { value set problem prefix set "ASK " }
-        when !moved and !asked {
+        when not moved and not asked {
             keep next set Client(connection, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum, client_value.redirects)
             give ok with { value set Outcome(response, next) }
         }

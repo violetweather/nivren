@@ -13,7 +13,7 @@ define validate_hex
 takes { value is String bytes is Int label is String }
 gives String or String
 {
-    keep decoded set std.encoding.unhex with { source set value } or give
+    keep decoded set std.encoding.hex_decode with { source set value } or give
     when std.bytes.length with { bytes set decoded } != bytes { give err(label + " has the wrong width") }
     change nonzero set no
     change index set 0
@@ -22,7 +22,7 @@ gives String or String
         when byte != 0 { change nonzero to yes }
         change index to index + 1
     }
-    when !nonzero { give err(label + " must not be all zero") }
+    when not nonzero { give err(label + " must not be all zero") }
     give ok(value)
 }
 
@@ -42,8 +42,8 @@ takes { sampled is Bool }
 gives Context or String
 needs Random
 {
-    keep trace_id set std.encoding.hex with { bytes set perform std.crypto.random_bytes with { length set 16 } or give } or give
-    keep span_id set std.encoding.hex with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
+    keep trace_id set std.encoding.hex_encode with { bytes set perform std.crypto.random_bytes with { length set 16 } or give } or give
+    keep span_id set std.encoding.hex_encode with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
     give context with { trace_id set trace_id span_id set span_id sampled set sampled }
 }
 
@@ -52,7 +52,7 @@ takes { parent is Context }
 gives Context or String
 needs Random
 {
-    keep span_id set std.encoding.hex with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
+    keep span_id set std.encoding.hex_encode with { bytes set perform std.crypto.random_bytes with { length set 8 } or give } or give
     give context with { trace_id set parent.trace_id span_id set span_id sampled set parent.flags == "01" }
 }
 
@@ -81,7 +81,7 @@ gives String or String
 define headers
 takes { value is Context }
 gives Map<String, String> or String
-{ give ok(std.map.single with { key set "traceparent" value set traceparent with { value set value } or give }) }
+{ give ok(std.map.of with { key set "traceparent" value set traceparent with { value set value } or give }) }
 
 define otlp_attribute
 takes { key is String value is String }
@@ -132,7 +132,7 @@ gives String or String
 {
     keep scope set OtlpScopeSpans([span])
     keep resource set OtlpResourceSpans([scope])
-    give std.json.stringify with { value set OtlpExportRequest([resource]) }
+    give std.json.encode with { value set OtlpExportRequest([resource]) }
 }
 
 define export_otlp_json
@@ -144,7 +144,7 @@ needs Network
     keep body set encode_otlp_json with { span set span } or give
     keep typed set std.map.set with { map set request_headers key set "Content-Type" value set "application/json" }
     keep response set perform std.web.request with { method set "POST" url set endpoint headers set typed body set body timeout set timeout maximum set 1048576 } or give
-    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+    give ok(text "{response.status}")
 }
 
 expose { Context, OtlpValue, OtlpAttribute, OtlpSpan, context, fresh, child, parse, traceparent, headers, otlp_attribute, otlp_span, encode_otlp_json, export_otlp_json }

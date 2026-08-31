@@ -1,13 +1,41 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{Expr, Literal, Span, Stmt, TypeRef};
+use crate::ast::{Expr, Literal, Pattern, PromiseClause, Span, Stmt, TextPiece, TypeRef};
+
+/// The complete, closed Edition 5 capability vocabulary.
+const CAPABILITY_VOCABULARY: [&str; 12] = [
+    "FileRead",
+    "FileWrite",
+    "Environment",
+    "Time",
+    "Process",
+    "Network",
+    "Task",
+    "Channel",
+    "Log",
+    "Native",
+    "Random",
+    "Gpu",
+];
 use crate::error::NivError;
 use crate::fixed::FixedKind;
 use crate::lexer::TokenKind;
 
+/// How much of a matched type one unguarded pattern covers.
+enum Coverage {
+    /// Matches every value of the type.
+    Full,
+    /// Fully covers exactly one case of a choice.
+    Case(String),
+    /// May fail to match; contributes nothing to exhaustiveness.
+    Partial,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Type {
     Int,
+    UInt,
+    U128,
     Float,
     String,
     Bytes,
@@ -58,12 +86,14 @@ impl Type {
     fn name(&self) -> String {
         match self {
             Self::Int => "Int".into(),
+            Self::UInt => "UInt".into(),
+            Self::U128 => "U128".into(),
             Self::Float => "Float".into(),
             Self::String => "String".into(),
             Self::Bytes => "Bytes".into(),
             Self::SecretKey => "SecretKey".into(),
             Self::Bool => "Bool".into(),
-            Self::Null => "Null".into(),
+            Self::Null => "Nothing".into(),
             Self::Generic(name) => name.clone(),
             Self::Function(_, _, _, _, _) => "Function".into(),
             Self::Array(element) => format!("[{}]", element.name()),
@@ -128,7 +158,18 @@ struct ProtocolMemberType {
 }
 
 pub fn check(program: &[Stmt]) -> Result<(), Vec<NivError>> {
+    check_with_edition(program, 4)
+}
+
+/// Checks a program under a declared edition. Edition 5 opts into the
+/// strict gates: the project's own top-level code loses the historical
+/// grandfathered access to the systems boundary and must mark itself
+/// `trusted "reason"` to call `std.native` or `std.host`.
+pub fn check_with_edition(program: &[Stmt], edition: u8) -> Result<(), Vec<NivError>> {
     let mut checker = Checker::new();
+    if edition >= 5 {
+        checker.trusted_scope = false;
+    }
     checker.statements(program);
     if checker.errors.is_empty() {
         Ok(())
@@ -163,6 +204,63 @@ pub(crate) fn standard_effects() -> BTreeMap<String, Vec<String>> {
     effects
 }
 
+/// Whether executing these statements always ends in `give` (ledger row 27:
+/// a function that declares `gives` may not fall off its end into `none`).
+/// The analysis is conservative: loops and expression statements never count.
+fn always_gives(statements: &[Stmt]) -> bool {
+    statements.last().is_some_and(statement_always_gives)
+}
+
+fn statement_always_gives(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Return(_, _) => true,
+        Stmt::Block(body, _) => always_gives(body),
+        Stmt::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => statement_always_gives(then_branch) && statement_always_gives(else_branch),
+        Stmt::IfCarries {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => statement_always_gives(then_branch) && statement_always_gives(else_branch),
+        Stmt::Using { body, .. } => statement_always_gives(body),
+        _ => false,
+    }
+}
+
+/// Reports whether an expression contains a `perform` boundary anywhere, so
+/// pure-only positions such as text holes can reject it with intent.
+fn contains_perform(expression: &Expr) -> bool {
+    match expression {
+        Expr::Perform(_, _) => true,
+        Expr::Literal(_, _) | Expr::Variable(_, _) => false,
+        Expr::Assign(_, value, _)
+        | Expr::Unary(_, value, _)
+        | Expr::Propagate(value, _)
+        | Expr::Get(value, _, _) => contains_perform(value),
+        Expr::Binary(left, _, right, _)
+        | Expr::Logical(left, _, right, _)
+        | Expr::Coalesce(left, right, _)
+        | Expr::Index(left, right, _)
+        | Expr::Through(left, right, _) => contains_perform(left) || contains_perform(right),
+        Expr::Call(callee, arguments, _, _) => {
+            contains_perform(callee) || arguments.iter().any(contains_perform)
+        }
+        Expr::Array(values, _) => values.iter().any(contains_perform),
+        Expr::Match(subject, arms, _) => {
+            contains_perform(subject)
+                || arms.iter().any(|arm| {
+                    contains_perform(&arm.value) || arm.guard.as_ref().is_some_and(contains_perform)
+                })
+        }
+        Expr::Text(pieces, _) => pieces
+            .iter()
+            .any(|piece| matches!(piece, TextPiece::Hole(hole) if contains_perform(hole))),
+    }
+}
+
 struct Checker {
     scopes: Vec<HashMap<String, Binding>>,
     errors: Vec<NivError>,
@@ -182,6 +280,11 @@ struct Checker {
     dispatch_adoptions: HashSet<(String, String)>,
     callable_labels: HashMap<String, Vec<String>>,
     namespace: String,
+    loop_depth: usize,
+    loop_boundary: Option<&'static str>,
+    active_promises: Vec<PromiseClause>,
+    sample_titles: HashSet<String>,
+    trusted_scope: bool,
 }
 
 impl Checker {
@@ -190,8 +293,16 @@ impl Checker {
     }
 
     fn with_namespace(namespace: String) -> Self {
+        let namespace_is_root = namespace.is_empty();
         let unknown = Type::Unknown;
         let mut global = HashMap::new();
+        global.insert(
+            "Interest".to_string(),
+            Binding {
+                ty: Type::EnumNamespace("Interest".into()),
+                mutable: false,
+            },
+        );
         let mut native = |name: &str, params: Vec<Type>, result: Type| {
             global.insert(
                 name.into(),
@@ -201,7 +312,6 @@ impl Checker {
                 },
             );
         };
-        native("clock", vec![], Type::Float);
         native("len", vec![unknown.clone()], Type::Int);
         native("type", vec![unknown.clone()], Type::String);
         native("append", vec![unknown.clone(), unknown], Type::Unknown);
@@ -209,7 +319,6 @@ impl Checker {
         native("ok", vec![Type::Unknown], Type::Unknown);
         native("err", vec![Type::Unknown], Type::Unknown);
         let string_result = Type::Result(Box::new(Type::String), Box::new(Type::String));
-        let null_result = Type::Result(Box::new(Type::Null), Box::new(Type::String));
         let function = |params: Vec<Type>, result: Type| {
             Type::Function(vec![], vec![], params, Box::new(result), vec![])
         };
@@ -241,59 +350,6 @@ impl Checker {
             Binding {
                 ty: module(vec![
                     (
-                        "fs",
-                        module(vec![
-                            (
-                                "read",
-                                effect(vec![Type::String], string_result.clone(), "FileRead"),
-                            ),
-                            (
-                                "write",
-                                effect(vec![Type::String, Type::String], null_result, "FileWrite"),
-                            ),
-                            ("exists", effect(vec![Type::String], Type::Bool, "FileRead")),
-                            (
-                                "open_read",
-                                effect(
-                                    vec![Type::String],
-                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
-                                    "FileRead",
-                                ),
-                            ),
-                            (
-                                "open_write",
-                                effect(
-                                    vec![Type::String],
-                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
-                                    "FileWrite",
-                                ),
-                            ),
-                            (
-                                "read_open",
-                                effect(
-                                    vec![Type::File, Type::Int],
-                                    string_result.clone(),
-                                    "FileRead",
-                                ),
-                            ),
-                            (
-                                "write_open",
-                                effect(
-                                    vec![Type::File, Type::String],
-                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
-                                    "FileWrite",
-                                ),
-                            ),
-                            (
-                                "close",
-                                function(
-                                    vec![Type::File],
-                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
-                                ),
-                            ),
-                        ]),
-                    ),
-                    (
                         "files",
                         module(vec![
                             (
@@ -308,7 +364,14 @@ impl Checker {
                                     "FileWrite",
                                 ),
                             ),
-                            ("exists", effect(vec![Type::String], Type::Bool, "FileRead")),
+                            (
+                                "exists",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
+                                    "FileRead",
+                                ),
+                            ),
                             (
                                 "open_read",
                                 effect(
@@ -326,7 +389,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "read_open",
+                                "read_from",
                                 effect(
                                     vec![Type::File, Type::Int],
                                     string_result.clone(),
@@ -334,7 +397,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "write_open",
+                                "write_to",
                                 effect(
                                     vec![Type::File, Type::String],
                                     Type::Result(Box::new(Type::Null), Box::new(Type::String)),
@@ -403,7 +466,6 @@ impl Checker {
                     (
                         "time",
                         module(vec![
-                            ("now", effect(vec![], Type::Float, "Time")),
                             ("sleep", effect(vec![Type::Float], Type::Null, "Time")),
                             (
                                 "from_unix",
@@ -443,6 +505,21 @@ impl Checker {
                                     "Time",
                                 ),
                             ),
+                            ("monotonic", effect(vec![], Type::Float, "Time")),
+                            ("year", function(vec![Type::DateTime], Type::Int)),
+                            ("month", function(vec![Type::DateTime], Type::Int)),
+                            ("day", function(vec![Type::DateTime], Type::Int)),
+                            ("hour", function(vec![Type::DateTime], Type::Int)),
+                            ("minute", function(vec![Type::DateTime], Type::Int)),
+                            ("second", function(vec![Type::DateTime], Type::Int)),
+                            ("weekday", function(vec![Type::DateTime], Type::Int)),
+                            (
+                                "difference_seconds",
+                                function(
+                                    vec![Type::DateTime, Type::DateTime],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (
@@ -476,7 +553,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "stringify",
+                                "encode",
                                 function(
                                     vec![Type::Unknown],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
@@ -582,6 +659,84 @@ impl Checker {
                                     ),
                                 ),
                             ),
+                            (
+                                "contains",
+                                function(vec![Type::String, Type::String], Type::Bool),
+                            ),
+                            (
+                                "ends_with",
+                                function(vec![Type::String, Type::String], Type::Bool),
+                            ),
+                            (
+                                "index_of",
+                                function(
+                                    vec![Type::String, Type::String],
+                                    Type::Nullable(Box::new(Type::Int)),
+                                ),
+                            ),
+                            (
+                                "slice",
+                                function(
+                                    vec![Type::String, Type::Int, Type::Int],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "replace",
+                                function(
+                                    vec![Type::String, Type::String, Type::String, Type::Int],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("trim", function(vec![Type::String], Type::String)),
+                            ("trim_start", function(vec![Type::String], Type::String)),
+                            ("trim_end", function(vec![Type::String], Type::String)),
+                            (
+                                "to_upper",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_lower",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "join",
+                                function(
+                                    vec![Type::Array(Box::new(Type::String)), Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "lines",
+                                function(vec![Type::String], Type::Array(Box::new(Type::String))),
+                            ),
+                            (
+                                "repeat",
+                                function(
+                                    vec![Type::String, Type::Int],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "pad_start",
+                                function(
+                                    vec![Type::String, Type::Int, Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "pad_end",
+                                function(
+                                    vec![Type::String, Type::Int, Type::String],
+                                    Type::Result(Box::new(Type::String), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (
@@ -595,6 +750,74 @@ impl Checker {
                                 ),
                             ),
                             ("format", function(vec![Type::Int], Type::String)),
+                        ]),
+                    ),
+                    (
+                        "u128",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::U128), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("format", function(vec![Type::U128], Type::String)),
+                            (
+                                "from_int",
+                                function(
+                                    vec![Type::Int],
+                                    Type::Result(Box::new(Type::U128), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_int",
+                                function(
+                                    vec![Type::U128],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "uint",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::UInt), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("format", function(vec![Type::UInt], Type::String)),
+                            (
+                                "from_int",
+                                function(
+                                    vec![Type::Int],
+                                    Type::Result(Box::new(Type::UInt), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_int",
+                                function(
+                                    vec![Type::UInt],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "wrapping_add",
+                                function(vec![Type::UInt, Type::UInt], Type::UInt),
+                            ),
+                            (
+                                "wrapping_sub",
+                                function(vec![Type::UInt, Type::UInt], Type::UInt),
+                            ),
+                            (
+                                "wrapping_mul",
+                                function(vec![Type::UInt, Type::UInt], Type::UInt),
+                            ),
+                            ("min", function(vec![], Type::UInt)),
+                            ("max", function(vec![], Type::UInt)),
                         ]),
                     ),
                     (
@@ -704,7 +927,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "verify_hmac_sha256",
+                                "hmac_sha256_verify",
                                 function(
                                     vec![Type::Bytes, Type::Bytes, Type::Bytes],
                                     Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
@@ -841,6 +1064,7 @@ impl Checker {
                     ("u16", fixed_type_module(FixedKind::U16)),
                     ("u32", fixed_type_module(FixedKind::U32)),
                     ("u64", fixed_type_module(FixedKind::U64)),
+                    ("i128", fixed_type_module(FixedKind::I128)),
                     ("map", module(map_functions())),
                     ("set", module(set_functions())),
                     ("list", module(list_functions())),
@@ -928,19 +1152,23 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "ready",
+                                "wait_ready",
                                 effect(
-                                    vec![Type::TcpStream, Type::String, Type::Float],
+                                    vec![
+                                        Type::TcpStream,
+                                        Type::Enum("Interest".into(), vec![]),
+                                        Type::Float,
+                                    ],
                                     Type::Result(Box::new(Type::Bool), Box::new(Type::String)),
                                     "Network",
                                 ),
                             ),
                             (
-                                "ready_any",
+                                "wait_ready_any",
                                 effect(
                                     vec![
                                         Type::Array(Box::new(Type::TcpStream)),
-                                        Type::String,
+                                        Type::Enum("Interest".into(), vec![]),
                                         Type::Float,
                                     ],
                                     Type::Result(
@@ -1009,17 +1237,6 @@ impl Checker {
                         ]),
                     ),
                     (
-                        "http",
-                        module(vec![(
-                            "get",
-                            effect(
-                                vec![Type::String, Type::Float],
-                                string_result.clone(),
-                                "Network",
-                            ),
-                        )]),
-                    ),
-                    (
                         "web",
                         module(vec![
                             (
@@ -1063,10 +1280,7 @@ impl Checker {
                                         Type::Int,
                                     ],
                                     Type::Result(
-                                        Box::new(Type::Map(
-                                            Box::new(Type::String),
-                                            Box::new(Type::String),
-                                        )),
+                                        Box::new(Type::Record("Response".into(), vec![])),
                                         Box::new(Type::String),
                                     ),
                                     "Network",
@@ -1077,10 +1291,7 @@ impl Checker {
                                 effect(
                                     vec![Type::TcpStream, Type::Int],
                                     Type::Result(
-                                        Box::new(Type::Map(
-                                            Box::new(Type::String),
-                                            Box::new(Type::String),
-                                        )),
+                                        Box::new(Type::Record("Request".into(), vec![])),
                                         Box::new(Type::String),
                                     ),
                                     "Network",
@@ -1164,10 +1375,7 @@ impl Checker {
                             (
                                 "websocket_accept",
                                 effect(
-                                    vec![
-                                        Type::TcpStream,
-                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
-                                    ],
+                                    vec![Type::TcpStream, Type::Record("Request".into(), vec![])],
                                     Type::Result(Box::new(Type::WebSocket), Box::new(Type::String)),
                                     "Network",
                                 ),
@@ -1198,84 +1406,7 @@ impl Checker {
                             ),
                         ]),
                     ),
-                    (
-                        "task",
-                        module(vec![
-                            (
-                                "spawn",
-                                effect(
-                                    vec![Type::Function(
-                                        vec![],
-                                        vec![],
-                                        vec![],
-                                        Box::new(Type::Unknown),
-                                        vec!["$effects".into()],
-                                    )],
-                                    Type::Task,
-                                    "Task",
-                                ),
-                            ),
-                            (
-                                "await",
-                                effect(
-                                    vec![Type::Task],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Task",
-                                ),
-                            ),
-                            (
-                                "await_for",
-                                effect(
-                                    vec![Type::Task, Type::Float],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Task",
-                                ),
-                            ),
-                            ("cancel", effect(vec![Type::Task], Type::Null, "Task")),
-                            (
-                                "all",
-                                effect(
-                                    vec![Type::Array(Box::new(Type::Task))],
-                                    Type::Result(
-                                        Box::new(Type::Array(Box::new(Type::Unknown))),
-                                        Box::new(Type::String),
-                                    ),
-                                    "Task",
-                                ),
-                            ),
-                            (
-                                "race",
-                                effect(
-                                    vec![Type::Array(Box::new(Type::Task))],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Task",
-                                ),
-                            ),
-                        ]),
-                    ),
                     ("tasks", task_module(&effect)),
-                    (
-                        "channel",
-                        module(vec![
-                            ("create", effect(vec![Type::Int], Type::Channel, "Channel")),
-                            (
-                                "send",
-                                effect(
-                                    vec![Type::Channel, Type::Unknown, Type::Float],
-                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
-                                    "Channel",
-                                ),
-                            ),
-                            (
-                                "receive",
-                                effect(
-                                    vec![Type::Channel, Type::Float],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Channel",
-                                ),
-                            ),
-                        ]),
-                    ),
                     ("channels", channel_module(&effect)),
                     (
                         "locks",
@@ -1506,6 +1637,120 @@ impl Checker {
                         ]),
                     ),
                     (
+                        "plans",
+                        module(vec![
+                            (
+                                "encode",
+                                function(
+                                    vec![Type::Unknown],
+                                    Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "decode",
+                                function(
+                                    vec![Type::Unknown, Type::Bytes],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "source",
+                        module(vec![
+                            (
+                                "shape",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                        Type::Array(Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "choice",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "binding",
+                                function(
+                                    vec![Type::String, Type::Unknown],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "function",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Unknown)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "give",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "call",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "when",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Unknown)),
+                                        Type::Array(Box::new(Type::Unknown)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "each",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::String,
+                                        Type::Array(Box::new(Type::Unknown)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "gpu",
+                        module(vec![
+                            ("available", effect(vec![], Type::Bool, "Gpu")),
+                            (
+                                "open",
+                                effect(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                    "Gpu",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
                         "compression",
                         module(vec![
                             (
@@ -1516,7 +1761,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "gunzip",
+                                "gzip_decode",
                                 function(
                                     vec![Type::Bytes, Type::Int],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
@@ -1530,7 +1775,7 @@ impl Checker {
                                 ),
                             ),
                             (
-                                "unzlib",
+                                "zlib_decode",
                                 function(
                                     vec![Type::Bytes, Type::Int],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
@@ -1579,42 +1824,42 @@ impl Checker {
                         "encoding",
                         module(vec![
                             (
-                                "hex",
+                                "hex_encode",
                                 function(
                                     vec![Type::Bytes],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "unhex",
+                                "hex_decode",
                                 function(
                                     vec![Type::String],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "base64",
+                                "base64_encode",
                                 function(
                                     vec![Type::Bytes],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "unbase64",
+                                "base64_decode",
                                 function(
                                     vec![Type::String],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "base64url",
+                                "base64url_encode",
                                 function(
                                     vec![Type::Bytes],
                                     Type::Result(Box::new(Type::String), Box::new(Type::String)),
                                 ),
                             ),
                             (
-                                "unbase64url",
+                                "base64url_decode",
                                 function(
                                     vec![Type::String],
                                     Type::Result(Box::new(Type::Bytes), Box::new(Type::String)),
@@ -1626,6 +1871,34 @@ impl Checker {
                 mutable: false,
             },
         );
+        let mut records = HashMap::new();
+        let text_map = Type::Map(Box::new(Type::String), Box::new(Type::String));
+        records.insert(
+            "Response".to_string(),
+            HashMap::from([
+                ("status".to_string(), Type::Int),
+                ("body".to_string(), Type::String),
+                ("headers".to_string(), text_map.clone()),
+            ]),
+        );
+        records.insert(
+            "Request".to_string(),
+            HashMap::from([
+                ("method".to_string(), Type::String),
+                ("path".to_string(), Type::String),
+                ("body".to_string(), Type::String),
+                ("headers".to_string(), text_map),
+            ]),
+        );
+        let mut enums = HashMap::new();
+        enums.insert(
+            "Interest".to_string(),
+            vec![
+                ("Read".to_string(), None),
+                ("Write".to_string(), None),
+                ("ReadWrite".to_string(), None),
+            ],
+        );
         Self {
             scopes: vec![global],
             errors: vec![],
@@ -1633,19 +1906,49 @@ impl Checker {
             needs: vec![],
             generics: vec![],
             constraints: vec![],
-            records: HashMap::new(),
+            records,
             record_derives: HashMap::new(),
-            enums: HashMap::new(),
+            enums,
             type_parameters: HashMap::new(),
             type_constraints: HashMap::new(),
-            type_names: HashMap::new(),
+            type_names: HashMap::from([
+                ("Response".to_string(), "Response".to_string()),
+                ("Request".to_string(), "Request".to_string()),
+                ("Interest".to_string(), "Interest".to_string()),
+            ]),
             protocols: HashSet::new(),
             protocol_members: HashMap::new(),
             adoptions: HashSet::new(),
             dispatch_adoptions: HashSet::new(),
             callable_labels: crate::call_labels::owned(),
             namespace,
+            loop_depth: 0,
+            loop_boundary: None,
+            active_promises: vec![],
+            sample_titles: HashSet::new(),
+            // Top-level scripts keep the historical grandfathered access to
+            // the systems boundary; module bodies check with their own
+            // namespaced Checker and must declare `trusted "reason"`.
+            trusted_scope: namespace_is_root,
         }
+    }
+
+    /// Checks a region that a `stop`/`skip` may not escape: function bodies
+    /// and `using` scopes reset the loop context and record which boundary
+    /// separates the region from any enclosing loop.
+    fn outside_loops(&mut self, boundary: &'static str, check: impl FnOnce(&mut Self)) {
+        let saved_depth = std::mem::take(&mut self.loop_depth);
+        let saved_boundary = self.loop_boundary.take();
+        self.loop_boundary = (saved_depth > 0).then_some(boundary);
+        check(self);
+        self.loop_depth = saved_depth;
+        self.loop_boundary = saved_boundary;
+    }
+
+    fn inside_loop(&mut self, check: impl FnOnce(&mut Self)) {
+        self.loop_depth += 1;
+        check(self);
+        self.loop_depth -= 1;
     }
 
     fn statements(&mut self, statements: &[Stmt]) {
@@ -1674,6 +1977,7 @@ impl Checker {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Doc { .. } => {}
             Stmt::Prepare {
                 name,
                 initializer,
@@ -1707,6 +2011,25 @@ impl Checker {
                     *span,
                 );
             }
+            Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            } => {
+                let inferred = self.expression(initializer);
+                let mut bindings = BTreeMap::new();
+                let coverage = self.check_pattern(pattern, &inferred, &mut bindings);
+                if !matches!(coverage, Coverage::Full) {
+                    self.errors.push(NivError::new(
+                        "a binding pattern never fails; refutable patterns belong in 'choose' or 'when … carries'",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                for (name, ty) in bindings {
+                    self.declare(&name, Binding { ty, mutable: false }, *span);
+                }
+            }
             Stmt::Expression(expression) | Stmt::Print(expression, _) => {
                 self.expression(expression);
             }
@@ -1723,14 +2046,194 @@ impl Checker {
                     self.statement(branch);
                 }
             }
+            Stmt::IfCarries {
+                subject,
+                patterns,
+                then_branch,
+                else_branch,
+                span,
+            } => {
+                let subject_type = self.expression(subject);
+                let target = match &subject_type {
+                    Type::Nullable(inner) => inner.as_ref().clone(),
+                    Type::Enum(_, _) | Type::Result(_, _) => subject_type.clone(),
+                    Type::Unknown => Type::Unknown,
+                    other => {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'when … carries' tests a maybe value or a choice case, found {}; test a Bool with plain 'when'",
+                                other.name()
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                        Type::Unknown
+                    }
+                };
+                let mut alternatives = vec![];
+                for pattern in patterns {
+                    let mut bindings = BTreeMap::new();
+                    self.check_pattern(pattern, &target, &mut bindings);
+                    alternatives.push(bindings);
+                }
+                let bindings = alternatives.first().cloned().unwrap_or_default();
+                for alternative in alternatives.iter().skip(1) {
+                    if alternative != &bindings {
+                        self.errors.push(NivError::new(
+                            "every 'or' alternative binds the same names at the same types",
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                }
+                self.in_scope(|checker| {
+                    for (name, ty) in &bindings {
+                        checker.declare(
+                            name,
+                            Binding {
+                                ty: ty.clone(),
+                                mutable: false,
+                            },
+                            *span,
+                        );
+                    }
+                    checker.statement(then_branch);
+                });
+                if let Some(branch) = else_branch {
+                    self.statement(branch);
+                }
+            }
             Stmt::While {
                 condition, body, ..
             } => {
                 self.require_bool(condition);
-                self.statement(body);
+                self.inside_loop(|checker| checker.statement(body));
+            }
+            Stmt::Promise { clauses, span } => {
+                let mut seen = std::collections::HashSet::new();
+                for clause in clauses {
+                    if !CAPABILITY_VOCABULARY.contains(&clause.capability.as_str()) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "a promise names the capability vocabulary; '{}' is not a capability",
+                                clause.capability
+                            ),
+                            clause.span.line,
+                            clause.span.column,
+                        ));
+                    }
+                    if !seen.insert(clause.capability.clone()) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "capability '{}' appears in more than one promise clause",
+                                clause.capability
+                            ),
+                            clause.span.line,
+                            clause.span.column,
+                        ));
+                    }
+                    if let Some(outer) = self.promise_for(&clause.capability)
+                        && outer.never
+                        && !clause.never
+                    {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'{} only within' conflicts with the active 'promise never {}'",
+                                clause.capability, clause.capability
+                            ),
+                            clause.span.line,
+                            clause.span.column,
+                        ));
+                    }
+                }
+                let _ = span;
+                self.active_promises.extend(clauses.iter().cloned());
+            }
+            Stmt::Generator { span, .. } | Stmt::Expand { span, .. } => {
+                self.errors.push(NivError::new(
+                    "generator expansion runs before checking; this build path does not expand generators",
+                    span.line,
+                    span.column,
+                ));
+            }
+            Stmt::Trusted { reason, span } => {
+                if reason.len() > 200 {
+                    self.errors.push(NivError::new(
+                        "a trusted reason stays under 200 bytes of plain language",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if reason.trim().is_empty() {
+                    self.errors.push(NivError::new(
+                        "a trusted module states its reason in plain language",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                self.trusted_scope = true;
+            }
+            Stmt::Sample {
+                title,
+                body,
+                shows,
+                span,
+            } => {
+                if title.len() > 120 {
+                    self.errors.push(NivError::new(
+                        "a sample title stays under 120 bytes",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if !self.sample_titles.insert(title.clone()) {
+                    self.errors.push(NivError::new(
+                        format!("duplicate sample title '{title}'"),
+                        span.line,
+                        span.column,
+                    ));
+                }
+                if shows.is_some() && !matches!(body.last(), Some(Stmt::Expression(_))) {
+                    self.errors.push(NivError::new(
+                        "a sample with 'shows' ends with one expression to display",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                self.in_scope(|checker| {
+                    for capability in CAPABILITY_VOCABULARY {
+                        checker.active_promises.push(PromiseClause {
+                            capability: capability.into(),
+                            never: true,
+                            boundaries: vec![],
+                            span: *span,
+                        });
+                    }
+                    checker.statements(body);
+                });
+            }
+            Stmt::Stop(span) | Stmt::Skip(span) => {
+                if self.loop_depth == 0 {
+                    let word = if matches!(statement, Stmt::Stop(_)) {
+                        "stop"
+                    } else {
+                        "skip"
+                    };
+                    let message = match self.loop_boundary {
+                        Some(boundary) => format!(
+                            "'{word}' attempted to end a loop across {boundary}; give a typed result from it instead"
+                        ),
+                        None => format!(
+                            "'{word}' attempted to end a loop, but no 'repeat' or 'each' loop encloses it; remove it or move this work into a loop"
+                        ),
+                    };
+                    self.errors
+                        .push(NivError::new(message, span.line, span.column));
+                }
             }
             Stmt::For {
                 name,
+                pattern,
                 iterable,
                 body,
                 span,
@@ -1742,24 +2245,48 @@ impl Checker {
                     Type::String => Type::String,
                     Type::Unknown => Type::Unknown,
                     other => {
-                        self.errors.push(NivError::new(
-                            format!("{} is not iterable", other.name()),
-                            span.line,
-                            span.column,
-                        ));
-                        Type::Unknown
+                        if matches!(&other, Type::Record(_, _))
+                            && self
+                                .adoptions
+                                .contains(&("Iterate".to_string(), other.name()))
+                        {
+                            Type::Unknown
+                        } else {
+                            self.errors.push(NivError::new(
+                                format!("{} is not iterable", other.name()),
+                                span.line,
+                                span.column,
+                            ));
+                            Type::Unknown
+                        }
                     }
                 };
                 self.in_scope(|checker| {
-                    checker.declare(
-                        name,
-                        Binding {
-                            ty: element,
-                            mutable: false,
-                        },
-                        *span,
-                    );
-                    checker.statement(body);
+                    match pattern {
+                        Some(pattern) => {
+                            let mut bindings = BTreeMap::new();
+                            let coverage = checker.check_pattern(pattern, &element, &mut bindings);
+                            if !matches!(coverage, Coverage::Full) {
+                                checker.errors.push(NivError::new(
+                                    "a binding pattern never fails; refutable patterns belong in 'choose' or 'when … carries'",
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                            for (bound, ty) in bindings {
+                                checker.declare(&bound, Binding { ty, mutable: false }, *span);
+                            }
+                        }
+                        None => checker.declare(
+                            name,
+                            Binding {
+                                ty: element,
+                                mutable: false,
+                            },
+                            *span,
+                        ),
+                    }
+                    checker.inside_loop(|checker| checker.statement(body));
                 });
             }
             Stmt::Using {
@@ -1823,16 +2350,18 @@ impl Checker {
                                 span.column,
                             ));
                 }
-                self.in_scope(|checker| {
-                    checker.declare(
-                        name,
-                        Binding {
-                            ty: resource_type,
-                            mutable: false,
-                        },
-                        *span,
-                    );
-                    checker.statement(body);
+                self.outside_loops("the enclosing 'using' scope", |checker| {
+                    checker.in_scope(|checker| {
+                        checker.declare(
+                            name,
+                            Binding {
+                                ty: resource_type,
+                                mutable: false,
+                            },
+                            *span,
+                        );
+                        checker.statement(body);
+                    });
                 });
             }
             Stmt::Function {
@@ -1841,10 +2370,46 @@ impl Checker {
                 params,
                 return_type,
                 needs,
+                capability_needs,
                 body,
                 span,
                 ..
             } => {
+                for need in capability_needs {
+                    let Some(clause) = self.promise_for(&need.capability).cloned() else {
+                        continue;
+                    };
+                    if clause.never {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'{name}' declares needs {capability} inside 'promise never {capability}'; remove the need or the promise",
+                                capability = need.capability
+                            ),
+                            need.span.line,
+                            need.span.column,
+                        ));
+                    } else {
+                        match &need.boundary {
+                            Some(boundary) if clause.boundaries.contains(boundary) => {}
+                            Some(boundary) => self.errors.push(NivError::new(
+                                format!(
+                                    "scope \"{boundary}\" is outside the promised boundaries for {}",
+                                    need.capability
+                                ),
+                                need.span.line,
+                                need.span.column,
+                            )),
+                            None => self.errors.push(NivError::new(
+                                format!(
+                                    "'{name}' needs {capability} without a scope inside 'promise {capability} only within …'; add a within boundary from the promise",
+                                    capability = need.capability
+                                ),
+                                need.span.line,
+                                need.span.column,
+                            )),
+                        }
+                    }
+                }
                 let generic_names = type_params
                     .iter()
                     .map(|parameter| parameter.name.clone())
@@ -1909,13 +2474,29 @@ impl Checker {
                     },
                     *span,
                 );
+                if return_type.is_some() && !always_gives(body) {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "'{name}' declares gives {} but can reach its end without 'give'; end every path with 'give'",
+                            result.name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
                 self.returns.push(result);
                 self.needs.push(needs.clone());
-                self.in_scope(|checker| {
-                    for (param, ty) in params.iter().zip(param_types) {
-                        checker.declare(&param.name, Binding { ty, mutable: false }, param.span);
-                    }
-                    checker.statements(body);
+                self.outside_loops("the enclosing function boundary", |checker| {
+                    checker.in_scope(|checker| {
+                        for (param, ty) in params.iter().zip(param_types) {
+                            checker.declare(
+                                &param.name,
+                                Binding { ty, mutable: false },
+                                param.span,
+                            );
+                        }
+                        checker.statements(body);
+                    });
                 });
                 self.needs.pop();
                 self.returns.pop();
@@ -1944,13 +2525,20 @@ impl Checker {
                 derives,
                 span,
             } => {
+                // The builtin web shapes are defaults: a user declaration of
+                // the same name shadows them instead of colliding.
                 if self.type_names.contains_key(name) {
-                    self.errors.push(NivError::new(
-                        format!("shape '{name}' is already declared"),
-                        span.line,
-                        span.column,
-                    ));
-                    return;
+                    if builtin_default_type(name) {
+                        self.records.remove(name);
+                        self.enums.remove(name);
+                    } else {
+                        self.errors.push(NivError::new(
+                            format!("shape '{name}' is already declared"),
+                            span.line,
+                            span.column,
+                        ));
+                        return;
+                    }
                 }
                 let qualified = self.qualified(name);
                 self.type_names.insert(name.clone(), qualified.clone());
@@ -2055,12 +2643,17 @@ impl Checker {
                 span,
             } => {
                 if self.type_names.contains_key(name) {
-                    self.errors.push(NivError::new(
-                        format!("choice '{name}' is already declared"),
-                        span.line,
-                        span.column,
-                    ));
-                    return;
+                    if builtin_default_type(name) {
+                        self.records.remove(name);
+                        self.enums.remove(name);
+                    } else {
+                        self.errors.push(NivError::new(
+                            format!("choice '{name}' is already declared"),
+                            span.line,
+                            span.column,
+                        ));
+                        return;
+                    }
                 }
                 let qualified = self.qualified(name);
                 self.type_names.insert(name.clone(), qualified.clone());
@@ -2432,6 +3025,51 @@ impl Checker {
                 Literal::Bool(_) => Type::Bool,
                 Literal::Null => Type::Null,
             },
+            Expr::Text(pieces, span) => {
+                for piece in pieces {
+                    if let TextPiece::Hole(hole) = piece {
+                        if contains_perform(hole) {
+                            self.errors.push(NivError::new(
+                                "a text hole attempted to perform an effect; text holes stay pure — perform the effect first and place its result in a binding",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        let found = self.expression(hole);
+                        let allowed = matches!(
+                            found,
+                            Type::String
+                                | Type::Int
+                                | Type::UInt
+                                | Type::U128
+                                | Type::Float
+                                | Type::Bool
+                                | Type::BigInt
+                                | Type::Decimal
+                                | Type::Fixed(_)
+                                | Type::DateTime
+                                | Type::Unknown
+                        ) || matches!(
+                            &found,
+                            Type::Record(name, _) if self
+                                .record_derives
+                                .get(name)
+                                .is_some_and(|derives| derives.contains("Display"))
+                        );
+                        if !allowed {
+                            self.errors.push(NivError::new(
+                                format!(
+                                    "a text hole renders text, numbers, booleans, date/times, or shapes deriving Display; found {}",
+                                    found.name()
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                Type::String
+            }
             Expr::Variable(name, span) => self
                 .resolve(name)
                 .map(|binding| binding.ty.clone())
@@ -2555,6 +3193,18 @@ impl Checker {
                 Type::Bool
             }
             Expr::Call(callee, arguments, labels, span) => {
+                if let Some(path) = callable_path(callee)
+                    && (path.starts_with("std.native.") || path.starts_with("std.host."))
+                    && !self.trusted_scope
+                {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "'{path}' crosses the systems boundary; only a module marked 'trusted \"reason\"' may call it"
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
                 if let Some(labels) = labels
                     && let Some(path) = callable_path(callee)
                 {
@@ -2610,7 +3260,7 @@ impl Checker {
                 } else {
                     None
                 };
-                if member_path(callee, &["std", "json", "stringify"])
+                if member_path(callee, &["std", "json", "encode"])
                     && let Some(Type::Record(name, _)) = argument_types.first()
                     && !self.record_supports_derive(name, "Json")
                 {
@@ -2719,6 +3369,22 @@ impl Checker {
                                         span.column,
                                     ));
                                 }
+                            }
+                        }
+                        for capability in &effective_required {
+                            if capability == "$effects" {
+                                continue;
+                            }
+                            if let Some(clause) = self.promise_for(capability)
+                                && clause.never
+                            {
+                                self.errors.push(NivError::new(
+                                    format!(
+                                        "this call needs {capability}, but an active 'promise never {capability}' renounces it; remove the call or the promise"
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
                             }
                         }
                         schema_decode_result.unwrap_or_else(|| substitute(&result, &substitutions))
@@ -2961,121 +3627,376 @@ impl Checker {
                 }
             },
             Expr::Match(subject, arms, span) => {
-                let (type_name, variants, payloads) = match self.expression(subject) {
-                    Type::Enum(name, arguments) => {
-                        let definitions = self.enums.get(&name).cloned().unwrap_or_default();
-                        let variants = definitions
-                            .iter()
-                            .map(|(variant, _)| variant.clone())
-                            .collect();
-                        let payloads = definitions
-                            .into_iter()
-                            .filter_map(|(variant, payload)| {
-                                payload.map(|payload| {
-                                    let substitutions = self
-                                        .type_parameters
-                                        .get(&name)
-                                        .into_iter()
-                                        .flatten()
-                                        .cloned()
-                                        .zip(arguments.clone())
-                                        .collect();
-                                    (variant, substitute(&payload, &substitutions))
-                                })
-                            })
-                            .collect();
-                        (name, variants, payloads)
+                let subject_type = self.expression(subject);
+                if matches!(subject_type, Type::Unknown) {
+                    for arm in arms {
+                        for pattern in &arm.patterns {
+                            let mut bindings = BTreeMap::new();
+                            self.check_pattern(pattern, &Type::Unknown, &mut bindings);
+                        }
+                        self.expression(&arm.value);
                     }
-                    Type::Result(ok, error) => {
-                        let mut payloads = HashMap::<String, Type>::new();
-                        payloads.insert("Ok".into(), *ok);
-                        payloads.insert("Err".into(), *error);
-                        ("Result".into(), vec!["Ok".into(), "Err".into()], payloads)
-                    }
-                    Type::Unknown => return Type::Unknown,
-                    other => {
-                        self.errors.push(NivError::new(
-                            format!(
-                                "choose requires choice or Result value, found {}",
-                                other.name()
-                            ),
-                            span.line,
-                            span.column,
-                        ));
-                        return Type::Unknown;
-                    }
-                };
-                let mut seen = std::collections::HashSet::new();
+                    return Type::Unknown;
+                }
+                let choice = self.pattern_cases(&subject_type);
+                let mut covered = std::collections::HashSet::new();
+                let mut all_covered = false;
                 let mut result = Type::Unknown;
                 for arm in arms {
-                    if !variants.contains(&arm.variant) {
+                    if all_covered {
                         self.errors.push(NivError::new(
-                            format!("{type_name} has no variant '{}'", arm.variant),
-                            arm.span.line,
-                            arm.span.column,
-                        ));
-                    } else if !seen.insert(arm.variant.clone()) {
-                        self.errors.push(NivError::new(
-                            format!("duplicate choose arm '{}'", arm.variant),
+                            "this choose arm is unreachable; the arms above already cover every value",
                             arm.span.line,
                             arm.span.column,
                         ));
                     }
-                    let arm_type = if let Some(binding) = &arm.binding {
-                        if let Some(payload) = payloads.get(&arm.variant).cloned() {
-                            self.scopes.push(HashMap::new());
-                            self.declare(
-                                binding,
-                                Binding {
-                                    ty: payload,
-                                    mutable: false,
-                                },
-                                arm.span,
-                            );
-                            let ty = self.expression(&arm.value);
-                            self.scopes.pop();
-                            ty
-                        } else {
+                    let mut alternatives = vec![];
+                    let mut arm_full = false;
+                    for pattern in &arm.patterns {
+                        let mut bindings = BTreeMap::new();
+                        let coverage = self.check_pattern(pattern, &subject_type, &mut bindings);
+                        if arm.guard.is_none() {
+                            match coverage {
+                                Coverage::Full => {
+                                    if let Some((_, variants, _)) = &choice
+                                        && variants.iter().all(|variant| covered.contains(variant))
+                                        && !variants.is_empty()
+                                    {
+                                        self.errors.push(NivError::new(
+                                            "this arm is unreachable; the case arms above are already exhaustive",
+                                            arm.span.line,
+                                            arm.span.column,
+                                        ));
+                                    }
+                                    arm_full = true;
+                                }
+                                Coverage::Case(name) => {
+                                    if !covered.insert(name.clone()) {
+                                        self.errors.push(NivError::new(
+                                            format!("duplicate choose arm for case '{name}'"),
+                                            arm.span.line,
+                                            arm.span.column,
+                                        ));
+                                    }
+                                }
+                                Coverage::Partial => {}
+                            }
+                        }
+                        alternatives.push(bindings);
+                    }
+                    let bindings = alternatives.first().cloned().unwrap_or_default();
+                    for alternative in alternatives.iter().skip(1) {
+                        if alternative != &bindings {
                             self.errors.push(NivError::new(
-                                format!("{} has no payload to bind", arm.variant),
+                                "every 'or' alternative binds the same names at the same types",
                                 arm.span.line,
                                 arm.span.column,
                             ));
-                            self.expression(&arm.value)
                         }
-                    } else {
-                        if payloads.contains_key(&arm.variant) {
+                    }
+                    self.scopes.push(HashMap::new());
+                    for (name, ty) in &bindings {
+                        self.declare(
+                            name,
+                            Binding {
+                                ty: ty.clone(),
+                                mutable: false,
+                            },
+                            arm.span,
+                        );
+                    }
+                    if let Some(guard) = &arm.guard {
+                        if contains_perform(guard) {
                             self.errors.push(NivError::new(
-                                format!("{} payload must be bound", arm.variant),
+                                "a choose guard attempted to perform an effect; guards stay pure",
                                 arm.span.line,
                                 arm.span.column,
                             ));
                         }
-                        self.expression(&arm.value)
-                    };
+                        let found = self.expression(guard);
+                        self.require(&found, &Type::Bool, guard.span());
+                    }
+                    let arm_type = self.expression(&arm.value);
+                    self.scopes.pop();
+                    if arm_full {
+                        all_covered = true;
+                    }
                     if matches!(result, Type::Unknown) {
                         result = arm_type;
                     } else {
                         self.require(&arm_type, &result, arm.span);
                     }
                 }
-                let missing: Vec<_> = variants
+                if !all_covered {
+                    match &choice {
+                        Some((type_name, variants, _)) => {
+                            let missing: Vec<_> = variants
+                                .iter()
+                                .filter(|variant| !covered.contains(*variant))
+                                .cloned()
+                                .collect();
+                            if !missing.is_empty() {
+                                self.errors.push(NivError::new(
+                                    format!(
+                                        "non-exhaustive choose for {type_name}; missing {}; add the missing cases or an 'otherwise' arm",
+                                        missing.join(", ")
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                        }
+                        None => {
+                            self.errors.push(NivError::new(
+                                "non-exhaustive choose; end with an 'otherwise' arm or a binding pattern",
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    /// Case information for a pattern position: the choice/Result type name,
+    /// its case names, and each payload type with generics substituted.
+    fn pattern_cases(&self, ty: &Type) -> Option<(String, Vec<String>, HashMap<String, Type>)> {
+        match ty {
+            Type::Enum(name, arguments) => {
+                let definitions = self.enums.get(name).cloned().unwrap_or_default();
+                let variants = definitions
                     .iter()
-                    .filter(|variant| !seen.contains(*variant))
-                    .cloned()
+                    .map(|(variant, _)| variant.clone())
                     .collect();
-                if !missing.is_empty() {
+                let substitutions: HashMap<String, Type> = self
+                    .type_parameters
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .zip(arguments.clone())
+                    .collect();
+                let payloads = definitions
+                    .into_iter()
+                    .filter_map(|(variant, payload)| {
+                        payload.map(|payload| (variant, substitute(&payload, &substitutions)))
+                    })
+                    .collect();
+                Some((name.clone(), variants, payloads))
+            }
+            Type::Result(ok, error) => {
+                let mut payloads = HashMap::new();
+                payloads.insert("Ok".to_string(), ok.as_ref().clone());
+                payloads.insert("Err".to_string(), error.as_ref().clone());
+                Some(("Result".into(), vec!["Ok".into(), "Err".into()], payloads))
+            }
+            _ => None,
+        }
+    }
+
+    /// Checks one pattern against the type it matches, recording bindings,
+    /// and reports how much of that type the pattern covers.
+    fn check_pattern(
+        &mut self,
+        pattern: &Pattern,
+        expected: &Type,
+        bindings: &mut BTreeMap<String, Type>,
+    ) -> Coverage {
+        match pattern {
+            Pattern::Any(_) => Coverage::Full,
+            Pattern::Binding(name, span) => {
+                self.bind_pattern_name(name, expected.clone(), *span, bindings);
+                Coverage::Full
+            }
+            Pattern::Literal(literal, span) => {
+                let literal_type = match literal {
+                    Literal::Int(_) => Type::Int,
+                    Literal::Float(_) => Type::Float,
+                    Literal::String(_) => Type::String,
+                    Literal::Bool(_) => Type::Bool,
+                    Literal::Null => Type::Null,
+                };
+                if matches!(literal, Literal::Float(_)) && matches!(expected, Type::Float) {
+                    self.errors.push(NivError::new(
+                        "a float literal is not a safe selector; compare with a 'when' guard instead",
+                        span.line,
+                        span.column,
+                    ));
+                } else if !matches!(expected, Type::Unknown)
+                    && literal_type != *expected
+                    && !(matches!(literal, Literal::Null) && matches!(expected, Type::Nullable(_)))
+                {
                     self.errors.push(NivError::new(
                         format!(
-                            "non-exhaustive choose for {type_name}; missing {}",
-                            missing.join(", ")
+                            "this pattern matches {}, but the choose subject is {}",
+                            literal_type.name(),
+                            expected.name()
                         ),
                         span.line,
                         span.column,
                     ));
                 }
-                result
+                Coverage::Partial
             }
+            Pattern::Name(name, span) => {
+                if let Some((_, variants, payloads)) = self.pattern_cases(expected) {
+                    if variants.contains(name) {
+                        if payloads.contains_key(name) {
+                            self.errors.push(NivError::new(
+                                format!("{name} carries a payload; bind it with 'carries'"),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        return Coverage::Case(name.clone());
+                    }
+                }
+                self.bind_pattern_name(name, expected.clone(), *span, bindings);
+                Coverage::Full
+            }
+            Pattern::Carries(name, inner, span) => match self.pattern_cases(expected) {
+                Some((type_name, variants, payloads)) => {
+                    if !variants.contains(name) {
+                        self.errors.push(NivError::new(
+                            format!("{type_name} has no case '{name}'"),
+                            span.line,
+                            span.column,
+                        ));
+                        self.check_pattern(inner, &Type::Unknown, bindings);
+                        Coverage::Partial
+                    } else if let Some(payload) = payloads.get(name).cloned() {
+                        let inner_coverage = self.check_pattern(inner, &payload, bindings);
+                        if matches!(inner_coverage, Coverage::Full) {
+                            Coverage::Case(name.clone())
+                        } else {
+                            Coverage::Partial
+                        }
+                    } else {
+                        self.errors.push(NivError::new(
+                            format!("{name} carries no payload to match"),
+                            span.line,
+                            span.column,
+                        ));
+                        self.check_pattern(inner, &Type::Unknown, bindings);
+                        Coverage::Partial
+                    }
+                }
+                None => {
+                    if !matches!(expected, Type::Unknown) {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "'{name} carries' matches a choice case, but the value is {}",
+                                expected.name()
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    self.check_pattern(inner, &Type::Unknown, bindings);
+                    Coverage::Partial
+                }
+            },
+            Pattern::Shape(name, fields, span) => match expected {
+                Type::Record(record_name, arguments) => {
+                    let matches_name = name == record_name
+                        || self
+                            .type_names
+                            .get(name)
+                            .is_some_and(|qualified| qualified == record_name);
+                    if !matches_name {
+                        self.errors.push(NivError::new(
+                            format!(
+                                "this pattern names shape '{name}', but the value is {record_name}"
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    let field_types = self.records.get(record_name).cloned().unwrap_or_default();
+                    let substitutions: HashMap<String, Type> = self
+                        .type_parameters
+                        .get(record_name)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .zip(arguments.clone())
+                        .collect();
+                    let mut seen = std::collections::HashSet::new();
+                    let mut full = matches_name;
+                    for (field, sub_pattern) in fields {
+                        if !seen.insert(field.clone()) {
+                            self.errors.push(NivError::new(
+                                format!("field '{field}' appears more than once in this pattern"),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        match field_types.get(field) {
+                            Some(field_type) => {
+                                let field_type = substitute(field_type, &substitutions);
+                                if !matches!(
+                                    self.check_pattern(sub_pattern, &field_type, bindings),
+                                    Coverage::Full
+                                ) {
+                                    full = false;
+                                }
+                            }
+                            None => {
+                                self.errors.push(NivError::new(
+                                    format!("{record_name} has no field '{field}'"),
+                                    span.line,
+                                    span.column,
+                                ));
+                                self.check_pattern(sub_pattern, &Type::Unknown, bindings);
+                                full = false;
+                            }
+                        }
+                    }
+                    if full {
+                        Coverage::Full
+                    } else {
+                        Coverage::Partial
+                    }
+                }
+                Type::Unknown => {
+                    for (_, sub_pattern) in fields {
+                        self.check_pattern(sub_pattern, &Type::Unknown, bindings);
+                    }
+                    Coverage::Partial
+                }
+                other => {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "this pattern names shape '{name}', but the value is {}",
+                            other.name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                    for (_, sub_pattern) in fields {
+                        self.check_pattern(sub_pattern, &Type::Unknown, bindings);
+                    }
+                    Coverage::Partial
+                }
+            },
+        }
+    }
+
+    fn bind_pattern_name(
+        &mut self,
+        name: &str,
+        ty: Type,
+        span: Span,
+        bindings: &mut BTreeMap<String, Type>,
+    ) {
+        if bindings.insert(name.to_string(), ty).is_some() {
+            self.errors.push(NivError::new(
+                format!("this pattern binds '{name}' more than once"),
+                span.line,
+                span.column,
+            ));
         }
     }
 
@@ -3198,12 +4119,14 @@ impl Checker {
             }
             TypeRef::Named(name, span) => match name.as_str() {
                 "Int" | "Number" => Type::Int,
+                "UInt" => Type::UInt,
+                "U128" => Type::U128,
                 "Float" => Type::Float,
                 "String" => Type::String,
                 "Bytes" => Type::Bytes,
                 "SecretKey" => Type::SecretKey,
                 "Bool" => Type::Bool,
-                "Null" => Type::Null,
+                "Nothing" => Type::Null,
                 "File" => Type::File,
                 "TcpListener" => Type::TcpListener,
                 "TcpStream" => Type::TcpStream,
@@ -3225,6 +4148,7 @@ impl Checker {
                 "U16" => Type::Fixed(FixedKind::U16),
                 "U32" => Type::Fixed(FixedKind::U32),
                 "U64" => Type::Fixed(FixedKind::U64),
+                "I128" => Type::Fixed(FixedKind::I128),
                 "Task" => Type::Task,
                 "Channel" => Type::Channel,
                 _ => {
@@ -3251,11 +4175,13 @@ impl Checker {
                             Type::Enum(qualified.clone(), vec![])
                         }
                     } else {
-                        self.errors.push(NivError::new(
-                            format!("unknown type '{name}'"),
-                            span.line,
-                            span.column,
-                        ));
+                        let message = if name == "Null" {
+                            "unknown type 'Null'; the unit type is 'Nothing'".to_string()
+                        } else {
+                            format!("unknown type '{name}'")
+                        };
+                        self.errors
+                            .push(NivError::new(message, span.line, span.column));
                         Type::Unknown
                     }
                 }
@@ -3265,6 +4191,8 @@ impl Checker {
     fn numeric_pair(&mut self, left: &Type, right: &Type, span: Span) -> Type {
         match (left, right) {
             (Type::Int, Type::Int) => Type::Int,
+            (Type::UInt, Type::UInt) => Type::UInt,
+            (Type::U128, Type::U128) => Type::U128,
             (Type::Float, Type::Float) => Type::Float,
             (Type::BigInt, Type::BigInt) => Type::BigInt,
             (Type::Decimal, Type::Decimal) => Type::Decimal,
@@ -3306,41 +4234,43 @@ impl Checker {
         match ty {
             Type::Generic(_) => unreachable!("generic constraints are handled above"),
             Type::Unknown => true,
-            Type::Int | Type::Float | Type::BigInt | Type::Decimal | Type::Fixed(_) => {
-                matches!(protocol, "Comparable" | "Number" | "Ordered" | "Sendable")
+            Type::Int
+            | Type::UInt
+            | Type::U128
+            | Type::Float
+            | Type::BigInt
+            | Type::Decimal
+            | Type::Fixed(_) => {
+                matches!(protocol, "Equal" | "Number" | "Ordered" | "Sendable")
             }
             Type::String | Type::Bytes => {
-                matches!(protocol, "Comparable" | "Ordered" | "Iterable" | "Sendable")
+                matches!(protocol, "Equal" | "Ordered" | "Sendable")
             }
             Type::DateTime => {
-                matches!(protocol, "Comparable" | "Ordered" | "Sendable")
+                matches!(protocol, "Equal" | "Ordered" | "Sendable")
             }
             Type::Bool | Type::Null => {
-                matches!(protocol, "Comparable" | "Sendable")
+                matches!(protocol, "Equal" | "Sendable")
             }
             Type::Array(element) | Type::Set(element) => match protocol {
-                "Comparable" => self.satisfies(element, "Comparable"),
-                "Iterable" => true,
+                "Equal" => self.satisfies(element, "Equal"),
                 "Sendable" => self.satisfies(element, "Sendable"),
                 _ => false,
             },
-            Type::Iterator(_) => protocol == "Iterable",
+            Type::Iterator(_) => false,
             Type::Map(key, value) => match protocol {
-                "Comparable" => {
-                    self.satisfies(key, "Comparable") && self.satisfies(value, "Comparable")
-                }
-                "Iterable" => true,
+                "Equal" => self.satisfies(key, "Equal") && self.satisfies(value, "Equal"),
                 "Sendable" => self.satisfies(key, "Sendable") && self.satisfies(value, "Sendable"),
                 _ => false,
             },
             Type::Nullable(inner) => self.satisfies(inner, protocol),
             Type::Result(ok, error) => {
-                matches!(protocol, "Comparable" | "Sendable")
+                matches!(protocol, "Equal" | "Sendable")
                     && self.satisfies(ok, protocol)
                     && self.satisfies(error, protocol)
             }
             Type::Record(_, arguments) | Type::Enum(_, arguments) => {
-                matches!(protocol, "Comparable" | "Sendable")
+                matches!(protocol, "Equal" | "Sendable")
                     && arguments
                         .iter()
                         .all(|argument| self.satisfies(argument, protocol))
@@ -3465,8 +4395,20 @@ impl Checker {
     }
     fn in_scope(&mut self, operation: impl FnOnce(&mut Self)) {
         self.scopes.push(HashMap::new());
+        let promise_mark = self.active_promises.len();
+        let trusted_mark = self.trusted_scope;
         operation(self);
+        self.trusted_scope = trusted_mark;
+        self.active_promises.truncate(promise_mark);
         self.scopes.pop();
+    }
+
+    /// The innermost active promise clause for a capability, if any.
+    fn promise_for(&self, capability: &str) -> Option<&PromiseClause> {
+        self.active_promises
+            .iter()
+            .rev()
+            .find(|clause| clause.capability == capability)
     }
 }
 
@@ -3483,10 +4425,16 @@ fn declared_name(statement: &Stmt) -> Option<&str> {
     }
 }
 
+/// The builtin web/net defaults: a user declaration of the same name
+/// shadows them instead of colliding.
+fn builtin_default_type(name: &str) -> bool {
+    matches!(name, "Response" | "Request" | "Interest")
+}
+
 fn known_builtin_protocol(name: &str) -> bool {
     matches!(
         name,
-        "Comparable" | "Number" | "Ordered" | "Iterable" | "Closable" | "Sendable"
+        "Equal" | "Number" | "Ordered" | "Closable" | "Sendable"
     )
 }
 
@@ -3552,6 +4500,8 @@ fn derive_data_type_at(
     }
     match ty {
         Type::Int
+        | Type::UInt
+        | Type::U128
         | Type::Float
         | Type::String
         | Type::Bytes
@@ -3891,7 +4841,7 @@ fn transaction_type_module() -> Type {
     let generic = |parameters: Vec<Type>, result: Type| {
         Type::Function(
             vec!["Key".into(), "Value".into()],
-            vec![("Key".into(), "Comparable".into())],
+            vec![("Key".into(), "Equal".into())],
             parameters,
             Box::new(result),
             vec![],
@@ -3900,7 +4850,7 @@ fn transaction_type_module() -> Type {
     let result = |ok: Type| Type::Result(Box::new(ok), Box::new(Type::String));
     Type::Module(HashMap::from([
         (
-            "begin".into(),
+            "create".into(),
             generic(vec![map.clone()], transaction.clone()),
         ),
         (
@@ -3943,17 +4893,14 @@ fn map_functions() -> Vec<(&'static str, Type)> {
     let generic = |params: Vec<Type>, result: Type| {
         Type::Function(
             vec!["Key".into(), "Value".into()],
-            vec![("Key".into(), "Comparable".into())],
+            vec![("Key".into(), "Equal".into())],
             params,
             Box::new(result),
             vec![],
         )
     };
     vec![
-        (
-            "single",
-            generic(vec![key.clone(), value.clone()], map.clone()),
-        ),
+        ("of", generic(vec![key.clone(), value.clone()], map.clone())),
         (
             "set",
             generic(vec![map.clone(), key.clone(), value.clone()], map.clone()),
@@ -4071,14 +5018,14 @@ fn set_functions() -> Vec<(&'static str, Type)> {
     let generic = |params: Vec<Type>, result: Type| {
         Type::Function(
             vec!["Element".into()],
-            vec![("Element".into(), "Comparable".into())],
+            vec![("Element".into(), "Equal".into())],
             params,
             Box::new(result),
             vec![],
         )
     };
     vec![
-        ("single", generic(vec![element.clone()], set.clone())),
+        ("of", generic(vec![element.clone()], set.clone())),
         (
             "add",
             generic(vec![set.clone(), element.clone()], set.clone()),

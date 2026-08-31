@@ -573,7 +573,7 @@ fn completions() -> Vec<&'static str> {
         "std.int.format",
         "std.crypto.sha256",
         "std.crypto.hmac_sha256",
-        "std.crypto.verify_hmac_sha256",
+        "std.crypto.hmac_sha256_verify",
         "std.crypto.random_bytes",
         "std.crypto.password_hash",
         "std.crypto.password_verify",
@@ -587,11 +587,11 @@ fn completions() -> Vec<&'static str> {
         "std.csv.decode",
         "std.csv.encode",
         "std.encoding.hex",
-        "std.encoding.unhex",
+        "std.encoding.hex_decode",
         "std.encoding.base64",
-        "std.encoding.unbase64",
+        "std.encoding.base64_decode",
         "std.encoding.base64url",
-        "std.encoding.unbase64url",
+        "std.encoding.base64url_decode",
         "std.reflect.schema",
         "std.iter.from",
         "std.iter.range",
@@ -601,7 +601,7 @@ fn completions() -> Vec<&'static str> {
         "std.iter.chain",
         "std.iter.fold",
         "std.iter.find",
-        "std.transactions.begin",
+        "std.transactions.create",
         "std.transactions.commit",
         "std.native.open",
         "std.native.call_int",
@@ -616,7 +616,7 @@ fn completions() -> Vec<&'static str> {
         "std.web.websocket_secure_accept",
         "std.web.tls_close",
         "std.net.write_some",
-        "std.net.ready",
+        "std.net.wait_ready",
         "std.net.ready_any",
         "std.net.read_ready",
         "std.net.read_exact_bytes",
@@ -656,10 +656,9 @@ fn completions() -> Vec<&'static str> {
         "U16",
         "U32",
         "U64",
-        "Comparable",
+        "Equal",
         "Number",
         "Ordered",
-        "Iterable",
         "Closable",
         "Sendable",
     ]
@@ -690,7 +689,7 @@ mod tests {
     fn language_server_publishes_diagnostics_formats_and_completes() {
         let messages = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///main.niv","text":"define main() {\nkeep value: String = 42\n}"}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///main.niv","text":"define main takes { } {\nkeep value: String = 42\n}"}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///main.niv"}}}),
             json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{}}),
             json!({"jsonrpc":"2.0","id":5,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///main.niv"},"position":{"line":1,"character":6}}}),
@@ -746,7 +745,7 @@ mod tests {
 
     #[test]
     fn rename_ignores_strings_comments_and_tracks_utf16() {
-        let source = "keep café = 1 // café\nshow(\"café\")\nshow(café)";
+        let source = "keep café set 1 // café\nshow(\"café\")\nshow(café)";
         let ranges = super::identifier_occurrences(source, "café");
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[1]["start"]["line"], 2);
@@ -759,9 +758,9 @@ mod tests {
     fn rename_updates_an_exposed_symbol_across_open_modules_only() {
         let messages = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/greetings.niv","text":"define message(name: String) gives String { give name }\nexpose { message }"}}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/main.niv","text":"use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))\nkeep message = \"local\""}}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/other.niv","text":"keep message = \"unrelated\""}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/greetings.niv","text":"define message takes { name is String } gives String { give name }\nexpose { message }"}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/main.niv","text":"use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))\nkeep message set \"local\""}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/other.niv","text":"keep message set \"unrelated\""}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///project/main.niv"},"position":{"line":1,"character":18},"newName":"welcome"}}),
             json!({"jsonrpc":"2.0","method":"exit","params":null}),
         ];
@@ -809,7 +808,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("greetings.niv"),
-            "define message(name: String) gives String { give name }\nexpose { message }",
+            "define message takes { name is String } gives String { give name }\nexpose { message }",
         )
         .unwrap();
         let main_source = "use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))";

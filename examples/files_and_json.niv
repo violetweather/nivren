@@ -11,10 +11,10 @@ gives String or String
 needs FileRead
 {
     keep opened set std.files.open_read with { path set path }
-    using file = opened or give {
-        keep source set std.files.read_open with { file set file maximum set 1048576 } or give
+    using file set opened or give {
+        keep source set std.files.read_from with { file set file maximum set 1048576 } or give
         keep document set std.json.decode with { schema set Document source set source } or give
-        give std.json.stringify with { value set document }
+        give std.json.encode with { value set document }
     }
 }
 

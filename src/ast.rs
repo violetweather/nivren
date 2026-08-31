@@ -75,17 +75,73 @@ pub struct AdoptionMember {
     pub span: Span,
 }
 
+/// One structural pattern inside a `choose` arm.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    /// `any`: matches every value, binds nothing.
+    Any(Span),
+    /// A literal value compared by standard equality.
+    Literal(Literal, Span),
+    /// An identifier: a case of the subject's choice type when it resolves
+    /// to one, otherwise an immutable binding of the matched value.
+    Name(String, Span),
+    /// An identifier that always binds, never resolving to a case
+    /// (`otherwise as name`, legacy `(name)` payload bindings).
+    Binding(String, Span),
+    /// `Case carries pattern`: a case test with a nested payload pattern.
+    Carries(String, Box<Pattern>, Span),
+    /// `Shape holds { field set pattern, … }`: a nominal shape test with
+    /// named field patterns; omitted fields match anything.
+    Shape(String, Vec<(String, Pattern)>, Span),
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Any(span)
+            | Self::Literal(_, span)
+            | Self::Name(_, span)
+            | Self::Binding(_, span)
+            | Self::Carries(_, _, span)
+            | Self::Shape(_, _, span) => *span,
+        }
+    }
+}
+
+/// One clause of a `promise` declaration: `never Capability` renounces a
+/// capability entirely; `Capability only within "…"` confines its scopes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PromiseClause {
+    pub capability: String,
+    pub never: bool,
+    pub boundaries: Vec<String>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchArm {
-    pub variant: String,
-    pub binding: Option<String>,
+    /// One or more `or`-joined alternatives; every alternative binds the
+    /// same names at the same types.
+    pub patterns: Vec<Pattern>,
+    /// An optional pure `when` guard evaluated with the arm's bindings.
+    pub guard: Option<Expr>,
     pub value: Expr,
     pub span: Span,
+}
+
+/// One piece of a `text "…"` literal: fixed text or one hole expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TextPiece {
+    Literal(String),
+    Hole(Expr),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Literal(Literal, Span),
+    /// A formatted `text "…"` literal; evaluation renders every piece and
+    /// joins them into one string.
+    Text(Vec<TextPiece>, Span),
     Variable(String, Span),
     Assign(String, Box<Expr>, Span),
     Unary(TokenKind, Box<Expr>, Span),
@@ -111,6 +167,7 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Self::Literal(_, span)
+            | Self::Text(_, span)
             | Self::Variable(_, span)
             | Self::Assign(_, _, span)
             | Self::Unary(_, _, span)
@@ -181,6 +238,14 @@ pub enum Stmt {
         initializer: Expr,
         span: Span,
     },
+    /// `keep Shape holds { field set pattern } set expression`: destructures
+    /// an irrefutable shape pattern into immutable bindings in the current
+    /// scope.
+    LetPattern {
+        pattern: Pattern,
+        initializer: Expr,
+        span: Span,
+    },
     Expression(Expr),
     Print(Expr, Span),
     Block(Vec<Stmt>, Span),
@@ -190,13 +255,70 @@ pub enum Stmt {
         else_branch: Option<Box<Stmt>>,
         span: Span,
     },
+    /// `when subject carries pattern { … } otherwise { … }`: tests one
+    /// pattern against a `maybe` value's present payload or a choice value,
+    /// binding pattern names immutably in the matched branch only.
+    IfCarries {
+        subject: Expr,
+        patterns: Vec<Pattern>,
+        then_branch: Box<Stmt>,
+        else_branch: Option<Box<Stmt>>,
+        span: Span,
+    },
     While {
         condition: Expr,
         body: Box<Stmt>,
         span: Span,
     },
+    /// `stop` ends the nearest enclosing loop; `skip` ends only the current
+    /// pass. The checker guarantees both appear inside a loop without crossing
+    /// a function, task, or `using` boundary.
+    Stop(Span),
+    Skip(Span),
+    /// `promise never Network, FileRead only within "config"`: statically
+    /// proven renunciations binding the rest of the enclosing scope.
+    Promise {
+        clauses: Vec<PromiseClause>,
+        span: Span,
+    },
+    /// `generate name takes { … } { … }`: a compile-time callable whose
+    /// body builds declaration values with `std.source`. Generators are
+    /// consumed by expansion and never reach checking or runtime.
+    Generator {
+        name: String,
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    /// `expand name with { … }`: evaluates a generator at module scope and
+    /// splices the produced declarations in place.
+    Expand {
+        name: String,
+        labels: Vec<String>,
+        arguments: Vec<Expr>,
+        span: Span,
+    },
+    /// `trusted "reason"`: marks the enclosing scope as a systems escape
+    /// hatch, unlocking `std.native` and `std.host` while the mandatory
+    /// reason travels into audits and documentation.
+    Trusted {
+        reason: String,
+        span: Span,
+    },
+    /// `sample "title" { … } shows "expected"`: a checked, hermetic example.
+    /// Quiet in ordinary runs; `niv test` executes it and compares the final
+    /// expression's display output when `shows` is present.
+    Sample {
+        title: String,
+        body: Vec<Stmt>,
+        shows: Option<String>,
+        span: Span,
+    },
     For {
         name: String,
+        /// When present, each element destructures through this irrefutable
+        /// pattern instead of binding `name` directly.
+        pattern: Option<Pattern>,
         iterable: Expr,
         body: Box<Stmt>,
         span: Span,
@@ -244,6 +366,9 @@ pub enum Stmt {
     },
     Import {
         path: String,
+        /// `use "path" as name`: the namespace binding; required when the
+        /// file stem is not a usable identifier or would collide.
+        alias: Option<String>,
         span: Span,
     },
     Export {
@@ -254,6 +379,12 @@ pub enum Stmt {
         name: String,
         body: Vec<Stmt>,
         exports: Vec<String>,
+        span: Span,
+    },
+    /// A `///` doc-comment block. It documents the declaration that follows
+    /// it in the same body; `niv doc` renders it and execution ignores it.
+    Doc {
+        text: String,
         span: Span,
     },
 }

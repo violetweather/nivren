@@ -17,12 +17,12 @@ takes {
 gives String or String
 {
     keep payload set std.json.compact with { source set payload_json } or give
-    keep header set std.encoding.base64url with {
+    keep header set std.encoding.base64url_encode with {
         bytes set std.bytes.from_string with {
             value set "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
         }
     } or give
-    keep encoded_payload set std.encoding.base64url with {
+    keep encoded_payload set std.encoding.base64url_encode with {
         bytes set std.bytes.from_string with { value set payload }
     } or give
     keep message set signing_input with {
@@ -33,7 +33,7 @@ gives String or String
         key set secret
         message set std.bytes.from_string with { value set message }
     } or give
-    keep signature set std.encoding.base64url with { bytes set tag } or give
+    keep signature set std.encoding.base64url_encode with { bytes set tag } or give
     keep prefix set std.text.concat with { left set message right set "." } or give
     give std.text.concat with { left set prefix right set signature }
 }

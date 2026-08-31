@@ -1,7 +1,7 @@
 shape Violation holds {
     field is String
     message is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 define required
 takes {

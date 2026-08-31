@@ -11,7 +11,7 @@ needs Native
         kind set "database"
         request set "{\"url\":\"local\"}"
     } or give
-    using database = opened {
+    using database set opened {
         give std.host.call with { handle set database name set "query" request set request }
     }
 }

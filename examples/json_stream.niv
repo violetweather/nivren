@@ -11,7 +11,7 @@ gives maybe Event or String
 needs FileRead
 {
     keep opened set std.files.open_read with { path set path } or give
-    using file = opened {
+    using file set opened {
         give std.json.read_next_as with {
             schema set Event
             file set file

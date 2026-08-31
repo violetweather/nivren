@@ -80,7 +80,7 @@ gives Image or String
     keep maximum set std.int.parse with { source set maximum_token.text } or give
     when maximum != 255 { give err("PPM channel maximum must be 255") }
     keep separator set std.bytes.get with { bytes set source index set maximum_token.next } or give
-    when !whitespace with { value set separator } { give err("PPM header must end with whitespace") }
+    when not whitespace with { value set separator } { give err("PPM header must end with whitespace") }
     change pixel_start set maximum_token.next + 1
     when separator == 13 and pixel_start < std.bytes.length with { bytes set source } and (std.bytes.get with { bytes set source index set pixel_start } or give) == 10 {
         change pixel_start to pixel_start + 1

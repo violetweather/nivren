@@ -7,8 +7,8 @@ Nivren is an intent-first application language: source says what it keeps, chang
 ```nivren
 keep name is String set "Nivren"
 keep bytes set std.bytes.from_string with { value set name }
-keep scores set std.map.single with { key set "clarity" value set 10 }
-keep tags set std.set.single with { value set "safe" }
+keep scores set std.map.of with { key set "clarity" value set 10 }
+keep tags set std.set.of with { value set "safe" }
 change attempts is Int set 0
 change attempts to attempts + 1
 ```
@@ -18,13 +18,13 @@ change attempts to attempts + 1
 ## Functions, labeled calls, and nominal data
 
 ```nivren
-type UserId from Int
+type UserId is Int
 
 shape User holds {
     id is UserId
     name is String
     email is maybe String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 define greeting
 takes {
@@ -46,7 +46,7 @@ keep text set greeting with {
 }
 ```
 
-Function parameters and shape fields use `name is Type`. Calls use `with { name set value }`, so arguments remain identifiable after refactoring. Labels are checked for spelling, order, omissions, and duplicates. A nominal `type Name from Representation` prevents accidentally mixing values that share a representation.
+Function parameters and shape fields use `name is Type`. Calls use `with { name set value }`, so arguments remain identifiable after refactoring. Labels are checked for spelling, order, omissions, and duplicates. A nominal `type Name is Representation` prevents accidentally mixing values that share a representation.
 
 Generic arguments are inferred and may be constrained by protocols. Protocol declarations and adoptions are module-scoped, coherent, and statically dispatched. Built-in safety protocols remain sealed, and a package must own the protocol or the adopted type.
 
@@ -86,7 +86,7 @@ repeat total < 10 {
 }
 
 keep batches set [1, 2, 3, 4, 5]
-    through std.list.batch with { size set 2 }
+    through std.list.batch with { count set 2 }
 ```
 
 `when`/`otherwise`, `each`/`within`, and `repeat` keep control flow explicit. `through` passes the current value as the first parameter of the next stage; the remaining parameters stay labeled. Pure stages lower without runtime plan allocation. Effectful stages preserve source order, typed failure, cleanup, cancellation, and tracing.
@@ -113,7 +113,7 @@ Use `or give` when the current function should propagate the same problem unchan
 shape FetchPlan holds {
     url is String
     timeout is Float
-} with Display, Validate
+} derives Display, Validate
 
 define fetch
 takes { plan is FetchPlan }
@@ -176,8 +176,8 @@ gives String or String
 needs FileRead
 {
     keep opened set perform std.files.open_read with { path set path }
-    using file = opened or give {
-        give perform std.files.read_open with { file set file maximum set 1048576 }
+    using file set opened or give {
+        give perform std.files.read_from with { file set file maximum set 1048576 }
     }
 }
 ```

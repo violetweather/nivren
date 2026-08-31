@@ -1,7 +1,7 @@
 shape FetchPlan holds {
     url is String
     timeout is Float
-} with Display, Validate
+} derives Display, Validate
 
 define fetch
 takes {

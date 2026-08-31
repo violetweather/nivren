@@ -1,13 +1,15 @@
+trusted "bridges compute kernels to the embedding host accelerator"
+
 shape ComputeLimits holds {
     maximum_items is Int
     workgroup_size is Int
-} with Display, Validate
+} derives Display, Validate
 
 shape AddPlan holds {
     left is [Int]
     right is [Int]
     limits is ComputeLimits
-} with Json, Display, Validate
+} derives Json, Display, Validate
 
 shape ComputeArtifact holds {
     target is String
@@ -15,11 +17,11 @@ shape ComputeArtifact holds {
     source is String
     workgroups is Int
     cpu_fallback is [Int]
-} with Json, Display, Validate
+} derives Json, Display, Validate
 
 shape VectorResult holds {
     values is [Int]
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 define validate_plan
 takes {
@@ -133,7 +135,7 @@ needs Native within "gpu"
     keep artifact set compile_add with { plan set plan } or give
     keep request set ComputeArtifact.to_json with { value set artifact } or give
     keep opened set perform std.host.open with { kind set "gpu" request set "webgpu-wgsl" } or give
-    using device = opened {
+    using device set opened {
         keep response set perform std.host.call with { handle set device name set "compute" request set request } or give
         keep result set VectorResult.from_json with { source set response } or give
         when len(result.values) != len(artifact.cpu_fallback) {

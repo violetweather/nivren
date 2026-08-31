@@ -51,13 +51,13 @@ fn arithmetic_and_precedence() {
 #[test]
 fn edition_four_intent_grammar_checks_and_runs_in_both_engines() {
     let source = r#"
-type UserId from Int
+type UserId is Int
 
 shape User holds {
     id is UserId
     name is String
     email is maybe String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 choice LookupProblem holds {
     case Missing
@@ -137,7 +137,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
     let errors = nivren::check("prepare request as Request { value set 1 }").unwrap_err();
     assert!(errors[0].message.contains("with"));
 
-    let errors = nivren::check("shape User holds { name is String } with Magic").unwrap_err();
+    let errors = nivren::check("shape User holds { name is String } derives Magic").unwrap_err();
     assert!(errors[0].message.contains("unknown derive 'Magic'"));
 
     let errors = nivren::check(
@@ -148,7 +148,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
     assert!(errors[0].message.contains("canonical order"));
 
     for (source, expected) in [
-        ("type UserId U64", "from"),
+        ("type UserId U64", "is"),
         ("shape User name is String }", "holds"),
         ("choice State holds { case Failed carries }", "type"),
         ("prepare request Request with {}", "as"),
@@ -166,7 +166,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
             "set",
         ),
         (
-            "shape User holds { name is String } with Json, Json",
+            "shape User holds { name is String } derives Json, Json",
             "more than once",
         ),
     ] {
@@ -286,7 +286,7 @@ fn edition_four_json_schema_labels_are_parseable_and_checked() {
     let source = r#"
 shape Event holds {
     id is Int
-} with Json
+} derives Json
 
 std.json.decode with {
     schema set Event
@@ -336,18 +336,18 @@ fn edition_four_derives_are_checked_and_gate_generated_operations() {
 shape Release holds {
     name is String
     build is Int
-} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+} derives Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
 
 keep first set Release with { name set "beta" build set 4 }
 keep second set Release with { name set "beta" build set 4 }
 assert(first == second, "Compare derive")
-std.json.stringify(first)
+std.json.encode(first)
 "#;
     assert!(nivren::check(complete).is_ok());
     assert_eq!(eval_tree(complete), eval_vm(complete));
 
     for derive in ["Json", "Compare", "Display", "Validate", "Binary"] {
-        let source = format!("shape Unsafe holds {{ handle is NativeHandle }} with {derive}");
+        let source = format!("shape Unsafe holds {{ handle is NativeHandle }} derives {derive}");
         let errors = nivren::check(&source).unwrap_err();
         assert!(
             errors[0]
@@ -355,14 +355,14 @@ std.json.stringify(first)
                 .contains(&format!("derive {derive} does not support"))
         );
     }
-    assert!(nivren::check("shape Row holds { values is [Int] } with DatabaseRow").is_err());
-    assert!(nivren::check("shape Cli holds { bytes is Bytes } with Arguments").is_err());
-    let key_errors = nivren::check("shape Id holds { value is Int } with Key").unwrap_err();
+    assert!(nivren::check("shape Row holds { values is [Int] } derives DatabaseRow").is_err());
+    assert!(nivren::check("shape Cli holds { bytes is Bytes } derives Arguments").is_err());
+    let key_errors = nivren::check("shape Id holds { value is Int } derives Key").unwrap_err();
     assert!(key_errors[0].message.contains("must also derive Compare"));
 
     let missing_json = r#"
-shape Visible holds { value is Int } with Display
-std.json.stringify(Visible with { value set 1 })
+shape Visible holds { value is Int } derives Display
+std.json.encode(Visible with { value set 1 })
 "#;
     let errors = nivren::check(missing_json).unwrap_err();
     assert!(errors[0].message.contains("must derive Json"));
@@ -374,7 +374,7 @@ fn edition_four_generated_derive_methods_run_in_both_engines() {
 shape Release holds {
     name is String
     build is Int
-} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+} derives Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
 
 define verify
 gives String or String
@@ -417,8 +417,8 @@ verify with {}
 fn through_pipelines_values_into_readable_stages() {
     assert_eq!(
         eval(
-            "define add(value: Int, amount: Int) gives Int { give value + amount }\n\
-             define double(value: Int) gives Int { give value * 2 }\n\
+            "define add takes { value is Int, amount is Int } gives Int { give value + amount }\n\
+             define double takes { value is Int } gives Int { give value * 2 }\n\
              5 through add(3) through double"
         ),
         Value::Int(16)
@@ -507,51 +507,51 @@ fn edition_four_language_proof_programs_all_type_check() {
 fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
     let tasks = [
         (
-            "keep answer: Int = 42\nanswer",
+            "keep answer is Int set 42\nanswer",
             "keep answer is Int set 42\nanswer",
         ),
         (
-            "change count: Int = 0\ncount = count + 1\ncount",
+            "change count is Int set 0\ncount = count + 1\ncount",
             "change count is Int set 0\nchange count to count + 1\ncount",
         ),
         (
-            "define add(left: Int, right: Int) gives Int { give left + right }\nadd(20, 22)",
+            "define add takes { left is Int, right is Int } gives Int { give left + right }\nadd(20, 22)",
             "define add takes { left is Int right is Int } gives Int { give left + right }\nadd with { left set 20 right set 22 }",
         ),
         (
-            "shape User { name: String, active: Bool }\nUser(\"Mira\", yes).name",
+            "shape User { name is String, active is Bool }\nUser(\"Mira\", yes).name",
             "shape User holds { name is String active is Bool }\nUser with { name set \"Mira\" active set yes }.name",
         ),
         (
-            "choice State { Ready, Failed(String) }\nchoose State.Ready { Ready => 1, Failed(problem) => 0 }",
+            "choice State { Ready, Failed(String) }\nchoose State.Ready { case Ready => 1, case Failed carries problem => 0 }",
             "choice State holds { case Ready case Failed carries String }\nchoose State.Ready { case Ready => 1 case Failed carries problem => 0 }",
         ),
         (
-            "keep name: String? = none\nname ?? \"guest\"",
+            "keep name is String? set none\nname ?? \"guest\"",
             "keep name is maybe String set none\nname ?? \"guest\"",
         ),
         (
-            "change total = 0\neach value within [1, 2, 3] { total = total + value }\ntotal",
+            "change total set 0\neach value within [1, 2, 3] { total = total + value }\ntotal",
             "change total set 0\neach value in [1, 2, 3] { change total to total + value }\ntotal",
         ),
         (
-            "change count = 0\nrepeat count < 3 { count = count + 1 }\ncount",
+            "change count set 0\nrepeat count < 3 { count = count + 1 }\ncount",
             "change count set 0\nrepeat while count < 3 { change count to count + 1 }\ncount",
         ),
         (
-            "define answer() gives Result<Int, String> { give ok(42) }\nanswer()",
+            "define answer takes { } gives Result<Int, String> { give ok(42) }\nanswer()",
             "define answer gives Int or String { give ok(42) }\nanswer with {}",
         ),
         (
-            "define double(value: Int) gives Int { give value * 2 }\n21 through double",
+            "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
             "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
         ),
         (
-            "shape Request { path: String, timeout: Float }\nkeep request = Request(\"/\", 5.0)\nrequest.path",
+            "shape Request { path is String, timeout is Float }\nkeep request set Request(\"/\", 5.0)\nrequest.path",
             "shape Request holds { path is String timeout is Float }\nprepare request as Request with { path set \"/\" timeout set 5.0 }\n(perform request).path",
         ),
         (
-            "define greet(name: String) gives String { give \"hello \" + name }\ngreet(\"Nivren\")",
+            "define greet takes { name is String } gives String { give \"hello \" + name }\ngreet(\"Nivren\")",
             "define greet takes { name is String } gives String { give \"hello \" + name }\ngreet with { name set \"Nivren\" }",
         ),
     ];
@@ -611,16 +611,16 @@ fn edition_four_maintenance_corpus_reduces_ambiguous_choices() {
 #[test]
 fn intent_concurrency_starts_waits_joins_and_races_scoped_tasks() {
     let source = r#"
-define one() gives Int { give 1 }
-define two() gives Int { give 2 }
-keep joined = together [start one, start two]
-keep first = race [start one, start two]
+define one takes { } gives Int { give 1 }
+define two takes { } gives Int { give 2 }
+keep joined set together [start one, start two]
+keep first set race [start one, start two]
 choose joined {
-    Ok(values) => choose first {
-        Ok(value) => values[0] + values[1] + value,
-        Err(problem) => 0,
+    case Ok carries values => choose first {
+        case Ok carries value => values[0] + values[1] + value,
+        case Err carries problem => 0,
     },
-    Err(problem) => 0
+    case Err carries problem => 0
 }
 "#;
     let tree = eval_tree(source);
@@ -632,50 +632,50 @@ choose joined {
 #[test]
 fn scoped_locks_serialize_shared_updates_in_both_engines() {
     let source = r#"
-define count() gives Result<Int, String> needs Task {
-    keep counter = std.locks.create(0)
-    define increment() gives Result<Null, String> needs Task {
-        keep acquired = std.locks.acquire(counter, 2.0) or give
-        using guard = acquired {
-            keep current = std.locks.read(guard) or give
-            keep written = std.locks.write(guard, current + 1) or give
+define count takes { } gives Result<Int, String> needs Task {
+    keep counter set std.locks.create(0)
+    define increment takes { } gives Result<Nothing, String> needs Task {
+        keep acquired set std.locks.acquire(counter, 2.0) or give
+        using guard set acquired {
+            keep current set std.locks.read(guard) or give
+            keep written set std.locks.write(guard, current + 1) or give
             give ok(none)
         }
     }
-    keep completed = together [start increment, start increment] or give
-    keep acquired = std.locks.acquire(counter, 2.0) or give
-    using guard = acquired {
+    keep completed set together [start increment, start increment] or give
+    keep acquired set std.locks.acquire(counter, 2.0) or give
+    using guard set acquired {
         give std.locks.read(guard)
     }
 }
 
-choose count() { Ok(value) => value, Err(problem) => -1 }
+choose count() { case Ok carries value => value, case Err carries problem => -1 }
 "#;
     assert_eq!(eval_tree(source), Value::Int(2));
     assert_eq!(eval_vm(source), Value::Int(2));
 
     let closed = r#"
-define inspect() gives Result<Bool, String> needs Task {
-    keep lock = std.locks.create("safe")
-    keep guard = std.locks.acquire(lock, 1.0) or give
-    keep first = std.locks.close(guard) or give
-    keep second = std.locks.close(guard) or give
-    give choose std.locks.read(guard) { Ok(value) => ok(no), Err(problem) => ok(yes) }
+define inspect takes { } gives Result<Bool, String> needs Task {
+    keep lock set std.locks.create("safe")
+    keep guard set std.locks.acquire(lock, 1.0) or give
+    keep first set std.locks.close(guard) or give
+    keep second set std.locks.close(guard) or give
+    give choose std.locks.read(guard) { case Ok carries value => ok(no), case Err carries problem => ok(yes) }
 }
-choose inspect() { Ok(value) => value, Err(problem) => no }
+choose inspect() { case Ok carries value => value, case Err carries problem => no }
 "#;
     assert_eq!(eval_tree(closed), Value::Bool(true));
     assert_eq!(eval_vm(closed), Value::Bool(true));
 
     let timeout = r#"
-define blocked() gives Result<Bool, String> needs Task {
-    keep lock = std.locks.create(1)
-    keep first = std.locks.acquire(lock, 1.0) or give
-    keep second = std.locks.acquire(lock, 0.01)
-    keep closed = std.locks.close(first) or give
-    give choose second { Ok(guard) => ok(no), Err(problem) => ok(yes) }
+define blocked takes { } gives Result<Bool, String> needs Task {
+    keep lock set std.locks.create(1)
+    keep first set std.locks.acquire(lock, 1.0) or give
+    keep second set std.locks.acquire(lock, 0.01)
+    keep closed set std.locks.close(first) or give
+    give choose second { case Ok carries guard => ok(no), case Err carries problem => ok(yes) }
 }
-choose blocked() { Ok(value) => value, Err(problem) => no }
+choose blocked() { case Ok carries value => value, case Err carries problem => no }
 "#;
     assert_eq!(eval_tree(timeout), Value::Bool(true));
     assert_eq!(eval_vm(timeout), Value::Bool(true));
@@ -684,17 +684,17 @@ choose blocked() { Ok(value) => value, Err(problem) => no }
 #[test]
 fn atomic_integers_are_linearizable_transferable_and_checked_in_both_engines() {
     let source = r#"
-define count() gives Result<Int, String> needs Task {
-    keep counter = std.atomics.create(0)
-    define increment() gives Result<Null, String> {
-        change index = 0
+define count takes { } gives Result<Int, String> needs Task {
+    keep counter set std.atomics.create(0)
+    define increment takes { } gives Result<Nothing, String> {
+        change index set 0
         repeat index < 250 {
-            keep previous = std.atomics.add(counter, 1) or give
+            keep previous set std.atomics.add(counter, 1) or give
             index = index + 1
         }
         give ok(none)
     }
-    keep completed = together [start increment, start increment, start increment, start increment] or give
+    keep completed set together [start increment, start increment, start increment, start increment] or give
     give ok(std.atomics.load(counter))
 }
 
@@ -705,18 +705,18 @@ count()
     assert_eq!(eval_vm(source), expected);
 
     let operations = r#"
-keep value = std.atomics.create(4)
-keep old = std.atomics.swap(value, 5)
-keep success = std.atomics.compare_exchange(value, 5, 9)
-keep failure = std.atomics.compare_exchange(value, 5, 10)
-choose failure { Ok(previous) => -1, Err(observed) => old + observed + std.atomics.load(value) }
+keep value set std.atomics.create(4)
+keep old set std.atomics.swap(value, 5)
+keep success set std.atomics.compare_exchange(value, 5, 9)
+keep failure set std.atomics.compare_exchange(value, 5, 10)
+choose failure { case Ok carries previous => -1, case Err carries observed => old + observed + std.atomics.load(value) }
 "#;
     assert_eq!(eval_tree(operations), Value::Int(22));
     assert_eq!(eval_vm(operations), Value::Int(22));
 
     assert_eq!(
         eval_vm(
-            "keep value = std.atomics.create(9223372036854775807) choose std.atomics.add(value, 1) { Ok(previous) => no, Err(problem) => yes }"
+            "keep value set std.atomics.create(9223372036854775807) choose std.atomics.add(value, 1) { case Ok carries previous => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -726,57 +726,62 @@ choose failure { Ok(previous) => -1, Err(observed) => old + observed + std.atomi
 #[test]
 fn transactions_commit_or_rollback_and_close_deterministically() {
     let commit = r#"
-define update() gives Result<Int, String> {
-    keep original = std.map.single("count", 1)
-    keep transaction: Transaction<String, Int> = std.transactions.begin(original)
-    keep changed = std.transactions.set(transaction, "count", 2) or give
-    keep committed = std.transactions.commit(transaction) or give
+define update takes { } gives Result<Int, String> {
+    keep original set std.map.of("count", 1)
+    keep transaction is Transaction<String, Int> set std.transactions.create(original)
+    keep changed set std.transactions.set(transaction, "count", 2) or give
+    keep committed set std.transactions.commit(transaction) or give
     give ok(std.map.get(committed, "count") ?? 0)
 }
-choose update() { Ok(value) => value, Err(problem) => 0 }
+choose update() { case Ok carries value => value, case Err carries problem => 0 }
 "#;
     assert_eq!(eval_tree(commit), Value::Int(2));
     assert_eq!(eval_vm(commit), Value::Int(2));
 
     let rollback = r#"
-define update() gives Result<Int, String> {
-    keep original = std.map.single("count", 1)
-    keep transaction = std.transactions.begin(original)
-    keep changed = std.transactions.set(transaction, "count", 9) or give
-    keep restored = std.transactions.rollback(transaction) or give
+define update takes { } gives Result<Int, String> {
+    keep original set std.map.of("count", 1)
+    keep transaction set std.transactions.create(original)
+    keep changed set std.transactions.set(transaction, "count", 9) or give
+    keep restored set std.transactions.rollback(transaction) or give
     give ok(std.map.get(restored, "count") ?? 0)
 }
-choose update() { Ok(value) => value, Err(problem) => 0 }
+choose update() { case Ok carries value => value, case Err carries problem => 0 }
 "#;
     assert_eq!(eval_tree(rollback), Value::Int(1));
     assert_eq!(eval_vm(rollback), Value::Int(1));
 
     let scoped = r#"
-define abandon(transaction: Transaction<String, Int>) gives Result<Null, String> {
-    using active = transaction {
-        keep changed = std.transactions.set(active, "count", 7) or give
+define abandon takes { transaction is Transaction<String, Int> } gives Result<Nothing, String> {
+    using active set transaction {
+        keep changed set std.transactions.set(active, "count", 7) or give
         give err("abandoned")
     }
 }
-keep transaction = std.transactions.begin(std.map.single("count", 1))
-keep abandoned = abandon(transaction)
-keep closed = std.transactions.get(transaction, "count")
-keep first_close = std.transactions.close(transaction)
-keep second_close = std.transactions.close(transaction)
-choose closed { Ok(value) => no, Err(problem) => yes }
+keep transaction set std.transactions.create(std.map.of("count", 1))
+keep abandoned set abandon(transaction)
+keep closed set std.transactions.get(transaction, "count")
+keep first_close set std.transactions.close(transaction)
+keep second_close set std.transactions.close(transaction)
+choose closed { case Ok carries value => no, case Err carries problem => yes }
 "#;
     assert_eq!(eval_tree(scoped), Value::Bool(true));
     assert_eq!(eval_vm(scoped), Value::Bool(true));
 
-    assert!(nivren::check("std.transactions.set(std.transactions.begin(std.map.single(1, \"a\")), \"wrong\", \"b\")").is_err());
+    assert!(
+        nivren::check(
+            "std.transactions.set(std.transactions.create(std.map.of(1, \"a\")), \"wrong\", \"b\")"
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn native_handles_are_opaque_scoped_and_released_once_in_both_engines() {
     let source = r#"
-define operate() gives Result<String, String> needs Native {
-    keep opened = std.host.open("database", "configuration") or give
-    using handle = opened {
+define operate takes { } gives Result<String, String> needs Native {
+    keep opened set std.host.open("database", "configuration") or give
+    using handle set opened {
         give std.host.call(handle, "query", "select 42")
     }
 }
@@ -850,49 +855,49 @@ operate()
             .replace('"', "\\\"");
         let integer = format!(
             r#"
-define calculate() gives Result<Int, String> needs Native {{
-    keep opened = std.native.open("{path}") or give
-    using library = opened {{
+define calculate takes {{ }} gives Result<Int, String> needs Native {{
+    keep opened set std.native.open("{path}") or give
+    using library set opened {{
         give std.native.call_int(library, "nivren_add", [20, 22])
     }}
 }}
-choose calculate() {{ Ok(value) => value, Err(problem) => -1 }}
+choose calculate() {{ case Ok carries value => value, case Err carries problem => -1 }}
 "#
         );
         let float = format!(
             r#"
-define calculate() gives Result<Float, String> needs Native {{
-    keep opened = std.native.open("{path}") or give
-    using library = opened {{
+define calculate takes {{ }} gives Result<Float, String> needs Native {{
+    keep opened set std.native.open("{path}") or give
+    using library set opened {{
         give std.native.call_float(library, "nivren_mean", [1.5, 2.5])
     }}
 }}
-choose calculate() {{ Ok(value) => value, Err(problem) => -1.0 }}
+choose calculate() {{ case Ok carries value => value, case Err carries problem => -1.0 }}
 "#
         );
         let closed = format!(
             r#"
-define verify() gives Result<Bool, String> needs Native {{
-    keep library = std.native.open("{path}") or give
-    keep closed = std.native.close(library) or give
+define verify takes {{ }} gives Result<Bool, String> needs Native {{
+    keep library set std.native.open("{path}") or give
+    keep closed set std.native.close(library) or give
     give choose std.native.call_int(library, "nivren_add", [1, 2]) {{
-        Ok(value) => ok(no),
-        Err(problem) => ok(yes),
+        case Ok carries value => ok(no),
+        case Err carries problem => ok(yes),
     }}
 }}
-choose verify() {{ Ok(value) => value, Err(problem) => no }}
+choose verify() {{ case Ok carries value => value, case Err carries problem => no }}
 "#
         );
         let buffer = format!(
             r#"
-define transform() gives Result<String, String> needs Native {{
-    keep opened = std.native.open("{path}") or give
-    using library = opened {{
-        keep output = std.native.call_buffer(library, "nivren_upper", std.bytes.from_string("Nivren"), 64) or give
+define transform takes {{ }} gives Result<String, String> needs Native {{
+    keep opened set std.native.open("{path}") or give
+    using library set opened {{
+        keep output set std.native.call_buffer(library, "nivren_upper", std.bytes.from_string("Nivren"), 64) or give
         give std.bytes.to_string(output)
     }}
 }}
-choose transform() {{ Ok(value) => value, Err(problem) => problem }}
+choose transform() {{ case Ok carries value => value, case Err carries problem => problem }}
 "#
         );
         for source in [&integer, &float, &buffer, &closed] {
@@ -975,20 +980,20 @@ choose transform() {{ Ok(value) => value, Err(problem) => problem }}
 #[test]
 fn native_handle_cleanup_retries_failures_and_survives_stress() {
     let retry = r#"
-define close_retry() gives Result<Bool, String> needs Native {
-    keep handle = std.host.open("device", "configuration") or give
-    keep first = std.host.close(handle)
-    keep second = std.host.close(handle)
-    give ok(choose first { Ok(value) => no, Err(problem) => choose second { Ok(value) => yes, Err(problem) => no } })
+define close_retry takes { } gives Result<Bool, String> needs Native {
+    keep handle set std.host.open("device", "configuration") or give
+    keep first set std.host.close(handle)
+    keep second set std.host.close(handle)
+    give ok(choose first { case Ok carries value => no, case Err carries problem => choose second { case Ok carries value => yes, case Err carries problem => no } })
 }
 close_retry()
 "#;
     let stress = r#"
-define exercise() gives Result<Int, String> needs Native {
-    change index = 0
+define exercise takes { } gives Result<Int, String> needs Native {
+    change index set 0
     repeat index < 1000 {
-        keep opened = std.host.open("device", "configuration") or give
-        using handle = opened { index = index + 1 }
+        keep opened set std.host.open("device", "configuration") or give
+        using handle set opened { index = index + 1 }
     }
     give ok(index)
 }
@@ -1052,8 +1057,8 @@ exercise()
 #[test]
 fn native_host_operations_join_as_bounded_structured_tasks_in_both_engines() {
     let source = r#"
-define query() gives Result<String, String> needs Native, Task {
-    keep queued = std.host.invoke_async("device.read", "{\"port\":7}") or give
+define query takes { } gives Result<String, String> needs Native, Task {
+    keep queued set std.host.invoke_async("device.read", "{\"port\":7}") or give
     give wait queued
 }
 
@@ -1080,9 +1085,11 @@ query()
         );
     }
 
-    assert!(nivren::check(r#"define missing() { std.host.invoke_async("x", "y") }"#).is_err());
+    assert!(
+        nivren::check(r#"define missing takes { } { std.host.invoke_async("x", "y") }"#).is_err()
+    );
     let no_host = nivren::run(
-        r#"define missing() gives Result<Task, String> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
+        r#"define missing takes { } gives Result<Task, String> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
     )
     .unwrap();
     assert!(matches!(no_host, Value::Err(_)));
@@ -1091,18 +1098,18 @@ query()
 #[test]
 fn datetime_values_preserve_instants_and_iana_zones_in_both_engines() {
     let source = r#"
-define render() gives Result<String, String> {
-    keep epoch = std.time.from_unix(0, "UTC") or give
-    keep new_york = std.time.in_zone(epoch, "America/New_York") or give
-    keep later = std.time.add_seconds(epoch, 3600) or give
+define render takes { } gives Result<String, String> {
+    keep epoch set std.time.from_unix(0, "UTC") or give
+    keep new_york set std.time.in_zone(epoch, "America/New_York") or give
+    keep later set std.time.add_seconds(epoch, 3600) or give
     assert(later > epoch, "DateTime ordering follows the instant")
-    keep parsed = std.time.parse("1970-01-01T09:00:00+09:00[Asia/Tokyo]") or give
+    keep parsed set std.time.parse("1970-01-01T09:00:00+09:00[Asia/Tokyo]") or give
     assert(parsed == epoch, "equal instants compare equally")
     assert(std.time.unix(later) == 3600, "Unix conversion preserves seconds")
     give ok(std.time.format(new_york))
 }
 
-choose render() { Ok(value) => value, Err(problem) => problem }
+choose render() { case Ok carries value => value, case Err carries problem => problem }
 "#;
     let expected = Value::String("1969-12-31T19:00:00-05:00[America/New_York]".into());
     assert_eq!(eval_tree(source), expected);
@@ -1110,7 +1117,7 @@ choose render() { Ok(value) => value, Err(problem) => problem }
 
     assert_eq!(
         eval_vm(
-            "choose std.time.from_unix(0, \"Not/A_Zone\") { Ok(value) => no, Err(problem) => yes }",
+            "choose std.time.from_unix(0, \"Not/A_Zone\") { case Ok carries value => no, case Err carries problem => yes }",
         ),
         Value::Bool(true)
     );
@@ -1119,18 +1126,18 @@ choose render() { Ok(value) => value, Err(problem) => problem }
 #[test]
 fn bigint_and_decimal_arithmetic_is_exact_checked_and_typed() {
     let source = r#"
-define calculate() gives Result<String, String> {
-    keep huge = std.bigint.parse("1000000000000000000000000000000") or give
-    keep two = std.bigint.from_int(2)
-    keep exact = std.decimal.parse("0.1") or give
-    keep more = std.decimal.parse("0.2") or give
-    keep total = exact + more
+define calculate takes { } gives Result<String, String> {
+    keep huge set std.bigint.parse("1000000000000000000000000000000") or give
+    keep two set std.bigint.from_int(2)
+    keep exact set std.decimal.parse("0.1") or give
+    keep more set std.decimal.parse("0.2") or give
+    keep total set exact + more
     assert(std.decimal.format(total) == "0.3", "decimal addition stays exact")
     assert((huge + two) > huge, "BigInt ordering is exact")
     give ok(std.bigint.format(huge + two))
 }
 
-choose calculate() { Ok(value) => value, Err(problem) => problem }
+choose calculate() { case Ok carries value => value, case Err carries problem => problem }
 "#;
     let expected = Value::String("1000000000000000000000000000002".into());
     assert_eq!(eval_tree(source), expected);
@@ -1138,16 +1145,16 @@ choose calculate() { Ok(value) => value, Err(problem) => problem }
 
     assert!(
         nivren::run(
-            "keep value = std.decimal.from_int(1) keep zero = std.decimal.from_int(0) value / zero"
+            "keep value set std.decimal.from_int(1) keep zero set std.decimal.from_int(0) value / zero"
         )
         .is_err()
     );
     let outside = r#"
-define inspect() gives Result<Bool, String> {
-    keep huge = std.bigint.parse("999999999999999999999999") or give
-    give choose std.bigint.to_int(huge) { Ok(value) => ok(no), Err(problem) => ok(yes) }
+define inspect takes { } gives Result<Bool, String> {
+    keep huge set std.bigint.parse("999999999999999999999999") or give
+    give choose std.bigint.to_int(huge) { case Ok carries value => ok(no), case Err carries problem => ok(yes) }
 }
-choose inspect() { Ok(value) => value, Err(problem) => no }
+choose inspect() { case Ok carries value => value, case Err carries problem => no }
 "#;
     assert_eq!(eval_vm(outside), Value::Bool(true));
 }
@@ -1155,27 +1162,27 @@ choose inspect() { Ok(value) => value, Err(problem) => no }
 #[test]
 fn fixed_width_signed_and_unsigned_numbers_are_distinct_and_checked() {
     let source = r#"
-define render() gives Result<String, String> {
-    keep first: U8 = std.u8.from_int(250) or give
-    keep second: U8 = std.u8.from_int(5) or give
-    keep maximum: U8 = first + second
-    keep signed: I16 = std.i16.parse("-32000") or give
-    keep zero: I16 = std.i16.from_int(0) or give
-    keep wide: U64 = std.u64.parse("18446744073709551615") or give
+define render takes { } gives Result<String, String> {
+    keep first is U8 set std.u8.from_int(250) or give
+    keep second is U8 set std.u8.from_int(5) or give
+    keep maximum is U8 set first + second
+    keep signed is I16 set std.i16.parse("-32000") or give
+    keep zero is I16 set std.i16.from_int(0) or give
+    keep wide is U64 set std.u64.parse("18446744073709551615") or give
     assert(signed < zero, "signed ordering")
-    assert(choose std.u64.to_int(wide) { Ok(value) => no, Err(problem) => yes }, "U64 conversion is checked")
+    assert(choose std.u64.to_int(wide) { case Ok carries value => no, case Err carries problem => yes }, "U64 conversion is checked")
     give ok(std.u8.format(maximum) + ":" + std.u64.format(wide))
 }
-choose render() { Ok(value) => value, Err(problem) => problem }
+choose render() { case Ok carries value => value, case Err carries problem => problem }
 "#;
     let expected = Value::String("255:18446744073709551615".into());
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
 
     let overflow = r#"
-define overflow() gives Result<U8, String> {
-    keep left = std.u8.from_int(250) or give
-    keep right = std.u8.from_int(6) or give
+define overflow takes { } gives Result<U8, String> {
+    keep left set std.u8.from_int(250) or give
+    keep right set std.u8.from_int(6) or give
     give ok(left + right)
 }
 overflow()
@@ -1190,11 +1197,11 @@ overflow()
             .is_err()
     );
     assert!(nivren::check(
-        "define mixed() gives Result<U8, String> { keep left = std.u8.from_int(1) or give keep right = std.i8.from_int(1) or give give ok(left + right) }"
+        "define mixed takes { } gives Result<U8, String> { keep left set std.u8.from_int(1) or give keep right set std.i8.from_int(1) or give give ok(left + right) }"
     )
     .is_err());
     assert!(nivren::check(
-        "define negative() gives Result<U8, String> { keep value = std.u8.from_int(1) or give give ok(-value) }"
+        "define negative takes { } gives Result<U8, String> { keep value set std.u8.from_int(1) or give give ok(-value) }"
     )
     .is_err());
 }
@@ -1202,26 +1209,26 @@ overflow()
 #[test]
 fn capability_needs_are_explicit_and_transitive() {
     let direct = nivren::check(
-        "define load(path: String) gives Result<String, String> { give std.files.read(path) }",
+        "define load takes { path is String } gives Result<String, String> { give std.files.read(path) }",
     )
     .unwrap_err();
     assert!(direct[0].message.contains("needs FileRead"));
 
     nivren::check(
-        "define load(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) }",
+        "define load takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) }",
     )
     .unwrap();
 
     let transitive = nivren::check(
-        "define load(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) }\n\
-         define config() gives Result<String, String> { give load(\"app.json\") }",
+        "define load takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) }\n\
+         define config takes { } gives Result<String, String> { give load(\"app.json\") }",
     )
     .unwrap_err();
     assert!(transitive[0].message.contains("needs FileRead"));
 
     let spawned = nivren::check(
-        "define worker() gives Null needs Channel { give none }\n\
-         define launch() gives Task needs Task { give start worker }",
+        "define worker takes { } gives Nothing needs Channel { give none }\n\
+         define launch takes { } gives Task needs Task { give start worker }",
     )
     .unwrap_err();
     assert!(
@@ -1234,21 +1241,21 @@ fn capability_needs_are_explicit_and_transitive() {
 
 #[test]
 fn intent_wait_awaits_a_started_task() {
-    let source = "define answer() gives Int { give 42 } keep task = start answer keep result = wait task choose result { Ok(value) => value, Err(problem) => 0 }";
+    let source = "define answer takes { } gives Int { give 42 } keep task set start answer keep result set wait task choose result { case Ok carries value => value, case Err carries problem => 0 }";
     assert_eq!(eval_tree(source), Value::Int(42));
     assert_eq!(eval_vm(source), Value::Int(42));
 }
 
 #[test]
 fn immutable_bindings_reject_assignment() {
-    let errors = nivren::run("keep answer = 42; answer = 7;").unwrap_err();
+    let errors = nivren::run("keep answer set 42; answer = 7;").unwrap_err();
     assert!(errors[0].message.contains("immutable"));
 }
 
 #[test]
 fn mutable_bindings_and_loops_work() {
     assert_eq!(
-        eval("change n = 0; repeat (n < 5) { n = n + 1; } n"),
+        eval("change n set 0; repeat (n < 5) { n = n + 1; } n"),
         Value::Int(5)
     );
 }
@@ -1256,22 +1263,22 @@ fn mutable_bindings_and_loops_work() {
 #[test]
 fn functions_return_values() {
     assert_eq!(
-        eval("define add(a, b) { give a + b; } add(20, 22)"),
+        eval("define add takes { a is Int , b is Int } { give a + b; } add(20, 22)"),
         Value::Int(42)
     );
 }
 
 #[test]
 fn generic_functions_infer_reuse_and_check_type_parameters() {
-    let source = "define identity<Value>(value: Value) gives Value { give value } keep number: Int = identity(42) keep text: String = identity(\"nivren\") number";
+    let source = "define identity<Value> takes { value is Value } gives Value { give value } keep number is Int set identity(42) keep text is String set identity(\"nivren\") number";
     assert_eq!(eval_tree(source), Value::Int(42));
     assert_eq!(eval_vm(source), Value::Int(42));
 
-    let arrays = "define first<Element>(values: [Element]) gives Element { give values[0] } keep answer: Int = first([42, 7]) answer";
+    let arrays = "define first<Element> takes { values is [Element] } gives Element { give values[0] } keep answer is Int set first([42, 7]) answer";
     assert_eq!(eval_vm(arrays), Value::Int(42));
 
     let mixed = nivren::check(
-        "define same<Value>(left: Value, right: Value) gives Value { give left } same(1, \"two\")",
+        "define same<Value> takes { left is Value, right is Value } gives Value { give left } same(1, \"two\")",
     )
     .unwrap_err();
     assert!(
@@ -1283,11 +1290,11 @@ fn generic_functions_infer_reuse_and_check_type_parameters() {
 
 #[test]
 fn generic_protocols_make_constraints_visible_and_checkable() {
-    let source = "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } keep integer: Int = add(20, 22) keep decimal: Float = add(1.5, 2.5) integer";
+    let source = "define add<Value is Number> takes { left is Value, right is Value } gives Value { give left + right } keep integer is Int set add(20, 22) keep decimal is Float set add(1.5, 2.5) integer";
     assert_eq!(eval_vm(source), Value::Int(42));
 
     let rejected = nivren::check(
-        "define add<Value: Number>(left: Value, right: Value) gives Value { give left + right } add(\"a\", \"b\")",
+        "define add<Value is Number> takes { left is Value, right is Value } gives Value { give left + right } add(\"a\", \"b\")",
     )
     .unwrap_err();
     assert!(
@@ -1297,16 +1304,18 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
     );
 
     nivren::check(
-        "define entry<Key: Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
+        "define entry<Key is Equal, Value> takes { key is Key, value is Value } gives Map<Key, Value> { give std.map.of(key, value) } keep item is Map<String, Int> set entry(\"answer\", 42)",
     )
     .unwrap();
     assert!(nivren::check(
-        "define entry<Key, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.single(key, value) }",
+        "define entry<Key, Value> takes { key is Key, value is Value } gives Map<Key, Value> { give std.map.of(key, value) }",
     )
     .is_err());
     assert!(
-        nivren::check("define bad<Value: Magical>(value: Value) gives Value { give value }",)
-            .is_err()
+        nivren::check(
+            "define bad<Value is Magical> takes { value is Value } gives Value { give value }",
+        )
+        .is_err()
     );
 }
 
@@ -1314,27 +1323,27 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
 fn user_marker_protocols_are_explicit_coherent_and_dual_engine() {
     let source = r#"
 protocol Identified
-shape User { id: Int, name: String }
+shape User { id is Int, name is String }
 adopt Identified for User
 
-define preserve<Value: Identified>(value: Value) gives Value {
+define preserve<Value is Identified> takes { value is Value } gives Value {
     give value
 }
 
-keep user = User(7, "Mira")
+keep user set User(7, "Mira")
 preserve(user)
 "#;
-    let expected = eval_tree("shape User { id: Int, name: String } User(7, \"Mira\")");
+    let expected = eval_tree("shape User { id is Int, name is String } User(7, \"Mira\")");
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
 
     let missing = nivren::check(
         r#"
 protocol Identified
-shape User { id: Int }
-shape Project { id: Int }
+shape User { id is Int }
+shape Project { id is Int }
 adopt Identified for User
-define preserve<Value: Identified>(value: Value) gives Value { give value }
+define preserve<Value is Identified> takes { value is Value } gives Value { give value }
 preserve(Project(2))
 "#,
     )
@@ -1346,7 +1355,7 @@ preserve(Project(2))
     );
 
     let duplicate = nivren::check(
-        "protocol Tagged shape Item { id: Int } adopt Tagged for Item adopt Tagged for Item",
+        "protocol Tagged shape Item { id is Int } adopt Tagged for Item adopt Tagged for Item",
     )
     .unwrap_err();
     assert!(
@@ -1355,7 +1364,7 @@ preserve(Project(2))
             .any(|error| error.message.contains("already adopted"))
     );
 
-    let sealed = nivren::check("adopt Comparable for String").unwrap_err();
+    let sealed = nivren::check("adopt Equal for String").unwrap_err();
     assert!(
         sealed
             .iter()
@@ -1367,13 +1376,13 @@ preserve(Project(2))
 fn protocol_members_are_required_and_dispatch_coherently_in_both_engines() {
     let source = r#"
 protocol Rendered {
-    define render(value: Self) gives String
+    define render takes { value is Self } gives String
 }
-shape User { name: String }
-define render_user(value: User) gives String { give value.name }
-adopt Rendered for User { render = render_user }
+shape User { name is String }
+define render_user takes { value is User } gives String { give value.name }
+adopt Rendered for User { render set render_user }
 
-define present<Value: Rendered>(value: Value) gives String {
+define present<Value is Rendered> takes { value is Value } gives String {
     give Rendered.render(value)
 }
 present(User("Mira"))
@@ -1391,20 +1400,23 @@ present(User("Mira"))
     );
 
     assert!(nivren::check(
-        "protocol Named { define name(value: Self) gives String } shape User { name: String } adopt Named for User"
+        "protocol Named { define name takes { value is Self } gives String } shape User { name is String } adopt Named for User"
     )
     .is_err());
     assert!(nivren::check(
-        "protocol Named { define name(value: Self) gives String } shape User { name: String } define wrong(value: User) gives Int { give 1 } adopt Named for User { name = wrong }"
+        "protocol Named { define name takes { value is Self } gives String } shape User { name is String } define wrong takes { value is User } gives Int { give 1 } adopt Named for User { name set wrong }"
     )
     .is_err());
-    assert!(nivren::check("protocol Named { define name(value: Int) gives String }").is_err());
+    assert!(
+        nivren::check("protocol Named { define name takes { value is Int } gives String }")
+            .is_err()
+    );
     assert!(nivren::check(
-        "protocol Logged { define emit(value: Self) gives Null needs Log } shape Event { text: String } define emit_event(value: Event) gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit = emit_event } define hidden<Value: Logged>(value: Value) { Logged.emit(value) }"
+        "protocol Logged { define emit takes { value is Self } gives Nothing needs Log } shape Event { text is String } define emit_event takes { value is Event } gives Nothing needs Log { std.log.info(value.text) } adopt Logged for Event { emit set emit_event } define hidden<Value is Logged> takes { value is Value } { Logged.emit(value) }"
     )
     .is_err());
     assert!(nivren::check(
-        "protocol Tagged shape Box<Value> { value: Value } adopt Tagged for Box<Int> adopt Tagged for Box<String>"
+        "protocol Tagged shape Box<Value> { value is Value } adopt Tagged for Box<Int> adopt Tagged for Box<String>"
     )
     .is_err());
 }
@@ -1413,7 +1425,7 @@ present(User("Mira"))
 fn closures_capture_scope() {
     assert_eq!(
         eval(
-            "define outer(x) { define inner(y) { give x + y; } give inner; } keep add2 = outer(2); add2(40)"
+            "define outer takes { x is Int } { define inner takes { y is Int } { give x + y; } give inner; } keep add2 set outer(2); add2(40)"
         ),
         Value::Int(42)
     );
@@ -1427,8 +1439,8 @@ fn conditions_require_booleans() {
 
 #[test]
 fn scanner_reports_locations() {
-    let errors = nivren::check("keep x = @;").unwrap_err();
-    assert_eq!((errors[0].line, errors[0].column), (1, 10));
+    let errors = nivren::check("keep x set @;").unwrap_err();
+    assert_eq!((errors[0].line, errors[0].column), (1, 12));
 }
 
 #[test]
@@ -1449,7 +1461,7 @@ fn prototype_spellings_are_not_part_of_edition_two() {
         "for (value in [1]) {}",
         "record Value { item: Int }",
         "enum Value { One }",
-        "match (value) { One => 1 }",
+        "match (value) { case One => 1 }",
         "import \"value.niv\"",
         "export { value }",
         "null",
@@ -1462,8 +1474,9 @@ fn prototype_spellings_are_not_part_of_edition_two() {
 }
 
 #[test]
-fn nested_block_comments_work() {
-    assert_eq!(eval("/* one /* two */ three */ 42"), Value::Int(42));
+fn block_comments_do_not_nest() {
+    assert_eq!(eval("/* one /* two */ 42"), Value::Int(42));
+    assert!(nivren::check("/* open forever").is_err());
 }
 
 #[test]
@@ -1484,18 +1497,19 @@ fn operator_misuse_fails_during_check() {
 
 #[test]
 fn arity_fails_during_check() {
-    let errors = nivren::check("define pair(a, b) { give a; } pair(1)").unwrap_err();
+    let errors =
+        nivren::check("define pair takes { a is Int , b is Int } { give a; } pair(1)").unwrap_err();
     assert!(errors[0].message.contains("expects 2"));
 }
 
 #[test]
 fn immutable_arrays_support_safe_indexing() {
     assert_eq!(
-        eval("keep values = [10, 20, 30]; values[1]"),
+        eval("keep values set [10, 20, 30]; values[1]"),
         Value::Int(20)
     );
     assert_eq!(
-        eval("keep values = append([1, 2], 3); len(values)"),
+        eval("keep values set append([1, 2], 3); len(values)"),
         Value::Int(3)
     );
 }
@@ -1514,12 +1528,15 @@ fn mixed_array_types_fail_check() {
 
 #[test]
 fn annotations_check_bindings_arguments_and_returns() {
-    let source = "define add(a: Int, b: Int) gives Int { give a + b; } keep answer: Int = add(20, 22); answer";
+    let source = "define add takes { a is Int, b is Int } gives Int { give a + b; } keep answer is Int set add(20, 22); answer";
     assert_eq!(eval(source), Value::Int(42));
-    assert!(nivren::check("keep value: String = 42").is_err());
-    assert!(nivren::check("define bad() gives Bool { give 1; }").is_err());
+    assert!(nivren::check("keep value is String set 42").is_err());
+    assert!(nivren::check("define bad takes { } gives Bool { give 1; }").is_err());
     assert!(
-        nivren::check("define onlyInt(value: Int) gives Int { give value; } onlyInt(yes)").is_err()
+        nivren::check(
+            "define onlyInt takes { value is Int } gives Int { give value; } onlyInt(yes)"
+        )
+        .is_err()
     );
 }
 
@@ -1536,26 +1553,25 @@ fn assertions_can_guard_language_tests() {
 #[test]
 fn nullable_types_require_explicit_declaration_and_fallback() {
     assert_eq!(
-        eval("keep missing: String? = none; missing ?? \"fallback\""),
+        eval("keep missing is String? set none; missing ?? \"fallback\""),
         Value::String("fallback".into())
     );
     assert_eq!(
-        eval("keep present: String? = \"value\"; present ?? \"fallback\""),
+        eval("keep present is String? set \"value\"; present ?? \"fallback\""),
         Value::String("value".into())
     );
-    assert!(nivren::check("keep invalid: String = none").is_err());
-    assert!(nivren::check("keep plain: Int = 1; plain ?? 2").is_err());
+    assert!(nivren::check("keep invalid is String set none").is_err());
+    assert!(nivren::check("keep plain is Int set 1; plain ?? 2").is_err());
 }
 
 #[test]
 fn records_are_nominal_typed_values() {
-    let source =
-        "shape Person { name: String, age: Int } keep ada: Person = Person(\"Ada\", 37); ada.name";
+    let source = "shape Person { name is String, age is Int } keep ada is Person set Person(\"Ada\", 37); ada.name";
     assert_eq!(eval(source), Value::String("Ada".into()));
-    assert!(nivren::check("shape Person { name: String } keep person = Person(42)").is_err());
+    assert!(nivren::check("shape Person { name is String } keep person set Person(42)").is_err());
     assert!(
         nivren::check(
-            "shape Person { name: String } keep person = Person(\"Ada\"); person.missing"
+            "shape Person { name is String } keep person set Person(\"Ada\"); person.missing"
         )
         .is_err()
     );
@@ -1565,12 +1581,12 @@ fn records_are_nominal_typed_values() {
 fn safe_reflection_inspects_shape_values_without_vm_internals() {
     let source = r#"
 choice Role { Admin, Member }
-shape User { name: String, active: Bool }
-define inspect() gives Result<String, String> {
-    keep user = User("Mira", yes)
-    keep fields = std.reflect.fields(user) or give
-    keep shape_schema = std.reflect.schema(User) or give
-    keep choice_schema = std.reflect.schema(Role) or give
+shape User { name is String, active is Bool }
+define inspect takes { } gives Result<String, String> {
+    keep user set User("Mira", yes)
+    keep fields set std.reflect.fields(user) or give
+    keep shape_schema set std.reflect.schema(User) or give
+    keep choice_schema set std.reflect.schema(Role) or give
     give ok(
         (std.map.get(fields, "name") ?? "")
         + ":" + (std.map.get(fields, "active") ?? "")
@@ -1582,8 +1598,8 @@ define inspect() gives Result<String, String> {
     )
 }
 choose inspect() {
-    Ok(value) => value,
-    Err(problem) => problem
+    case Ok carries value => value,
+    case Err carries problem => problem
 }
 "#;
     let expected = Value::String("String:Bool:User:shape:String:choice:1".into());
@@ -1595,15 +1611,15 @@ choose inspect() {
 
 #[test]
 fn sealed_enums_require_exhaustive_matches() {
-    let source = "choice State { Idle, Running, Done } keep state: State = State.Running; choose (state) { Idle => 0, Running => 1, Done => 2 }";
+    let source = "choice State { Idle, Running, Done } keep state is State set State.Running; choose (state) { case Idle => 0, case Running => 1, case Done => 2 }";
     assert_eq!(eval(source), Value::Int(1));
     assert!(
         nivren::check(
-            "choice State { Idle, Done } keep state = State.Idle; choose (state) { Idle => 0 }"
+            "choice State { Idle, Done } keep state set State.Idle; choose (state) { case Idle => 0 }"
         )
         .is_err()
     );
-    assert!(nivren::check("choice State { Idle } keep state = State.Missing").is_err());
+    assert!(nivren::check("choice State { Idle } keep state set State.Missing").is_err());
 }
 
 #[test]
@@ -1615,12 +1631,12 @@ choice Response {
     Array([Response]),
     Nil
 }
-define score(value: Response) gives Int {
+define score takes { value is Response } gives Int {
     give choose value {
-        Text(text) => len(text),
-        Number(number) => number,
-        Array(items) => len(items),
-        Nil => 0
+        case Text carries text => len(text),
+        case Number carries number => number,
+        case Array carries items => len(items),
+        case Nil => 0
     }
 }
 score(Response.Array([Response.Text("ok"), Response.Number(5)]))
@@ -1637,18 +1653,20 @@ score(Response.Array([Response.Text("ok"), Response.Number(5)]))
             .unwrap(),
         Value::Int(2)
     );
-    let json = r#"choice Value { Text(String), Nil } std.json.stringify(Value.Text("ok"))"#;
+    let json = r#"choice Value { Text(String), Nil } std.json.encode(Value.Text("ok"))"#;
     let expected_json = Value::Ok(Arc::new(Value::String(
         r#"{"$value":"ok","$variant":"Text"}"#.into(),
     )));
     assert_eq!(eval_tree(json), expected_json);
     assert_eq!(eval_vm(json), expected_json);
 
-    assert!(nivren::check("choice Value { Text(String) } keep value: Value = Value.Text").is_err());
+    assert!(
+        nivren::check("choice Value { Text(String) } keep value is Value set Value.Text").is_err()
+    );
     assert!(nivren::check("choice Value { Text(String) } Value.Text(42)").is_err());
     assert!(nivren::check("choice Value { Nil } Value.Nil(1)").is_err());
     assert!(nivren::check(
-        "choice Value { Text(String) } keep value = Value.Text(\"ok\") choose value { Text => 1 }"
+        "choice Value { Text(String) } keep value set Value.Text(\"ok\") choose value { case Text => 1 }"
     )
     .is_err());
 }
@@ -1656,38 +1674,40 @@ score(Response.Array([Response.Text("ok"), Response.Number(5)]))
 #[test]
 fn shapes_and_choices_are_generic_nominal_and_inferred() {
     let source = r#"
-shape Pair<Left, Right> { left: Left, right: Right }
+shape Pair<Left, Right> { left is Left, right is Right }
 choice Maybe<Value> { Some(Value), None }
 
-define unwrap(value: Maybe<Int>) gives Int {
-    give choose value { Some(item) => item, None => 0 }
+define unwrap takes { value is Maybe<Int> } gives Int {
+    give choose value { case Some carries item => item, case None => 0 }
 }
 
-keep pair: Pair<String, Int> = Pair("age", 42)
-keep present: Maybe<Int> = Maybe.Some(pair.right)
-keep absent: Maybe<Int> = Maybe.None
+keep pair is Pair<String, Int> set Pair("age", 42)
+keep present is Maybe<Int> set Maybe.Some(pair.right)
+keep absent is Maybe<Int> set Maybe.None
 unwrap(present) + unwrap(absent)
 "#;
     assert_eq!(eval_tree(source), Value::Int(42));
     assert_eq!(eval_vm(source), Value::Int(42));
 
     assert!(nivren::check(
-        "shape Pair<Left, Right> { left: Left, right: Right } keep pair: Pair<Int, String> = Pair(1, 2)"
+        "shape Pair<Left, Right> { left is Left, right is Right } keep pair is Pair<Int, String> set Pair(1, 2)"
     )
     .is_err());
     assert!(
         nivren::check(
-            "choice Maybe<Value> { Some(Value), None } keep value: Maybe<String> = Maybe.Some(1)"
+            "choice Maybe<Value> { Some(Value), None } keep value is Maybe<String> set Maybe.Some(1)"
         )
         .is_err()
     );
-    assert!(nivren::check("shape Box<Value> { value: Value } keep value: Box = Box(1)").is_err());
     assert!(
-        nivren::check("shape Keyed<Key: Comparable> { key: Key } Keyed(std.iter.from([1]))")
+        nivren::check("shape Box<Value> { value is Value } keep value is Box set Box(1)").is_err()
+    );
+    assert!(
+        nivren::check("shape Keyed<Key is Equal> { key is Key } Keyed(std.iter.from([1]))")
             .is_err()
     );
     assert!(nivren::check(
-        "shape Keyed<Key: Comparable> { key: Key } define invalid(value: Keyed<Iterator<Int>>) { show(value) }"
+        "shape Keyed<Key is Equal> { key is Key } define invalid takes { value is Keyed<Iterator<Int>> } { show(value) }"
     )
     .is_err());
 }
@@ -1696,13 +1716,13 @@ unwrap(present) + unwrap(absent)
 fn for_iteration_is_typed_and_unicode_safe() {
     assert_eq!(
         eval(
-            "change total: Int = 0; each (value within [1, 2, 3]) { total = total + value; } total"
+            "change total is Int set 0; each (value within [1, 2, 3]) { total = total + value; } total"
         ),
         Value::Int(6)
     );
     assert_eq!(
         eval(
-            "change count: Int = 0; each (character within \"a💡c\") { count = count + 1; } count"
+            "change count is Int set 0; each (character within \"a💡c\") { count = count + 1; } count"
         ),
         Value::Int(3)
     );
@@ -1720,26 +1740,26 @@ fn integers_and_floats_are_distinct_and_overflow_is_trapped() {
 
 #[test]
 fn typed_results_require_exhaustive_payload_matching() {
-    let source = "define parse(valid: Bool) gives Result<Int, String> { when (valid) { give ok(42); } give err(\"invalid\"); } keep result: Result<Int, String> = parse(yes); choose (result) { Ok(value) => value, Err(message) => 0 }";
+    let source = "define parse takes { valid is Bool } gives Result<Int, String> { when (valid) { give ok(42); } give err(\"invalid\"); } keep result is Result<Int, String> set parse(yes); choose (result) { case Ok carries value => value, case Err carries message => 0 }";
     assert_eq!(eval(source), Value::Int(42));
     assert!(
         nivren::check(
-            "keep result: Result<Int, String> = ok(1); choose (result) { Ok(value) => value }"
+            "keep result is Result<Int, String> set ok(1); choose (result) { case Ok carries value => value }"
         )
         .is_err()
     );
-    assert!(nivren::check("keep result: Result<Int, String> = err(\"bad\"); choose (result) { Ok => 1, Err(error) => 0 }").is_err());
+    assert!(nivren::check("keep result is Result<Int, String> set err(\"bad\"); choose (result) { case Ok => 1, case Err carries error => 0 }").is_err());
 }
 
 #[test]
 fn or_give_propagates_typed_failures_through_nested_expressions() {
     let program = r#"
-define parse(valid: Bool) gives Result<Int, String> {
+define parse takes { valid is Bool } gives Result<Int, String> {
     when valid { give ok(41) }
     give err("invalid")
 }
-define answer(valid: Bool) gives Result<Int, String> {
-    keep value: Int = parse(valid) or give
+define answer takes { valid is Bool } gives Result<Int, String> {
+    keep value is Int set parse(valid) or give
     give ok(value + 1)
 }
 answer(yes)
@@ -1765,14 +1785,14 @@ answer(yes)
     );
     assert_eq!(eval_vm(&failure), eval_tree(&failure));
 
-    let nested = "define value() gives Result<Int, String> { give ok(20) } define answer() gives Result<Int, String> { give ok((value() or give) * 2 + 2) } answer()";
+    let nested = "define value takes { } gives Result<Int, String> { give ok(20) } define answer takes { } gives Result<Int, String> { give ok((value() or give) * 2 + 2) } answer()";
     assert_eq!(eval_tree(nested), Value::Ok(Arc::new(Value::Int(42))));
     assert_eq!(eval_vm(nested), Value::Ok(Arc::new(Value::Int(42))));
 
     assert!(nivren::check("ok(1) or give").is_err());
-    assert!(nivren::check("define bad() gives Int { give ok(1) or give }").is_err());
+    assert!(nivren::check("define bad takes { } gives Int { give ok(1) or give }").is_err());
     assert!(nivren::check(
-        "define bad() gives Result<Int, Int> { keep value = err(\"wrong\") or give give ok(value) }",
+        "define bad takes { } gives Result<Int, Int> { keep value set err(\"wrong\") or give give ok(value) }",
     )
     .is_err());
 }
@@ -1792,7 +1812,7 @@ fn file_modules_resolve_relative_imports_once() {
     let directory = module_fixture("modules");
     fs::write(
         directory.join("math.niv"),
-        "define double(value: Int) gives Int { give value * 2; } keep private = 7; expose { double };",
+        "define double takes { value is Int } gives Int { give value * 2; } keep private set 7; expose { double };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -1820,7 +1840,7 @@ fn module_members_are_private_unless_exported() {
     let directory = module_fixture("private-modules");
     fs::write(
         directory.join("secrets.niv"),
-        "keep visible = 1; keep hidden = 2; expose { visible };",
+        "keep visible set 1; keep hidden set 2; expose { visible };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -1838,12 +1858,12 @@ fn module_record_types_are_nominally_namespaced() {
     let directory = module_fixture("nominal-modules");
     fs::write(
         directory.join("numbers.niv"),
-        "shape Box { value: Int } define read(box: Box) gives Int { give box.value; } expose { Box, read };",
+        "shape Box { value is Int } define read takes { box is Box } gives Int { give box.value; } expose { Box, read };",
     )
     .unwrap();
     fs::write(
         directory.join("strings.niv"),
-        "shape Box { value: String } expose { Box };",
+        "shape Box { value is String } expose { Box };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -1866,7 +1886,7 @@ fn module_protocol_adoptions_follow_qualified_types_without_collisions() {
     let directory = module_fixture("protocol-modules");
     fs::write(
         directory.join("people.niv"),
-        "protocol Identified shape User { id: Int } adopt Identified for User define preserve<Value: Identified>(value: Value) gives Value { give value } expose { User, preserve }",
+        "protocol Identified shape User { id is Int } adopt Identified for User define preserve<Value is Identified> takes { value is Value } gives Value { give value } expose { User, preserve }",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -1944,7 +1964,7 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
     );
 
     let program = nivren::parser::parse(
-        nivren::lexer::scan("std.fs.exists(\"definitely-missing\")").unwrap(),
+        nivren::lexer::scan("std.files.exists(\"definitely-missing\")").unwrap(),
     )
     .unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -1958,7 +1978,7 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
         .with_capabilities(vec!["FileRead".to_string()])
         .run_bytecode(&chunk)
         .unwrap();
-    assert_eq!(allowed, Value::Bool(false));
+    assert_eq!(allowed, Value::Ok(Value::Bool(false).into()));
 
     let directory = module_fixture("scoped-capabilities");
     let allowed_file = directory.join("allowed.txt");
@@ -1988,7 +2008,7 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
         .with_capability_scopes(scoped.capability_scopes.clone())
         .run_bytecode(&chunk)
         .unwrap();
-    assert_eq!(inside, Value::Bool(true));
+    assert_eq!(inside, Value::Ok(Value::Bool(true).into()));
 
     let outside_source = "std.files.exists(\"/definitely-outside-nivren-scope\")";
     let outside_program =
@@ -2186,7 +2206,8 @@ fn instruction_limits_stop_runaway_code_and_round_trip_in_projects() {
     assert!(vm_error.message.contains("instruction limit"));
 
     let recursive = nivren::parser::parse(
-        nivren::lexer::scan("define recurse() gives Int { give recurse() } recurse()").unwrap(),
+        nivren::lexer::scan("define recurse takes { } gives Int { give recurse() } recurse()")
+            .unwrap(),
     )
     .unwrap();
     nivren::typecheck::check(&recursive).unwrap();
@@ -2337,7 +2358,7 @@ fn cli_test_profiles_and_deterministic_time_are_explicit() {
     fs::write(project.join("main.niv"), "42").unwrap();
     fs::write(
         tests.join("clock_test.niv"),
-        "assert with { condition set perform clock with { } == 1700000000.25 message set \"fixed test time\" }",
+        "assert with { condition set perform std.time.monotonic with { } == 1700000000.25 message set \"fixed test time\" }",
     )
     .unwrap();
     let niv = env!("CARGO_BIN_EXE_niv");
@@ -2452,7 +2473,7 @@ gives String or String
 needs Native within "database"
 {
     keep opened set perform std.host.open with { kind set "database" request set "memory://cli-proof" } or give
-    using handle = opened {
+    using handle set opened {
         keep created set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"CREATE TABLE users (name TEXT NOT NULL)\",\"parameters\":[],\"maximum_rows\":0,\"timeout\":5.0}" } or give
         keep inserted set perform std.host.call with { handle set handle name set "execute" request set "{\"operation\":\"execute\",\"statement\":\"INSERT INTO users (name) VALUES (?)\",\"parameters\":[\"Ada\"],\"maximum_rows\":0,\"timeout\":5.0}" } or give
         give perform std.host.call with { handle set handle name set "query" request set "{\"operation\":\"query\",\"statement\":\"SELECT name FROM users\",\"parameters\":[],\"maximum_rows\":10,\"timeout\":5.0}" }
@@ -2491,7 +2512,7 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
     .unwrap();
     fs::write(
         dependency_root.join("main.niv"),
-        "define answer() gives Int { give 42; } expose { answer };",
+        "define answer takes { } gives Int { give 42; } expose { answer };",
     )
     .unwrap();
     let dependency = nivren::project::Manifest::load(&dependency_root).unwrap();
@@ -2622,7 +2643,7 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
 
     fs::write(
         app.join(".niv/deps/answerlib-1.0.0/main.niv"),
-        "expose { answer }; keep answer = 0;",
+        "expose { answer }; keep answer set 0;",
     )
     .unwrap();
     assert!(nivren::package::installed_lockfile(&app_manifest).is_err());
@@ -2657,7 +2678,7 @@ fn project_modules_cannot_escape_the_root() {
         std::process::id(),
         std::thread::current().id()
     ));
-    fs::write(&outside, "keep secret = 42;").unwrap();
+    fs::write(&outside, "keep secret set 42;").unwrap();
     let entry = directory.join("main.niv");
     fs::write(
         &entry,
@@ -2677,10 +2698,10 @@ fn project_modules_cannot_escape_the_root() {
 
 #[test]
 fn formatter_is_comment_safe_and_idempotent() {
-    let source = "define main() {\nkeep text = \"{not a block}\" // }\n/* { nested /* } */ ok */\nwhen yes {\nshow(text)\n}\n}\n";
+    let source = "define main takes { } {\nkeep text set \"{not a block}\" // }\n/* { a block comment } */\nwhen yes {\nshow(text)\n}\n}\n";
     let formatted = nivren::formatter::format(source);
-    assert!(formatted.contains("    keep text = \"{not a block}\" // }"));
-    assert!(formatted.contains("    /* { nested /* } */ ok */"));
+    assert!(formatted.contains("    keep text set \"{not a block}\" // }"));
+    assert!(formatted.contains("    /* { a block comment } */"));
     assert_eq!(nivren::formatter::format(&formatted), formatted);
 }
 
@@ -2725,11 +2746,11 @@ greet with {
 
 #[test]
 fn edition_four_formatter_erases_equivalent_line_layout_choices() {
-    let compact = r#"shape User holds { name is String } with Json define greet takes { user is User } gives String { give user.name } greet with { user set User with { name set "Mira" } }"#;
+    let compact = r#"shape User holds { name is String } derives Json define greet takes { user is User } gives String { give user.name } greet with { user set User with { name set "Mira" } }"#;
     let vertical = r#"
 shape User holds {
     name is String
-} with Json
+} derives Json
 
 define greet
 takes {
@@ -2755,8 +2776,7 @@ greet with {
 
 #[test]
 fn documentation_lists_only_explicit_module_exports() {
-    let source =
-        "define public(value: Int) gives Int { give value; } keep hidden = 1; expose { public };";
+    let source = "define public takes { value is Int } gives Int { give value; } keep hidden set 1; expose { public };";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "sample".into(),
@@ -2765,24 +2785,36 @@ fn documentation_lists_only_explicit_module_exports() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(docs.contains("define public(value: Int) gives Int"));
+    assert!(docs.contains("define public takes { value is Int } gives Int"));
     assert!(!docs.contains("hidden"));
 }
 
 #[test]
 fn documentation_lists_entry_module_public_api() {
-    let source =
-        "define public(value: Int) gives Int { give value } keep hidden = 1 expose { public }";
+    let source = "define public takes { value is Int } gives Int { give value } keep hidden set 1 expose { public }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let docs = nivren::documentation::generate("entry", "1.0.0", &parsed);
     assert!(docs.contains("## Public API"));
-    assert!(docs.contains("define public(value: Int) gives Int"));
+    assert!(docs.contains("define public takes { value is Int } gives Int"));
     assert!(!docs.contains("hidden"));
 }
 
 #[test]
+fn doc_comments_document_the_following_declaration_and_execution_ignores_them() {
+    let source = "/// Doubles a value.\n/// Overflow stops the program.\ndefine double takes { value is Int } gives Int { give value * 2 }\nexpose { double }\ndouble(21)";
+    assert_eq!(eval_tree(source), Value::Int(42));
+    assert_eq!(eval_vm(source), Value::Int(42));
+    let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let docs = nivren::documentation::generate("entry", "1.0.0", &parsed);
+    assert!(docs.contains("define double takes { value is Int } gives Int"));
+    assert!(docs.contains("  Doubles a value.\n  Overflow stops the program.\n"));
+    let plain = "// not documentation\n1 + 1";
+    assert_eq!(eval(plain), Value::Int(2));
+}
+
+#[test]
 fn documentation_includes_declared_capabilities() {
-    let source = "define read(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) } expose { read }";
+    let source = "define read takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) } expose { read }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "files".into(),
@@ -2796,7 +2828,7 @@ fn documentation_includes_declared_capabilities() {
 
 #[test]
 fn documentation_preserves_generic_function_signatures() {
-    let source = "define identity<Value: Comparable>(value: Value) gives Value { give value } expose { identity }";
+    let source = "define identity<Value is Equal> takes { value is Value } gives Value { give value } expose { identity }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "generic".into(),
@@ -2805,19 +2837,19 @@ fn documentation_preserves_generic_function_signatures() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(docs.contains("define identity<Value: Comparable>(value: Value) gives Value"));
+    assert!(docs.contains("define identity<Value is Equal> takes { value is Value } gives Value"));
 }
 
 #[test]
 fn bytecode_is_versioned_verified_and_deterministic() {
-    let source = "define sum(limit: Int) gives Int { change total = 0; change index = 0; repeat (index < limit) { total = total + index; index = index + 1; } give total; } sum(5)";
+    let source = "define sum takes { limit is Int } gives Int { change total set 0; change index set 0; repeat (index < limit) { total = total + index; index = index + 1; } give total; } sum(5)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
     nivren::bytecode::verify(&chunk).unwrap();
     let first = nivren::bytecode::disassemble(&chunk);
     assert_eq!(first, nivren::bytecode::disassemble(&chunk));
-    assert!(first.starts_with("NIVB 7\n"));
+    assert!(first.starts_with("NIVB 8\n"));
 
     let mut incompatible = chunk;
     incompatible.version += 1;
@@ -2831,7 +2863,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
 
 #[test]
 fn source_maps_are_stable_nested_and_exportable() {
-    let source = "define answer() gives Int { give 42 }\nanswer()";
+    let source = "define answer takes { } gives Int { give 42 }\nanswer()";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -2840,7 +2872,7 @@ fn source_maps_are_stable_nested_and_exportable() {
     assert_eq!(first, second);
     let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(parsed["schema"], "org.nivren.sourcemap.v1");
-    assert_eq!(parsed["bytecodeVersion"], 7);
+    assert_eq!(parsed["bytecodeVersion"], 8);
     assert!(
         parsed["mappings"]
             .as_array()
@@ -2934,7 +2966,7 @@ fn bytecode_verifier_rejects_invalid_operands_and_scopes() {
 
 #[test]
 fn binary_bundles_round_trip_and_execute() {
-    let source = "shape Pair { left: Int, right: Int } choice Choice { First, Second } define pick(value: Choice) gives Int { give choose value { First => 1, Second => 2 }; } change total = 0; each value within [10, 20] { total = total + value; } keep pair = Pair(total, pick(Choice.Second)); pair.left + pair.right";
+    let source = "shape Pair { left is Int, right is Int } choice Choice { First, Second } define pick takes { value is Choice } gives Int { give choose value { case First => 1, case Second => 2 }; } change total set 0; each value within [10, 20] { total = total + value; } keep pair set Pair(total, pick(Choice.Second)); pair.left + pair.right";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let compiled = nivren::bytecode::compile(&program).unwrap();
@@ -2956,7 +2988,7 @@ fn cli_live_inspection_streams_privacy_safe_versioned_json_lines() {
     let output = directory.join("events.jsonl");
     fs::write(
         &source,
-        "keep secret = \"hidden-value\"\nkeep answer = 40 + 2\nanswer\n",
+        "keep secret set \"hidden-value\"\nkeep answer set 40 + 2\nanswer\n",
     )
     .unwrap();
     let inspected = Command::new(env!("CARGO_BIN_EXE_niv"))
@@ -3009,8 +3041,8 @@ fn schema_bindgen_cli_emits_c_and_cpp_compatible_views() {
     fs::write(
         &schema,
         "choice Role { Admin, Member }\n\
-         shape Address { city: String, postal: U32 }\n\
-         shape User { name: String, role: Role, address: Address?, tags: [String] }\n",
+         shape Address { city is String, postal is U32 }\n\
+         shape User { name is String, role is Role, address is Address?, tags is [String] }\n",
     )
     .unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_niv"))
@@ -3118,7 +3150,7 @@ fn binary_bundle_decoder_rejects_hostile_input() {
 
 #[test]
 fn gc_stress_preserves_escaping_closures_and_collects_cycles() {
-    let source = "define make(base: Int) { define add(value: Int) gives Int { give base + value; } give add; } keep escaped = make(40); change index = 0; repeat (index < 100) { define temporary() gives Int { give index; } temporary(); index = index + 1; } escaped(2)";
+    let source = "define make takes { base is Int } { define add takes { value is Int } gives Int { give base + value; } give add; } keep escaped set make(40); change index set 0; repeat (index < 100) { define temporary takes { } gives Int { give index; } temporary(); index = index + 1; } escaped(2)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -3139,13 +3171,13 @@ fn typed_standard_library_handles_files_paths_time_and_process_errors() {
     let file = directory.join("message.txt");
     let path = file.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
-        "keep writeResult: Result<Null, String> = std.fs.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ Ok(value) => yes, Err(error) => no }}, \"write\"); keep readResult: Result<String, String> = std.fs.read(\"{path}\"); keep text = choose (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(std.fs.exists(\"{path}\"), \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
+        "keep writeResult is Result<Nothing, String> set std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ case Ok carries value => yes, case Err carries error => no }}, \"write\"); keep readResult is Result<String, String> set std.files.read(\"{path}\"); keep text set choose (readResult) {{ case Ok carries value => value, case Err carries error => error }}; assert(choose (std.files.exists(\"{path}\")) {{ case Ok carries present => present, case Err carries error => no }}, \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
 
-    let process = "keep result: Result<String, String> = std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); choose (result) { Ok(output) => no, Err(error) => yes }";
+    let process = "keep result is Result<String, String> set std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); choose (result) { case Ok carries output => no, case Err carries error => yes }";
     assert_eq!(eval_vm(process), Value::Bool(true));
-    assert!(nivren::check("std.fs.read(42)").is_err());
+    assert!(nivren::check("std.files.read(42)").is_err());
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -3172,17 +3204,17 @@ fn bounded_json_engine_validates_unicode_and_formats_deterministically() {
         );
     }
 
-    let program = "keep result: Result<String, String> = std.json.compact(\"{\\\"ok\\\": true}\"); choose result { Ok(value) => value, Err(error) => error }";
+    let program = "keep result is Result<String, String> set std.json.compact(\"{\\\"ok\\\": true}\"); choose result { case Ok carries value => value, case Err carries error => error }";
     assert_eq!(eval_vm(program), Value::String("{\"ok\":true}".into()));
 }
 
 #[test]
 fn json_values_round_trip_through_nivren_collections() {
     let source = r#"
-keep decoded = std.json.parse("{\"name\":\"Nivren\",\"stable\":true,\"versions\":[2,3]}")
+keep decoded set std.json.parse("{\"name\":\"Nivren\",\"stable\":true,\"versions\":[2,3]}")
 choose decoded {
-    Ok(value) => std.json.stringify(value),
-    Err(problem) => err(problem)
+    case Ok carries value => std.json.encode(value),
+    case Err carries problem => err(problem)
 }
 "#;
     let expected = Value::Ok(Arc::new(Value::String(
@@ -3192,7 +3224,7 @@ choose decoded {
     assert_eq!(eval_vm(source), expected);
 
     assert_eq!(
-        eval("std.json.stringify(std.set.single(1))"),
+        eval("std.json.encode(std.set.of(1))"),
         Value::Err(Arc::new(Value::String("JSON cannot represent Set".into())))
     );
 }
@@ -3201,26 +3233,26 @@ choose decoded {
 fn shapes_are_typed_json_schemas_in_both_engines() {
     let source = r#"
 choice Role { Admin, Member }
-shape Address { city: String, postal: U32 }
+shape Address { city is String, postal is U32 }
 
 shape User {
-    name: String,
-    score: U8,
-    tags: [String],
-    alias: String?,
-    address: Address,
-    role: Role,
+    name is String,
+    score is U8,
+    tags is [String],
+    alias is String?,
+    address is Address,
+    role is Role,
 }
 
-define display_name(source: String) gives Result<String, String> {
-    keep user = std.json.decode(User, source) or give
+define display_name takes { source is String } gives Result<String, String> {
+    keep user set std.json.decode(User, source) or give
     give ok(user.name)
 }
 
-keep decoded = std.json.decode(User, "{\"name\":\"Ada\",\"score\":255,\"tags\":[\"compiler\"],\"alias\":null,\"address\":{\"city\":\"London\",\"postal\":12345},\"role\":\"Admin\"}")
+keep decoded set std.json.decode(User, "{\"name\":\"Ada\",\"score\":255,\"tags\":[\"compiler\"],\"alias\":null,\"address\":{\"city\":\"London\",\"postal\":12345},\"role\":\"Admin\"}")
 choose decoded {
-    Ok(user) => std.json.stringify(user),
-    Err(problem) => err(problem),
+    case Ok carries user => std.json.encode(user),
+    case Err carries problem => err(problem),
 }
 "#;
     let expected = Value::Ok(Arc::new(Value::String(
@@ -3238,10 +3270,10 @@ choose decoded {
     ] {
         let program = format!(
             "choice Role {{ Admin, Member }}\n\
-             shape Address {{ city: String, postal: U32 }}\n\
-             shape User {{ name: String, score: U8, tags: [String], alias: String?, address: Address, role: Role }}\n\
-             keep decoded = std.json.decode(User, {invalid:?})\n\
-             choose decoded {{ Ok(value) => no, Err(problem) => yes }}"
+             shape Address {{ city is String, postal is U32 }}\n\
+             shape User {{ name is String, score is U8, tags is [String], alias is String?, address is Address, role is Role }}\n\
+             keep decoded set std.json.decode(User, {invalid:?})\n\
+             choose decoded {{ case Ok carries value => no, case Err carries problem => yes }}"
         );
         assert_eq!(eval_tree(&program), Value::Bool(true));
         assert_eq!(eval_vm(&program), Value::Bool(true));
@@ -3258,18 +3290,18 @@ fn json_lines_stream_with_a_bounded_record_buffer() {
     fs::write(&path, "{\"id\":1}\n{\"id\":2}\n").unwrap();
     let source = format!(
         r#"
-shape Item {{ id: Int }}
-define load(path: String) gives Result<String, String> needs FileRead {{
-    keep opened = std.files.open_read(path) or give
-    using file = opened {{
-        keep first = std.json.read_next_as(Item, file, 64) or give
-        keep second = std.json.read_next_as(Item, file, 64) or give
-        keep ending = std.json.read_next_as(Item, file, 64) or give
+shape Item {{ id is Int }}
+define load takes {{ path is String }} gives Result<String, String> needs FileRead {{
+    keep opened set std.files.open_read(path) or give
+    using file set opened {{
+        keep first set std.json.read_next_as(Item, file, 64) or give
+        keep second set std.json.read_next_as(Item, file, 64) or give
+        keep ending set std.json.read_next_as(Item, file, 64) or give
         assert(ending == none, "stream reaches end")
-        keep first_item = first ?? Item(0)
-        keep second_item = second ?? Item(0)
+        keep first_item set first ?? Item(0)
+        keep second_item set second ?? Item(0)
         assert(first_item.id + second_item.id == 3, "typed streamed fields")
-        give std.json.stringify([first_item, second_item])
+        give std.json.encode([first_item, second_item])
     }}
 }}
 load({:?})
@@ -3283,16 +3315,16 @@ load({:?})
     fs::write(&path, "{\"payload\":\"too long\"}\n{\"id\":3}\n").unwrap();
     let recovery = format!(
         r#"
-define recover(path: String) gives Result<String, String> needs FileRead {{
-    keep opened = std.files.open_read(path) or give
-    using file = opened {{
-        keep rejected = std.json.read_next(file, 8)
-        keep recovered = choose rejected {{
-            Ok(value) => err("oversized record accepted"),
-            Err(problem) => std.json.read_next(file, 64),
+define recover takes {{ path is String }} gives Result<String, String> needs FileRead {{
+    keep opened set std.files.open_read(path) or give
+    using file set opened {{
+        keep rejected set std.json.read_next(file, 8)
+        keep recovered set choose rejected {{
+            case Ok carries value => err("oversized record accepted"),
+            case Err carries problem => std.json.read_next(file, 64),
         }}
-        keep next = recovered or give
-        give std.json.stringify(next)
+        keep next set recovered or give
+        give std.json.encode(next)
     }}
 }}
 recover({:?})
@@ -3315,17 +3347,17 @@ fn file_line_iterators_are_lazy_bounded_and_recover_after_errors() {
     fs::write(&path, "alpha\nway-too-long\nomega\r\n").unwrap();
     let source = format!(
         r#"
-define load(path: String) gives Result<Bool, String> needs FileRead {{
-    keep opened = std.files.open_read(path) or give
-    using file = opened {{
-        keep lines = std.iter.lines(file, 8) or give
-        keep first = std.iter.next(lines) ?? err("missing first line")
-        keep oversized = std.iter.next(lines) ?? ok("missing")
-        keep third = std.iter.next(lines) ?? err("missing third line")
-        keep ending = std.iter.next(lines)
-        keep first_text = first or give
-        keep third_text = third or give
-        keep rejected = choose oversized {{ Ok(value) => no, Err(problem) => yes }}
+define load takes {{ path is String }} gives Result<Bool, String> needs FileRead {{
+    keep opened set std.files.open_read(path) or give
+    using file set opened {{
+        keep lines set std.iter.lines(file, 8) or give
+        keep first set std.iter.next(lines) ?? err("missing first line")
+        keep oversized set std.iter.next(lines) ?? ok("missing")
+        keep third set std.iter.next(lines) ?? err("missing third line")
+        keep ending set std.iter.next(lines)
+        keep first_text set first or give
+        keep third_text set third or give
+        keep rejected set choose oversized {{ case Ok carries value => no, case Err carries problem => yes }}
         give ok(first_text == "alpha" and third_text == "omega" and rejected and ending == none)
     }}
 }}
@@ -3342,15 +3374,15 @@ load({:?})
 #[test]
 fn immutable_bytes_round_trip_unicode_and_check_bounds() {
     let source = r#"
-keep data: Bytes = std.bytes.from_string("Nivren 🜁")
-keep length: Int = std.bytes.length(data)
-keep sliced = std.bytes.slice(data, 0, 6)
-keep text = choose sliced {
-    Ok(part) => choose std.bytes.to_string(part) {
-        Ok(value) => value,
-        Err(problem) => problem,
+keep data is Bytes set std.bytes.from_string("Nivren 🜁")
+keep length is Int set std.bytes.length(data)
+keep sliced set std.bytes.slice(data, 0, 6)
+keep text set choose sliced {
+    case Ok carries part => choose std.bytes.to_string(part) {
+        case Ok carries value => value,
+        case Err carries problem => problem,
     },
-    Err(problem) => problem,
+    case Err carries problem => problem,
 }
 assert(text == "Nivren", "byte slice")
 length
@@ -3359,12 +3391,12 @@ length
     assert_eq!(eval_vm(source), Value::Int(11));
 
     let invalid = eval_vm(
-        "keep made = std.bytes.from_values([0, 256]) choose made { Ok(value) => no, Err(problem) => yes }",
+        "keep made set std.bytes.from_values([0, 256]) choose made { case Ok carries value => no, case Err carries problem => yes }",
     );
     assert_eq!(invalid, Value::Bool(true));
 
     let outside = eval_vm(
-        "keep data = std.bytes.from_string(\"one\") keep found = std.bytes.get(data, 9) choose found { Ok(value) => no, Err(problem) => yes }",
+        "keep data set std.bytes.from_string(\"one\") keep found set std.bytes.get(data, 9) choose found { case Ok carries value => no, case Err carries problem => yes }",
     );
     assert_eq!(outside, Value::Bool(true));
 }
@@ -3373,8 +3405,8 @@ length
 fn explicit_text_concatenation_is_typed_bounded_and_dual_engine() {
     let source = r#"
 choose std.text.concat("Niv", "ren") {
-    Ok(value) => value,
-    Err(problem) => problem,
+    case Ok carries value => value,
+    case Err carries problem => problem,
 }
 "#;
     let expected = Value::String("Nivren".into());
@@ -3386,11 +3418,11 @@ choose std.text.concat("Niv", "ren") {
 #[test]
 fn bounded_text_partition_and_float_conversion_are_dual_engine() {
     let source = r#"
-define inspect() gives Result<String, String> {
-    keep parts = std.text.split("MOVED 42 [::1]:6379", " ", 4) or give
-    keep address = std.text.split_last(parts[2], ":") or give
-    keep number = std.float.parse("1.5") or give
-    keep rendered = std.float.format(number) or give
+define inspect takes { } gives Result<String, String> {
+    keep parts set std.text.split("MOVED 42 [::1]:6379", " ", 4) or give
+    keep address set std.text.split_last(parts[2], ":") or give
+    keep number set std.float.parse("1.5") or give
+    keep rendered set std.float.format(number) or give
     assert(std.text.starts_with(parts[0], "MOVE"), "prefix")
     give std.text.concat(address[1], rendered)
 }
@@ -3400,7 +3432,9 @@ inspect()
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
     assert_eq!(
-        eval_vm("choose std.float.parse(\"NaN\") { Ok(value) => no, Err(problem) => yes }"),
+        eval_vm(
+            "choose std.float.parse(\"NaN\") { case Ok carries value => no, case Err carries problem => yes }"
+        ),
         Value::Bool(true)
     );
 }
@@ -3408,8 +3442,8 @@ inspect()
 #[test]
 fn int_text_conversion_is_explicit_checked_and_dual_engine() {
     let source = r#"
-define round_trip() gives Result<Int, String> {
-    keep parsed = std.int.parse("-9223372036854775808") or give
+define round_trip takes { } gives Result<Int, String> {
+    keep parsed set std.int.parse("-9223372036854775808") or give
     assert(std.int.format(parsed) == "-9223372036854775808", "Int format")
     give ok(parsed)
 }
@@ -3420,7 +3454,7 @@ round_trip()
     assert_eq!(eval_vm(source), expected);
     assert_eq!(
         eval_vm(
-            "choose std.int.parse(\"9223372036854775808\") { Ok(value) => no, Err(problem) => yes }"
+            "choose std.int.parse(\"9223372036854775808\") { case Ok carries value => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -3429,26 +3463,26 @@ round_trip()
 #[test]
 fn binary_codecs_are_typed_bounded_and_endian_explicit() {
     let source = r#"
-define verify() gives Result<Int, String> {
-    keep number = std.u16.from_int(4660) or give
-    keep big = std.binary.u16_be(number)
-    keep little = std.binary.u16_le(number)
-    keep big_first = std.bytes.get(big, 0) or give
-    keep little_first = std.bytes.get(little, 0) or give
+define verify takes { } gives Result<Int, String> {
+    keep number set std.u16.from_int(4660) or give
+    keep big set std.binary.u16_be(number)
+    keep little set std.binary.u16_le(number)
+    keep big_first set std.bytes.get(big, 0) or give
+    keep little_first set std.bytes.get(little, 0) or give
     assert(big_first == 18, "big endian first byte")
     assert(little_first == 52, "little endian first byte")
-    keep decoded = std.binary.read_u16_be(big, 0) or give
-    keep decoded_int = std.u16.to_int(decoded) or give
+    keep decoded set std.binary.read_u16_be(big, 0) or give
+    keep decoded_int set std.u16.to_int(decoded) or give
 
-    keep signed_bytes = std.binary.int_le(-42)
-    keep signed = std.binary.read_int_le(signed_bytes, 0) or give
+    keep signed_bytes set std.binary.int_le(-42)
+    keep signed set std.binary.read_int_le(signed_bytes, 0) or give
     assert(signed == -42, "signed Int round trip")
 
-    keep float_bytes = std.binary.float_be(1.5)
-    keep floated = std.binary.read_float_be(float_bytes, 0) or give
+    keep float_bytes set std.binary.float_be(1.5)
+    keep floated set std.binary.read_float_be(float_bytes, 0) or give
     assert(floated == 1.5, "Float round trip")
 
-    keep joined = std.binary.concat(big, little) or give
+    keep joined set std.binary.concat(big, little) or give
     assert(std.bytes.length(joined) == 4, "bounded concatenation")
     give ok(decoded_int)
 }
@@ -3459,13 +3493,13 @@ verify()
     assert_eq!(eval_vm(source), expected);
 
     let outside = r#"
-keep bytes = std.bytes.from_values([1, 2, 3])
+keep bytes set std.bytes.from_values([1, 2, 3])
 choose bytes {
-    Ok(value) => choose std.binary.read_u32_be(value, 0) {
-        Ok(number) => no,
-        Err(problem) => yes,
+    case Ok carries value => choose std.binary.read_u32_be(value, 0) {
+        case Ok carries number => no,
+        case Err carries problem => yes,
     },
-    Err(problem) => no,
+    case Err carries problem => no,
 }
 "#;
     assert_eq!(eval_tree(outside), Value::Bool(true));
@@ -3478,19 +3512,19 @@ choose bytes {
 #[test]
 fn cryptographic_hashes_and_hmacs_are_bounded_and_constant_time_verified() {
     let source = r#"
-define verify() gives Result<Int, String> {
-    keep key = std.bytes.from_string("secret")
-    keep message = std.bytes.from_string("Nivren")
-    keep digest = std.crypto.sha256(message) or give
-    keep repeated = std.crypto.sha256(message) or give
+define verify takes { } gives Result<Int, String> {
+    keep key set std.bytes.from_string("secret")
+    keep message set std.bytes.from_string("Nivren")
+    keep digest set std.crypto.sha256(message) or give
+    keep repeated set std.crypto.sha256(message) or give
     assert(digest == repeated, "deterministic SHA-256")
     assert(std.bytes.length(digest) == 32, "SHA-256 width")
 
-    keep tag = std.crypto.hmac_sha256(key, message) or give
-    keep valid = std.crypto.verify_hmac_sha256(key, message, tag) or give
-    keep invalid = std.crypto.verify_hmac_sha256(key, std.bytes.from_string("other"), tag) or give
+    keep tag set std.crypto.hmac_sha256(key, message) or give
+    keep valid set std.crypto.hmac_sha256_verify(key, message, tag) or give
+    keep invalid set std.crypto.hmac_sha256_verify(key, std.bytes.from_string("other"), tag) or give
     assert(valid, "valid HMAC")
-    assert(!invalid, "invalid HMAC")
+    assert(not invalid, "invalid HMAC")
     give ok(std.bytes.length(tag))
 }
 
@@ -3501,12 +3535,12 @@ verify()
     assert_eq!(eval_vm(source), expected);
 
     let short_tag = r#"
-keep key = std.bytes.from_string("key")
-keep message = std.bytes.from_string("message")
-keep tag = std.bytes.from_string("short")
-choose std.crypto.verify_hmac_sha256(key, message, tag) {
-    Ok(valid) => no,
-    Err(problem) => yes,
+keep key set std.bytes.from_string("key")
+keep message set std.bytes.from_string("message")
+keep tag set std.bytes.from_string("short")
+choose std.crypto.hmac_sha256_verify(key, message, tag) {
+    case Ok carries valid => no,
+    case Err carries problem => yes,
 }
 "#;
     assert_eq!(eval_vm(short_tag), Value::Bool(true));
@@ -3515,12 +3549,12 @@ choose std.crypto.verify_hmac_sha256(key, message, tag) {
 #[test]
 fn secure_randomness_and_argon2id_are_capability_checked_and_bounded() {
     let source = r#"
-define passwords() gives Result<Bool, String> {
-    keep salt = std.bytes.from_string("0123456789abcdef")
-    keep encoded = std.crypto.password_hash("correct horse", salt, 8192, 1, 1) or give
-    keep valid = std.crypto.password_verify("correct horse", encoded) or give
-    keep invalid = std.crypto.password_verify("wrong", encoded) or give
-    give ok(valid and !invalid)
+define passwords takes { } gives Result<Bool, String> {
+    keep salt set std.bytes.from_string("0123456789abcdef")
+    keep encoded set std.crypto.password_hash("correct horse", salt, 8192, 1, 1) or give
+    keep valid set std.crypto.password_verify("correct horse", encoded) or give
+    keep invalid set std.crypto.password_verify("wrong", encoded) or give
+    give ok(valid and not invalid)
 }
 
 passwords()
@@ -3530,14 +3564,14 @@ passwords()
     assert_eq!(eval_vm(source), expected);
 
     let entropy = r#"
-define entropy() gives Result<Int, String> needs Random {
-    keep bytes = std.crypto.random_bytes(32) or give
+define entropy takes { } gives Result<Int, String> needs Random {
+    keep bytes set std.crypto.random_bytes(32) or give
     give ok(std.bytes.length(bytes))
 }
 entropy()
 "#;
     assert_eq!(eval_tree(entropy), Value::Ok(Arc::new(Value::Int(32))));
-    assert!(nivren::check("define entropy() { std.crypto.random_bytes(32) }").is_err());
+    assert!(nivren::check("define entropy takes { } { std.crypto.random_bytes(32) }").is_err());
     let program = nivren::parser::parse(nivren::lexer::scan(entropy).unwrap()).unwrap();
     let denied = nivren::runtime::Interpreter::new()
         .with_capabilities(Vec::<String>::new())
@@ -3547,12 +3581,12 @@ entropy()
 
     let hostile = "$argon2id$v=19$m=999999999,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let hostile_source = format!(
-        "choose std.crypto.password_verify(\"password\", \"{hostile}\") {{ Ok(valid) => no, Err(problem) => yes }}"
+        "choose std.crypto.password_verify(\"password\", \"{hostile}\") {{ case Ok carries valid => no, case Err carries problem => yes }}"
     );
     assert_eq!(eval_vm(&hostile_source), Value::Bool(true));
     assert_eq!(
         eval_vm(
-            "choose std.crypto.password_hash(\"password\", std.bytes.from_string(\"short\"), 8192, 1, 1) { Ok(value) => no, Err(problem) => yes }"
+            "choose std.crypto.password_hash(\"password\", std.bytes.from_string(\"short\"), 8192, 1, 1) { case Ok carries value => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -3561,17 +3595,17 @@ entropy()
 #[test]
 fn authenticated_encryption_detects_tampering_and_enforces_key_nonce_and_size_bounds() {
     let source = r#"
-define protect() gives Result<Bool, String> {
-    keep key = std.crypto.key_import(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
-    keep nonce = std.bytes.from_string("unique-nonce")
-    keep context = std.bytes.from_string("account:42")
-    keep message = std.bytes.from_string("Nivren secret")
-    keep ciphertext = std.crypto.encrypt(key, nonce, context, message) or give
+define protect takes { } gives Result<Bool, String> {
+    keep key set std.crypto.key_import(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
+    keep nonce set std.bytes.from_string("unique-nonce")
+    keep context set std.bytes.from_string("account:42")
+    keep message set std.bytes.from_string("Nivren secret")
+    keep ciphertext set std.crypto.encrypt(key, nonce, context, message) or give
     assert(std.bytes.length(ciphertext) == std.bytes.length(message) + 16, "authentication tag")
-    keep plaintext = std.crypto.decrypt(key, nonce, context, ciphertext) or give
-    keep rejected = choose std.crypto.decrypt(key, nonce, std.bytes.from_string("account:43"), ciphertext) {
-        Ok(value) => no,
-        Err(problem) => yes,
+    keep plaintext set std.crypto.decrypt(key, nonce, context, ciphertext) or give
+    keep rejected set choose std.crypto.decrypt(key, nonce, std.bytes.from_string("account:43"), ciphertext) {
+        case Ok carries value => no,
+        case Err carries problem => yes,
     }
     give ok(plaintext == message and rejected)
 }
@@ -3584,7 +3618,7 @@ protect()
 
     assert_eq!(
         eval_vm(
-            "choose std.crypto.key_import(std.bytes.from_string(\"short\")) { Ok(value) => no, Err(problem) => yes }"
+            "choose std.crypto.key_import(std.bytes.from_string(\"short\")) { case Ok carries value => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -3593,16 +3627,17 @@ protect()
     )
     .is_err());
     assert!(
-        nivren::check("define compare(key: SecretKey) gives Bool { give key == key }").is_err()
+        nivren::check("define compare takes { key is SecretKey } gives Bool { give key == key }")
+            .is_err()
     );
-    assert!(nivren::check("define key() { std.crypto.key_generate() }").is_err());
+    assert!(nivren::check("define key takes { } { std.crypto.key_generate() }").is_err());
     let imported = eval_vm(
         "std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\"))",
     );
     assert_eq!(imported.to_string(), "Ok(<secret-key>)");
     assert_eq!(
         eval_vm(
-            "choose std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\")) { Ok(key) => choose std.json.stringify(key) { Ok(text) => no, Err(problem) => yes }, Err(problem) => no }"
+            "choose std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\")) { case Ok carries key => choose std.json.encode(key) { case Ok carries text => no, case Err carries problem => yes }, case Err carries problem => no }"
         ),
         Value::Bool(true)
     );
@@ -3611,19 +3646,19 @@ protect()
 #[test]
 fn ed25519_matches_rfc8032_and_rejects_tampering_in_both_engines() {
     let source = r#"
-define verify_vector() gives Result<Bool, String> {
-    keep seed = std.encoding.unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
-    keep key = std.crypto.key_import(seed) or give
-    keep public = std.crypto.ed25519_public(key) or give
-    keep expected_public = std.encoding.unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a") or give
+define verify_vector takes { } gives Result<Bool, String> {
+    keep seed set std.encoding.hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
+    keep key set std.crypto.key_import(seed) or give
+    keep public set std.crypto.ed25519_public(key) or give
+    keep expected_public set std.encoding.hex_decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a") or give
     assert(public == expected_public, "RFC 8032 public key")
-    keep message = std.bytes.from_string("")
-    keep signature = std.crypto.ed25519_sign(key, message) or give
-    keep expected_signature = std.encoding.unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b") or give
+    keep message set std.bytes.from_string("")
+    keep signature set std.crypto.ed25519_sign(key, message) or give
+    keep expected_signature set std.encoding.hex_decode("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b") or give
     assert(signature == expected_signature, "RFC 8032 signature")
-    keep valid = std.crypto.ed25519_verify(public, message, signature) or give
-    keep changed = std.crypto.ed25519_verify(public, std.bytes.from_string("changed"), signature) or give
-    give ok(valid and !changed)
+    keep valid set std.crypto.ed25519_verify(public, message, signature) or give
+    keep changed set std.crypto.ed25519_verify(public, std.bytes.from_string("changed"), signature) or give
+    give ok(valid and not changed)
 }
 verify_vector()
 "#;
@@ -3631,7 +3666,7 @@ verify_vector()
     assert_eq!(eval_vm(source), Value::Ok(Arc::new(Value::Bool(true))));
     assert_eq!(
         eval(
-            "choose std.crypto.ed25519_verify(std.bytes.from_string(\"short\"), std.bytes.from_string(\"\"), std.bytes.from_string(\"short\")) { Ok(value) => no, Err(problem) => yes }"
+            "choose std.crypto.ed25519_verify(std.bytes.from_string(\"short\"), std.bytes.from_string(\"\"), std.bytes.from_string(\"short\")) { case Ok carries value => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -3640,14 +3675,14 @@ verify_vector()
 #[test]
 fn gzip_and_zlib_are_deterministic_bounded_and_portable_in_both_engines() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
-    keep input = std.bytes.from_string("Nivren Nivren Nivren")
-    keep first = std.compression.gzip(input, 6) or give
-    keep second = std.compression.gzip(input, 6) or give
+define roundtrip takes { } gives Result<Bool, String> {
+    keep input set std.bytes.from_string("Nivren Nivren Nivren")
+    keep first set std.compression.gzip(input, 6) or give
+    keep second set std.compression.gzip(input, 6) or give
     assert(first == second, "gzip output is deterministic")
-    keep restored = std.compression.gunzip(first, 1024) or give
-    keep packed = std.compression.zlib(input, 9) or give
-    keep inflated = std.compression.unzlib(packed, 1024) or give
+    keep restored set std.compression.gzip_decode(first, 1024) or give
+    keep packed set std.compression.zlib(input, 9) or give
+    keep inflated set std.compression.zlib_decode(packed, 1024) or give
     give ok(restored == input and inflated == input)
 }
 roundtrip()
@@ -3657,20 +3692,20 @@ roundtrip()
     assert_eq!(eval_vm(source), expected);
 
     let limited = r#"
-keep input = std.bytes.from_string("a long value")
-keep packed = std.compression.gzip(input, 6)
+keep input set std.bytes.from_string("a long value")
+keep packed set std.compression.gzip(input, 6)
 choose packed {
-    Ok(bytes) => choose std.compression.gunzip(bytes, 2) {
-        Ok(value) => no,
-        Err(problem) => yes,
+    case Ok carries bytes => choose std.compression.gzip_decode(bytes, 2) {
+        case Ok carries value => no,
+        case Err carries problem => yes,
     },
-    Err(problem) => no,
+    case Err carries problem => no,
 }
 "#;
     assert_eq!(eval_vm(limited), Value::Bool(true));
     assert_eq!(
         eval_vm(
-            "choose std.compression.gunzip(std.bytes.from_string(\"invalid\"), 1024) { Ok(value) => no, Err(problem) => yes }"
+            "choose std.compression.gzip_decode(std.bytes.from_string(\"invalid\"), 1024) { case Ok carries value => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -3680,17 +3715,17 @@ choose packed {
 #[test]
 fn hex_and_base64_encodings_are_canonical_bounded_and_portable() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
-    keep bytes = std.bytes.from_string("Nivren?")
-    keep hex = std.encoding.hex(bytes) or give
-    keep standard = std.encoding.base64(bytes) or give
-    keep url = std.encoding.base64url(bytes) or give
+define roundtrip takes { } gives Result<Bool, String> {
+    keep bytes set std.bytes.from_string("Nivren?")
+    keep hex set std.encoding.hex_encode(bytes) or give
+    keep standard set std.encoding.base64_encode(bytes) or give
+    keep url set std.encoding.base64url_encode(bytes) or give
     assert(hex == "4e697672656e3f", "lowercase canonical hex")
     assert(standard == "Tml2cmVuPw==", "padded standard base64")
     assert(url == "Tml2cmVuPw", "unpadded URL-safe base64")
-    keep from_hex = std.encoding.unhex("4E697672656E3F") or give
-    keep from_standard = std.encoding.unbase64(standard) or give
-    keep from_url = std.encoding.unbase64url(url) or give
+    keep from_hex set std.encoding.hex_decode("4E697672656E3F") or give
+    keep from_standard set std.encoding.base64_decode(standard) or give
+    keep from_url set std.encoding.base64url_decode(url) or give
     give ok(from_hex == bytes and from_standard == bytes and from_url == bytes)
 }
 roundtrip()
@@ -3699,29 +3734,31 @@ roundtrip()
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
     assert_eq!(
-        eval_vm("choose std.encoding.unhex(\"xyz\") { Ok(bytes) => no, Err(problem) => yes }"),
+        eval_vm(
+            "choose std.encoding.hex_decode(\"xyz\") { case Ok carries bytes => no, case Err carries problem => yes }"
+        ),
         Value::Bool(true)
     );
     assert_eq!(
         eval_vm(
-            "choose std.encoding.unbase64(\"not base64\") { Ok(bytes) => no, Err(problem) => yes }"
+            "choose std.encoding.base64_decode(\"not base64\") { case Ok carries bytes => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
-    assert!(nivren::check("std.encoding.hex(\"text\")").is_err());
+    assert!(nivren::check("std.encoding.hex_encode(\"text\")").is_err());
 }
 
 #[test]
 fn csv_tables_are_quoted_bounded_typed_and_portable_in_both_engines() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
-    keep headers = ["name", "note"]
-    keep rows = std.csv.decode("Ada,\"hello, Nivren\"\r\nLin,\"line one\nline two\"\r\n", headers, ",", 10) or give
+define roundtrip takes { } gives Result<Bool, String> {
+    keep headers set ["name", "note"]
+    keep rows set std.csv.decode("Ada,\"hello, Nivren\"\r\nLin,\"line one\nline two\"\r\n", headers, ",", 10) or give
     assert(len(rows) == 2, "two CSV records")
     assert(std.map.get(rows[0], "note") == "hello, Nivren", "quoted delimiter")
     assert(std.map.get(rows[1], "note") == "line one\nline two", "quoted newline")
-    keep encoded = std.csv.encode(rows, headers, ",") or give
-    keep decoded = std.csv.decode(encoded, headers, ",", 10) or give
+    keep encoded set std.csv.encode(rows, headers, ",") or give
+    keep decoded set std.csv.decode(encoded, headers, ",", 10) or give
     give ok(decoded == rows)
 }
 roundtrip()
@@ -3732,13 +3769,13 @@ roundtrip()
 
     assert_eq!(
         eval_vm(
-            "choose std.csv.decode(\"a,b\\r\\nc\\r\\n\", [\"left\", \"right\"], \",\", 10) { Ok(rows) => no, Err(problem) => yes }"
+            "choose std.csv.decode(\"a,b\\r\\nc\\r\\n\", [\"left\", \"right\"], \",\", 10) { case Ok carries rows => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
     assert_eq!(
         eval_vm(
-            "choose std.csv.decode(\"a\\r\\nb\\r\\n\", [\"value\"], \",\", 1) { Ok(rows) => no, Err(problem) => yes }"
+            "choose std.csv.decode(\"a\\r\\nb\\r\\n\", [\"value\"], \",\", 1) { case Ok carries rows => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -3748,10 +3785,10 @@ roundtrip()
 #[test]
 fn persistent_maps_and_sets_are_generic_and_deterministic() {
     let source = r#"
-keep first: Map<String, Int> = std.map.single("nivren", 1)
-keep scores: Map<String, Int> = std.map.set(first, "nivren", 2)
-keep score: Int = std.map.get(scores, "nivren") ?? 0
-keep names: Set<String> = std.set.add(std.set.single("nivren"), "language")
+keep first is Map<String, Int> set std.map.of("nivren", 1)
+keep scores is Map<String, Int> set std.map.set(first, "nivren", 2)
+keep score is Int set std.map.get(scores, "nivren") ?? 0
+keep names is Set<String> set std.set.add(std.set.of("nivren"), "language")
 assert(std.map.length(first) == 1, "persistent source map")
 assert(std.map.contains(scores, "nivren"), "map contains")
 assert(std.set.contains(names, "language"), "set contains")
@@ -3760,29 +3797,25 @@ score + std.set.length(names)
     assert_eq!(eval_tree(source), Value::Int(4));
     assert_eq!(eval_vm(source), Value::Int(4));
 
-    assert!(nivren::check("std.set.add(std.set.single(1), \"two\")").is_err());
-    assert!(nivren::check("keep wrong: Map<String> = std.map.single(\"a\", 1)").is_err());
+    assert!(nivren::check("std.set.add(std.set.of(1), \"two\")").is_err());
+    assert!(nivren::check("keep wrong is Map<String> set std.map.of(\"a\", 1)").is_err());
 
     let unstable = nivren::run(
-        "define identity<Value>(value: Value) gives Value { give value } std.map.single(identity, 1)",
+        "define identity<Value> takes { value is Value } gives Value { give value } std.map.of(identity, 1)",
     )
     .unwrap_err();
-    assert!(
-        unstable
-            .iter()
-            .any(|error| error.message.contains("Comparable")
-                || error.message.contains("immutable comparable key"))
-    );
+    assert!(unstable.iter().any(|error| error.message.contains("Equal")
+        || error.message.contains("immutable comparable key")));
 }
 
 #[test]
 fn generic_list_algorithms_compose_through_readable_pipelines() {
     let source = r#"
-define double(value: Int) gives Int { give value * 2 }
-define even(value: Int) gives Bool { give value % 2 == 0 }
-define sum(total: Int, value: Int) gives Int { give total + value }
-define positive(value: Int) gives Bool { give value > 0 }
-keep values: [Int] = [1, 2, 3] through std.list.transform(double) through std.list.select(even)
+define double takes { value is Int } gives Int { give value * 2 }
+define even takes { value is Int } gives Bool { give value % 2 == 0 }
+define sum takes { total is Int, value is Int } gives Int { give total + value }
+define positive takes { value is Int } gives Bool { give value > 0 }
+keep values is [Int] set [1, 2, 3] through std.list.transform(double) through std.list.select(even)
 assert(std.list.any(values, positive), "any")
 assert(std.list.every(values, positive), "every")
 std.list.fold(values, 0, sum)
@@ -3792,13 +3825,13 @@ std.list.fold(values, 0, sum)
 
     assert!(
         nivren::check(
-            "define wrong(value: Int) gives Int { give value } std.list.select([1], wrong)",
+            "define wrong takes { value is Int } gives Int { give value } std.list.select([1], wrong)",
         )
         .is_err()
     );
 
     let hidden_effect = nivren::check(
-        "define note(value: Int) gives Int needs Log { std.log.info(\"value\") give value } define collect() gives [Int] { give std.list.transform([1], note) }",
+        "define note takes { value is Int } gives Int needs Log { std.log.info(\"value\") give value } define collect takes { } gives [Int] { give std.list.transform([1], note) }",
     )
     .unwrap_err();
     assert!(
@@ -3811,24 +3844,24 @@ std.list.fold(values, 0, sum)
 #[test]
 fn iterator_values_adapt_bound_and_consume_sequences() {
     let source = r#"
-define double(value: Int) gives Int { give value * 2 }
-define above_two(value: Int) gives Bool { give value > 2 }
-keep source = std.iter.from([1, 2, 3, 4, 5])
-keep mapped = std.iter.transform(source, double)
-keep selected = std.iter.select(mapped, above_two)
-keep bounded = std.iter.take(std.iter.skip(selected, 1), 2)
-change total = 0
+define double takes { value is Int } gives Int { give value * 2 }
+define above_two takes { value is Int } gives Bool { give value > 2 }
+keep source set std.iter.from([1, 2, 3, 4, 5])
+keep mapped set std.iter.transform(source, double)
+keep selected set std.iter.select(mapped, above_two)
+keep bounded set std.iter.take(std.iter.skip(selected, 1), 2)
+change total set 0
 each value within bounded { total = total + value }
-keep cursor = std.iter.from([7])
-keep first = std.iter.next(cursor) ?? 0
-keep ending = std.iter.next(cursor) ?? 9
+keep cursor set std.iter.from([7])
+keep first set std.iter.next(cursor) ?? 0
+keep ending set std.iter.next(cursor) ?? 9
 total + first + ending
 "#;
     assert_eq!(eval_tree(source), Value::Int(30));
     assert_eq!(eval_vm(source), Value::Int(30));
 
     let collected = r#"
-keep stream = std.iter.from(["a", "b"])
+keep stream set std.iter.from(["a", "b"])
 std.iter.collect(stream)
 "#;
     assert_eq!(
@@ -3840,7 +3873,7 @@ std.iter.collect(stream)
     );
 
     let hidden_effect = nivren::check(
-        "define note(value: Int) gives Int needs Log { std.log.info(\"value\") give value } define collect() gives Iterator<Int> { give std.iter.transform(std.iter.from([1]), note) }",
+        "define note takes { value is Int } gives Int needs Log { std.log.info(\"value\") give value } define collect takes { } gives Iterator<Int> { give std.iter.transform(std.iter.from([1]), note) }",
     )
     .unwrap_err();
     assert!(
@@ -3853,22 +3886,22 @@ std.iter.collect(stream)
 #[test]
 fn iterator_callback_adapters_are_truly_lazy_and_share_one_cursor() {
     let source = r#"
-change calls = 0
-define observe(value: Int) gives Int {
+change calls set 0
+define observe takes { value is Int } gives Int {
     calls = calls + 1
     give value * 2
 }
-define above_four(value: Int) gives Bool { give value > 4 }
+define above_four takes { value is Int } gives Bool { give value > 4 }
 
-keep mapped = std.iter.transform(std.iter.from([1, 2, 3, 4]), observe)
+keep mapped set std.iter.transform(std.iter.from([1, 2, 3, 4]), observe)
 assert(calls == 0, "transform must not run eagerly")
-keep first = std.iter.next(mapped) ?? -1
+keep first set std.iter.next(mapped) ?? -1
 assert(calls == 1, "next evaluates exactly one transform")
-keep selected = std.iter.select(mapped, above_four)
+keep selected set std.iter.select(mapped, above_four)
 assert(calls == 1, "select must not scan eagerly")
-keep chosen = std.iter.next(selected) ?? -1
+keep chosen set std.iter.next(selected) ?? -1
 assert(calls == 3, "select stops at its first match")
-keep remaining = std.iter.next(mapped) ?? -1
+keep remaining set std.iter.next(mapped) ?? -1
 first + chosen + remaining + calls
 "#;
     assert_eq!(eval_tree(source), Value::Int(20));
@@ -3878,18 +3911,18 @@ first + chosen + remaining + calls
 #[test]
 fn iterator_terminals_chain_fold_query_and_short_circuit_in_both_engines() {
     let source = r#"
-define add(total: Int, value: Int) gives Int { give total + value }
-define even(value: Int) gives Bool { give value % 2 == 0 }
-define positive(value: Int) gives Bool { give value > 0 }
-define three(value: Int) gives Bool { give value == 3 }
+define add takes { total is Int, value is Int } gives Int { give total + value }
+define even takes { value is Int } gives Bool { give value % 2 == 0 }
+define positive takes { value is Int } gives Bool { give value > 0 }
+define three takes { value is Int } gives Bool { give value == 3 }
 
-keep joined = std.iter.chain(std.iter.from([1, 2]), std.iter.from([3, 4]))
-keep sum = std.iter.fold(joined, 0, add)
-keep found = std.iter.find(std.iter.from([1, 2, 3, 4]), three) ?? 0
-keep has_even = std.iter.any(std.iter.from([1, 2, 3, 4]), even)
-keep all_positive = std.iter.every(std.iter.from([1, 2, 3, 4]), positive)
-keep count = std.iter.count(std.iter.from([1, 2, 3, 4]))
-change score = sum + found + count
+keep joined set std.iter.chain(std.iter.from([1, 2]), std.iter.from([3, 4]))
+keep sum set std.iter.fold(joined, 0, add)
+keep found set std.iter.find(std.iter.from([1, 2, 3, 4]), three) ?? 0
+keep has_even set std.iter.any(std.iter.from([1, 2, 3, 4]), even)
+keep all_positive set std.iter.every(std.iter.from([1, 2, 3, 4]), positive)
+keep count set std.iter.count(std.iter.from([1, 2, 3, 4]))
+change score set sum + found + count
 when has_even { score = score + 10 }
 when all_positive { score = score + 20 }
 score
@@ -3901,14 +3934,14 @@ score
 #[test]
 fn lazy_range_sources_are_bounded_single_pass_and_dual_engine() {
     let source = r#"
-define add(total: Int, value: Int) gives Int { give total + value }
-define sample() gives Result<Int, String> {
-    keep source = std.iter.range(0, 1000000, 1) or give
-    keep first = std.iter.next(source) ?? -1
-    keep page = std.iter.take(source, 3)
-    keep subtotal = std.iter.fold(page, 0, add)
-    keep descending = std.iter.range(5, -1, -2) or give
-    keep descending_total = std.iter.fold(descending, 0, add)
+define add takes { total is Int, value is Int } gives Int { give total + value }
+define sample takes { } gives Result<Int, String> {
+    keep source set std.iter.range(0, 1000000, 1) or give
+    keep first set std.iter.next(source) ?? -1
+    keep page set std.iter.take(source, 3)
+    keep subtotal set std.iter.fold(page, 0, add)
+    keep descending set std.iter.range(5, -1, -2) or give
+    keep descending_total set std.iter.fold(descending, 0, add)
     give ok(first + subtotal + descending_total)
 }
 sample()
@@ -3917,12 +3950,14 @@ sample()
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
 
-    let zero_step =
-        eval_vm("choose std.iter.range(0, 10, 0) { Ok(stream) => no, Err(problem) => yes }");
+    let zero_step = eval_vm(
+        "choose std.iter.range(0, 10, 0) { case Ok carries stream => no, case Err carries problem => yes }",
+    );
     assert_eq!(zero_step, Value::Bool(true));
 
-    let excessive =
-        eval_vm("choose std.iter.range(0, 1000001, 1) { Ok(stream) => no, Err(problem) => yes }");
+    let excessive = eval_vm(
+        "choose std.iter.range(0, 1000001, 1) { case Ok carries stream => no, case Err carries problem => yes }",
+    );
     assert_eq!(excessive, Value::Bool(true));
 }
 
@@ -3958,7 +3993,7 @@ fn typed_tcp_standard_library_uses_bounded_timeouts() {
         stream.write_all(b"hello").unwrap();
     });
     let source = format!(
-        "keep connection = std.net.connect(\"127.0.0.1\", {port}, 2.0); choose (connection) {{ Ok(stream) => choose (std.net.read(stream, 5)) {{ Ok(text) => text, Err(error) => error }}, Err(error) => error }}"
+        "keep connection set std.net.connect(\"127.0.0.1\", {port}, 2.0); choose (connection) {{ case Ok carries stream => choose (std.net.read(stream, 5)) {{ case Ok carries text => text, case Err carries error => error }}, case Err carries error => error }}"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
     server.join().unwrap();
@@ -3982,13 +4017,13 @@ fn tcp_framing_reads_exact_bytes_without_consuming_the_next_message() {
         });
         let source = format!(
             r#"
-define framed() gives Result<String, String> needs Network {{
-    using stream = std.net.connect("127.0.0.1", {port}, 2.0) or give {{
-        keep line = std.net.read_line(stream, 64, 2.0) or give
+define framed takes {{ }} gives Result<String, String> needs Network {{
+    using stream set std.net.connect("127.0.0.1", {port}, 2.0) or give {{
+        keep line set std.net.read_line(stream, 64, 2.0) or give
         assert(line == "+OK", "line framing")
-        keep body = std.net.read_exact_bytes(stream, 5, 2.0) or give
-        keep text = std.bytes.to_string(body) or give
-        keep next = std.net.read_line(stream, 64, 2.0) or give
+        keep body set std.net.read_exact_bytes(stream, 5, 2.0) or give
+        keep text set std.bytes.to_string(body) or give
+        keep next set std.net.read_line(stream, 64, 2.0) or give
         assert(next == "NEXT", "next frame remains")
         give ok(text)
     }}
@@ -4026,47 +4061,47 @@ fn official_redis_decodes_recursive_arrays_without_frame_overread() {
         });
         let source = format!(
             r#"{redis}
-define probe() gives Result<Int, String> needs Network {{
-    using stream = connect("127.0.0.1", {port}, 2.0) or give {{
-        keep first = receive(stream, 2.0, 1024) or give
-        keep count = choose first {{
-            Array(items) => len(items),
-            Text(text) => -1,
-            Error(problem) => -1,
-            Integer(number) => -1,
-            Boolean(value) => -1,
-            Double(number) => -1,
-            BigNumber(number) => -1,
-            Bulk(data) => -1,
-            BlobError(data) => -1,
-            Verbatim(data) => -1,
-            Map(entries) => -1,
-            Set(values) => -1,
-            Push(values) => -1,
-            Null => -1
+define probe takes {{ }} gives Result<Int, String> needs Network {{
+    using stream set connect("127.0.0.1", {port}, 2.0) or give {{
+        keep first set receive(stream, 2.0, 1024) or give
+        keep count set choose first {{
+            case Array carries items => len(items),
+            case Text carries text => -1,
+            case Error carries problem => -1,
+            case Integer carries number => -1,
+            case Boolean carries value => -1,
+            case Double carries number => -1,
+            case BigNumber carries number => -1,
+            case Bulk carries data => -1,
+            case BlobError carries data => -1,
+            case Verbatim carries data => -1,
+            case Map carries entries => -1,
+            case Set carries values => -1,
+            case Push carries values => -1,
+            case Null => -1
         }}
-        keep second = receive(stream, 2.0, 1024) or give
-        keep next = choose second {{
-            Text(text) => text == "NEXT",
-            Error(problem) => no,
-            Integer(number) => no,
-            Boolean(value) => no,
-            Double(number) => no,
-            BigNumber(number) => no,
-            Bulk(data) => no,
-            BlobError(data) => no,
-            Verbatim(data) => no,
-            Array(items) => no,
-            Map(entries) => no,
-            Set(values) => no,
-            Push(values) => no,
-            Null => no
+        keep second set receive(stream, 2.0, 1024) or give
+        keep next set choose second {{
+            case Text carries text => text == "NEXT",
+            case Error carries problem => no,
+            case Integer carries number => no,
+            case Boolean carries value => no,
+            case Double carries number => no,
+            case BigNumber carries number => no,
+            case Bulk carries data => no,
+            case BlobError carries data => no,
+            case Verbatim carries data => no,
+            case Array carries items => no,
+            case Map carries entries => no,
+            case Set carries values => no,
+            case Push carries values => no,
+            case Null => no
         }}
-        when !next {{ give ok(-1) }}
+        when not next {{ give ok(-1) }}
         give ok(count)
     }}
 }}
-choose probe() {{ Ok(value) => value, Err(problem) => -2 }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => -2 }}
 "#
         );
         let result = if vm {
@@ -4109,50 +4144,50 @@ fn official_redis_authenticates_and_pipelines_without_frame_loss() {
         });
         let source = format!(
             r#"{redis}
-define probe() gives Result<String, String> needs Network {{
-    keep opened = open("127.0.0.1", {port}, 2.0) or give
-    keep empty = pool(2) or give
-    keep stored = pool_add(empty, opened) or give
-    keep leased = pool_take(stored) or give
-    keep authenticated = authenticate(leased.connection, "", "secret", 2.0, 1024) or give
-    keep responses = pipeline(leased.connection, [["PING"], ["GET", "key"]], 2.0, 1024) or give
-    keep pong = choose responses[0] {{
-        Text(message) => message == "PONG",
-        Error(problem) => no,
-        Integer(number) => no,
-        Boolean(flag) => no,
-        Double(number) => no,
-        BigNumber(number) => no,
-        Bulk(data) => no,
-        BlobError(data) => no,
-        Verbatim(data) => no,
-        Array(values) => no,
-        Map(entries) => no,
-        Set(values) => no,
-        Push(values) => no,
-        Null => no
+define probe takes {{ }} gives Result<String, String> needs Network {{
+    keep opened set open("127.0.0.1", {port}, 2.0) or give
+    keep empty set pool(2) or give
+    keep stored set pool_add(empty, opened) or give
+    keep leased set pool_take(stored) or give
+    keep authenticated set authenticate(leased.connection, "", "secret", 2.0, 1024) or give
+    keep responses set pipeline(leased.connection, [["PING"], ["GET", "key"]], 2.0, 1024) or give
+    keep pong set choose responses[0] {{
+        case Text carries message => message == "PONG",
+        case Error carries problem => no,
+        case Integer carries number => no,
+        case Boolean carries flag => no,
+        case Double carries number => no,
+        case BigNumber carries number => no,
+        case Bulk carries data => no,
+        case BlobError carries data => no,
+        case Verbatim carries data => no,
+        case Array carries values => no,
+        case Map carries entries => no,
+        case Set carries values => no,
+        case Push carries values => no,
+        case Null => no
     }}
-    keep value = choose responses[1] {{
-        Bulk(data) => data == std.bytes.from_string("value"),
-        Text(message) => no,
-        Error(problem) => no,
-        Integer(number) => no,
-        Boolean(flag) => no,
-        Double(number) => no,
-        BigNumber(number) => no,
-        Array(values) => no,
-        BlobError(data) => no,
-        Verbatim(data) => no,
-        Map(entries) => no,
-        Set(values) => no,
-        Push(values) => no,
-        Null => no
+    keep value set choose responses[1] {{
+        case Bulk carries data => data == std.bytes.from_string("value"),
+        case Text carries message => no,
+        case Error carries problem => no,
+        case Integer carries number => no,
+        case Boolean carries flag => no,
+        case Double carries number => no,
+        case BigNumber carries number => no,
+        case Array carries values => no,
+        case BlobError carries data => no,
+        case Verbatim carries data => no,
+        case Map carries entries => no,
+        case Set carries values => no,
+        case Push carries values => no,
+        case Null => no
     }}
     close(leased.connection) or give
     when pong and value and len(leased.pool.idle) == 0 {{ give ok(std.int.format(len(responses))) }}
     give ok("invalid responses")
 }}
-choose probe() {{ Ok(value) => value, Err(problem) => problem }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => problem }}
 "#
         );
         let result = if vm {
@@ -4207,29 +4242,29 @@ fn official_redis_secure_connection_verifies_certificates() {
         let root = serde_json::to_string(&certificate_pem).unwrap();
         let source = format!(
             r#"{redis}
-define probe() gives Result<Bool, String> needs Network {{
-    keep options = std.map.set(std.web.tls_options(), "additional_root_pem", {root})
-    keep opened = open_secure("localhost", {port}, 3.0, options) or give
-    keep responses = pipeline(opened, [["PING"]], 3.0, 1024) or give
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
+    keep options set std.map.set(std.web.tls_options(), "additional_root_pem", {root})
+    keep opened set open_secure("localhost", {port}, 3.0, options) or give
+    keep responses set pipeline(opened, [["PING"]], 3.0, 1024) or give
     close(opened) or give
     give ok(choose responses[0] {{
-        Text(message) => message == "PONG",
-        Error(problem) => no,
-        Integer(number) => no,
-        Boolean(flag) => no,
-        Double(number) => no,
-        BigNumber(number) => no,
-        Bulk(data) => no,
-        BlobError(data) => no,
-        Verbatim(data) => no,
-        Array(values) => no,
-        Map(entries) => no,
-        Set(values) => no,
-        Push(values) => no,
-        Null => no
+        case Text carries message => message == "PONG",
+        case Error carries problem => no,
+        case Integer carries number => no,
+        case Boolean carries flag => no,
+        case Double carries number => no,
+        case BigNumber carries number => no,
+        case Bulk carries data => no,
+        case BlobError carries data => no,
+        case Verbatim carries data => no,
+        case Array carries values => no,
+        case Map carries entries => no,
+        case Set carries values => no,
+        case Push carries values => no,
+        case Null => no
     }})
 }}
-choose probe() {{ Ok(value) => value, Err(problem) => no }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => no }}
 "#
         );
         let result = if vm {
@@ -4284,27 +4319,27 @@ fn official_redis_follows_bounded_moved_and_ask_redirects() {
             });
             let source = format!(
                 r#"{redis}
-define probe() gives Result<Bool, String> needs Network {{
-    keep configured = client("127.0.0.1", {first_port}, "", "", no, std.web.tls_options(), 2.0, 1024, 2) or give
-    keep outcome = execute(configured, ["PING"]) or give
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
+    keep configured set client("127.0.0.1", {first_port}, "", "", no, std.web.tls_options(), 2.0, 1024, 2) or give
+    keep outcome set execute(configured, ["PING"]) or give
     give ok(choose outcome.response {{
-        Text(message) => message == "PONG",
-        Error(problem) => no,
-        Integer(number) => no,
-        Boolean(flag) => no,
-        Double(number) => no,
-        BigNumber(number) => no,
-        Bulk(data) => no,
-        BlobError(data) => no,
-        Verbatim(data) => no,
-        Array(values) => no,
-        Map(entries) => no,
-        Set(values) => no,
-        Push(values) => no,
-        Null => no
+        case Text carries message => message == "PONG",
+        case Error carries problem => no,
+        case Integer carries number => no,
+        case Boolean carries flag => no,
+        case Double carries number => no,
+        case BigNumber carries number => no,
+        case Bulk carries data => no,
+        case BlobError carries data => no,
+        case Verbatim carries data => no,
+        case Array carries values => no,
+        case Map carries entries => no,
+        case Set carries values => no,
+        case Push carries values => no,
+        case Null => no
     }})
 }}
-choose probe() {{ Ok(value) => value, Err(problem) => no }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => no }}
 "#
             );
             let result = if vm {
@@ -4340,29 +4375,29 @@ fn official_redis_decodes_bounded_resp3_aggregates() {
         });
         let source = format!(
             r#"{redis}
-define probe() gives Result<Int, String> needs Network {{
-    keep opened = open("127.0.0.1", {port}, 2.0) or give
-    keep first = receive_connection(opened, 2.0, 4096) or give
-    keep count = choose first {{
-        Array(values) => len(values),
-        Text(value) => -1, Error(value) => -1, Integer(value) => -1,
-        Boolean(value) => -1, Double(value) => -1, BigNumber(value) => -1,
-        Bulk(value) => -1, BlobError(value) => -1, Verbatim(value) => -1,
-        Map(value) => -1, Set(value) => -1, Push(value) => -1, Null => -1
+define probe takes {{ }} gives Result<Int, String> needs Network {{
+    keep opened set open("127.0.0.1", {port}, 2.0) or give
+    keep first set receive_connection(opened, 2.0, 4096) or give
+    keep count set choose first {{
+        case Array carries values => len(values),
+        case Text carries value => -1, case Error carries value => -1, case Integer carries value => -1,
+        case Boolean carries value => -1, case Double carries value => -1, case BigNumber carries value => -1,
+        case Bulk carries value => -1, case BlobError carries value => -1, case Verbatim carries value => -1,
+        case Map carries value => -1, case Set carries value => -1, case Push carries value => -1, case Null => -1
     }}
-    keep second = receive_connection(opened, 2.0, 4096) or give
-    keep framed = choose second {{
-        Text(value) => value == "NEXT",
-        Error(value) => no, Integer(value) => no, Boolean(value) => no,
-        Double(value) => no, BigNumber(value) => no, Bulk(value) => no,
-        BlobError(value) => no, Verbatim(value) => no, Array(value) => no,
-        Map(value) => no, Set(value) => no, Push(value) => no, Null => no
+    keep second set receive_connection(opened, 2.0, 4096) or give
+    keep framed set choose second {{
+        case Text carries value => value == "NEXT",
+        case Error carries value => no, case Integer carries value => no, case Boolean carries value => no,
+        case Double carries value => no, case BigNumber carries value => no, case Bulk carries value => no,
+        case BlobError carries value => no, case Verbatim carries value => no, case Array carries value => no,
+        case Map carries value => no, case Set carries value => no, case Push carries value => no, case Null => no
     }}
     close(opened)
     when framed {{ give ok(count) }}
     give ok(-1)
 }}
-choose probe() {{ Ok(value) => value, Err(problem) => -2 }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => -2 }}
 "#
         );
         let result = if vm {
@@ -4385,29 +4420,29 @@ fn official_redis_live_release_matrix() {
     let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
     let source = format!(
         r#"{redis}
-define probe() gives Result<Bool, String> needs Network {{
-    keep configured = client("127.0.0.1", {port}, "", "", no, std.web.tls_options(), 3.0, 65536, 2) or give
-    keep hello = execute(configured, ["HELLO", "3"]) or give
-    keep hello_ok = choose hello.response {{
-        Map(entries) => len(entries) > 0,
-        Text(value) => no, Error(value) => no, Integer(value) => no,
-        Boolean(value) => no, Double(value) => no, BigNumber(value) => no,
-        Bulk(value) => no, BlobError(value) => no, Verbatim(value) => no,
-        Array(value) => no, Set(value) => no, Push(value) => no, Null => no
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
+    keep configured set client("127.0.0.1", {port}, "", "", no, std.web.tls_options(), 3.0, 65536, 2) or give
+    keep hello set execute(configured, ["HELLO", "3"]) or give
+    keep hello_ok set choose hello.response {{
+        case Map carries entries => len(entries) > 0,
+        case Text carries value => no, case Error carries value => no, case Integer carries value => no,
+        case Boolean carries value => no, case Double carries value => no, case BigNumber carries value => no,
+        case Bulk carries value => no, case BlobError carries value => no, case Verbatim carries value => no,
+        case Array carries value => no, case Set carries value => no, case Push carries value => no, case Null => no
     }}
-    keep stored = execute(hello.client, ["SET", "nivren:matrix", "edition3"]) or give
-    keep fetched = execute(stored.client, ["GET", "nivren:matrix"]) or give
-    keep value_ok = choose fetched.response {{
-        Bulk(value) => value == std.bytes.from_string("edition3"),
-        Text(value) => no, Error(value) => no, Integer(value) => no,
-        Boolean(value) => no, Double(value) => no, BigNumber(value) => no,
-        BlobError(value) => no, Verbatim(value) => no, Array(value) => no,
-        Map(value) => no, Set(value) => no, Push(value) => no, Null => no
+    keep stored set execute(hello.client, ["SET", "nivren:matrix", "edition3"]) or give
+    keep fetched set execute(stored.client, ["GET", "nivren:matrix"]) or give
+    keep value_ok set choose fetched.response {{
+        case Bulk carries value => value == std.bytes.from_string("edition3"),
+        case Text carries value => no, case Error carries value => no, case Integer carries value => no,
+        case Boolean carries value => no, case Double carries value => no, case BigNumber carries value => no,
+        case BlobError carries value => no, case Verbatim carries value => no, case Array carries value => no,
+        case Map carries value => no, case Set carries value => no, case Push carries value => no, case Null => no
     }}
     close(fetched.client.connection)
     give ok(hello_ok and value_ok)
 }}
-choose probe() {{ Ok(value) => value, Err(problem) => no }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => no }}
 "#
     );
     assert_eq!(eval_tree(&source), Value::Bool(true));
@@ -4429,13 +4464,13 @@ fn tcp_partial_writes_make_backpressure_and_progress_explicit() {
         });
         let source = format!(
             r#"
-define send() gives Result<Int, String> needs Network {{
-    keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
-    using connection = stream {{
+define send takes {{ }} gives Result<Int, String> needs Network {{
+    keep stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
+    using connection set stream {{
         give std.net.write_some(connection, "abcdefgh", 4, 2.0)
     }}
 }}
-choose send() {{ Ok(written) => written, Err(problem) => -1 }}
+choose send() {{ case Ok carries written => written, case Err carries problem => -1 }}
 "#
         );
         let result = if bytecode {
@@ -4462,13 +4497,13 @@ fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
         });
         let source = format!(
             r#"
-define probe() gives Result<Bool, String> needs Network {{
-    keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
-    using connection = stream {{
-        give std.net.ready(connection, "read", 2.0)
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
+    keep stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
+    using connection set stream {{
+        give std.net.wait_ready(connection, Interest.Read, 2.0)
     }}
 }}
-choose probe() {{ Ok(ready) => ready, Err(problem) => no }}
+choose probe() {{ case Ok carries ready => ready, case Err carries problem => no }}
 "#
         );
         let result = if bytecode {
@@ -4506,21 +4541,21 @@ fn tcp_reactor_selects_many_streams_and_drives_bounded_adapters() {
         });
         let source = format!(
             r#"
-define exchange() gives Result<Int, String> needs Network {{
-    keep first_opened = std.net.connect("127.0.0.1", {first_port}, 2.0) or give
-    using first = first_opened {{
-        keep second_opened = std.net.connect("127.0.0.1", {second_port}, 2.0) or give
-        using second = second_opened {{
-            keep selected = std.net.ready_any([first, second], "read", 2.0) or give
-            keep index = selected ?? -1
-            keep message = std.net.read_ready(second, 5, 2.0) or give
-            keep written = std.net.write_ready(second, "ack", 1, 2.0) or give
+define exchange takes {{ }} gives Result<Int, String> needs Network {{
+    keep first_opened set std.net.connect("127.0.0.1", {first_port}, 2.0) or give
+    using first set first_opened {{
+        keep second_opened set std.net.connect("127.0.0.1", {second_port}, 2.0) or give
+        using second set second_opened {{
+            keep selected set std.net.wait_ready_any([first, second], Interest.Read, 2.0) or give
+            keep index set selected ?? -1
+            keep message set std.net.read_ready(second, 5, 2.0) or give
+            keep written set std.net.write_ready(second, "ack", 1, 2.0) or give
             when message == "early" {{ give ok(index) }}
             give ok(-2)
         }}
     }}
 }}
-choose exchange() {{ Ok(index) => index, Err(problem) => -3 }}
+choose exchange() {{ case Ok carries index => index, case Err carries problem => -3 }}
 "#
         );
         let result = if bytecode {
@@ -4562,11 +4597,11 @@ fn web_requests_are_bounded_typed_and_preserve_status_headers_and_body() {
         });
         let source = format!(
             r#"
-keep headers = std.map.single("X-Nivren", "Edition3")
-keep response = std.web.request("POST", "http://127.0.0.1:{port}/echo", headers, "hello", 2.0, 1024)
+keep headers set std.map.of("X-Nivren", "Edition3")
+keep response set std.web.request("POST", "http://127.0.0.1:{port}/echo", headers, "hello", 2.0, 1024)
 choose response {{
-    Ok(data) => (std.map.get(data, "status") ?? "missing") + ":" + (std.map.get(data, "body") ?? "missing") + ":" + (std.map.get(data, "header:content-type") ?? "missing"),
-    Err(problem) => problem
+    case Ok carries data => text "{{data.status}}:{{data.body}}:{{std.map.get(data.headers, \"content-type\") ?? \"missing\"}}",
+    case Err carries problem => problem
 }}
 "#
         );
@@ -4617,13 +4652,13 @@ fn official_trace_exports_bounded_otlp_http_json_in_both_engines() {
         });
         let source = format!(
             r#"{trace}
-define send() gives Result<String, String> needs Network {{
-    keep value = context("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", yes) or give
-    keep attribute = otlp_attribute("service.name", "nivren") or give
-    keep span = otlp_span(value, "request", "100", "250", [attribute]) or give
+define send takes {{ }} gives Result<String, String> needs Network {{
+    keep value set context("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", yes) or give
+    keep attribute set otlp_attribute("service.name", "nivren") or give
+    keep span set otlp_span(value, "request", "100", "250", [attribute]) or give
     give export_otlp_json("http://127.0.0.1:{port}/v1/traces", std.web.headers(), span, 2.0)
 }}
-choose send() {{ Ok(status) => status, Err(problem) => problem }}
+choose send() {{ case Ok carries status => status, case Err carries problem => problem }}
 "#
         );
         let value = if bytecode {
@@ -4644,11 +4679,11 @@ choose send() {{ Ok(status) => status, Err(problem) => problem }}
 #[test]
 fn url_components_are_strict_bounded_and_unicode_safe_in_both_engines() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
-    keep encoded = std.web.encode_component("Nivren / 🜁 +") or give
+define roundtrip takes { } gives Result<Bool, String> {
+    keep encoded set std.web.encode_component("Nivren / 🜁 +") or give
     assert(encoded == "Nivren%20%2F%20%F0%9F%9C%81%20%2B", "RFC 3986 component")
-    keep decoded = std.web.decode_component(encoded) or give
-    keep plus = std.web.decode_component("a+b") or give
+    keep decoded set std.web.decode_component(encoded) or give
+    keep plus set std.web.decode_component("a+b") or give
     give ok(decoded == "Nivren / 🜁 +" and plus == "a+b")
 }
 roundtrip()
@@ -4657,7 +4692,7 @@ roundtrip()
     assert_eq!(eval_vm(source), Value::Ok(Arc::new(Value::Bool(true))));
     assert_eq!(
         eval_vm(
-            "choose std.web.decode_component(\"%GG\") { Ok(value) => no, Err(problem) => yes }"
+            "choose std.web.decode_component(\"%GG\") { case Ok carries value => no, case Err carries problem => yes }"
         ),
         Value::Bool(true)
     );
@@ -4699,14 +4734,14 @@ fn websocket_standard_library_exchanges_bounded_text_in_both_engines() {
         });
         let source = format!(
             r#"
-define exchange() gives Result<String, String> needs Network {{
-    keep opened = std.web.websocket_connect("127.0.0.1", {port}, "/echo", 2.0) or give
-    using socket = opened {{
-        keep sent = std.web.websocket_send(socket, "hello") or give
+define exchange takes {{ }} gives Result<String, String> needs Network {{
+    keep opened set std.web.websocket_connect("127.0.0.1", {port}, "/echo", 2.0) or give
+    using socket set opened {{
+        keep sent set std.web.websocket_send(socket, "hello") or give
         give std.web.websocket_receive(socket, 1024)
     }}
 }}
-choose exchange() {{ Ok(message) => message, Err(problem) => problem }}
+choose exchange() {{ case Ok carries message => message, case Err carries problem => problem }}
 "#
         );
         let value = if bytecode {
@@ -4780,20 +4815,20 @@ fn secure_websocket_listeners_serve_verified_tls_in_both_engines() {
         let client_ca_literal = serde_json::to_string(&client_ca_pem).unwrap();
         let source = format!(
             r#"
-define serve() gives Result<String, String> needs Network {{
-    keep auth_policy = std.map.set(std.web.tls_options(), "client_auth", "required")
-    keep options = std.map.set(auth_policy, "client_ca_pem", {client_ca_literal})
-    keep opened = std.web.websocket_secure_listen("127.0.0.1", {port}, {certificate_literal}, {key_literal}, options) or give
-    using listener = opened {{
-        keep accepted = std.web.websocket_secure_accept(listener, 3.0) or give
-        using socket = accepted {{
-            keep message = std.web.websocket_receive(socket, 1024) or give
-            keep sent = std.web.websocket_send(socket, "secure:" + message) or give
+define serve takes {{ }} gives Result<String, String> needs Network {{
+    keep auth_policy set std.map.set(std.web.tls_options(), "client_auth", "required")
+    keep options set std.map.set(auth_policy, "client_ca_pem", {client_ca_literal})
+    keep opened set std.web.websocket_secure_listen("127.0.0.1", {port}, {certificate_literal}, {key_literal}, options) or give
+    using listener set opened {{
+        keep accepted set std.web.websocket_secure_accept(listener, 3.0) or give
+        using socket set accepted {{
+            keep message set std.web.websocket_receive(socket, 1024) or give
+            keep sent set std.web.websocket_send(socket, "secure:" + message) or give
             give ok(message)
         }}
     }}
 }}
-choose serve() {{ Ok(message) => message, Err(problem) => problem }}
+choose serve() {{ case Ok carries message => message, case Err carries problem => problem }}
 "#
         );
         let result = if bytecode {
@@ -4858,17 +4893,17 @@ fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
         let client_key_literal = serde_json::to_string(&client_private_key_pem).unwrap();
         let source = format!(
             r#"
-define exchange() gives Result<String, String> needs Network {{
-    keep roots = std.map.set(std.web.tls_options(), "additional_root_pem", {server_root_literal})
-    keep identity = std.map.set(roots, "client_certificate_pem", {client_certificate_literal})
-    keep policy = std.map.set(identity, "client_private_key_pem", {client_key_literal})
-    keep opened = std.web.websocket_secure_connect("localhost", {port}, "/mutual", 3.0, policy) or give
-    using socket = opened {{
-        keep sent = std.web.websocket_send(socket, "client identity") or give
+define exchange takes {{ }} gives Result<String, String> needs Network {{
+    keep roots set std.map.set(std.web.tls_options(), "additional_root_pem", {server_root_literal})
+    keep identity set std.map.set(roots, "client_certificate_pem", {client_certificate_literal})
+    keep policy set std.map.set(identity, "client_private_key_pem", {client_key_literal})
+    keep opened set std.web.websocket_secure_connect("localhost", {port}, "/mutual", 3.0, policy) or give
+    using socket set opened {{
+        keep sent set std.web.websocket_send(socket, "client identity") or give
         give std.web.websocket_receive(socket, 1024)
     }}
 }}
-choose exchange() {{ Ok(message) => message, Err(problem) => problem }}
+choose exchange() {{ case Ok carries message => message, case Err carries problem => problem }}
 "#
         );
         let result = if bytecode {
@@ -4911,18 +4946,18 @@ fn tcp_listeners_accept_bounded_connections_and_close_with_scope() {
         });
         let source = format!(
             r#"
-define serve(listener: TcpListener) gives Result<Int, String> needs Network {{
-    using server = listener {{
-        keep accepted = std.net.accept(server, 2.0)
-        using connection = accepted or give {{
-            keep request = std.net.read(connection, 4) or give
-            keep sent = std.net.write(connection, "pong") or give
+define serve takes {{ listener is TcpListener }} gives Result<Int, String> needs Network {{
+    using server set listener {{
+        keep accepted set std.net.accept(server, 2.0)
+        using connection set accepted or give {{
+            keep request set std.net.read(connection, 4) or give
+            keep sent set std.net.write(connection, "pong") or give
             give ok(len(request))
         }}
     }}
 }}
-keep opened = std.net.listen("127.0.0.1", {port})
-choose opened {{ Ok(listener) => serve(listener), Err(problem) => err(problem) }}
+keep opened set std.net.listen("127.0.0.1", {port})
+choose opened {{ case Ok carries listener => serve(listener), case Err carries problem => err(problem) }}
 "#
         );
         let result = if bytecode {
@@ -4952,21 +4987,21 @@ fn tcp_line_iterators_are_lazy_bounded_and_recover_after_oversized_frames() {
         });
         let source = format!(
             r#"
-define consume() gives Result<Bool, String> needs Network {{
-    keep opened = std.net.connect("127.0.0.1", {port}, 2.0) or give
-    using connection = opened {{
-        keep lines = std.iter.tcp_lines(connection, 5, 2.0) or give
-        keep first = std.iter.next(lines) ?? err("missing first line")
-        keep oversized = std.iter.next(lines) ?? err("missing oversized line")
-        keep third = std.iter.next(lines) ?? err("missing third line")
-        keep ended = std.iter.next(lines)
-        keep first_ok = choose first {{ Ok(value) => value == "one", Err(problem) => no }}
-        keep overflow_ok = choose oversized {{ Ok(value) => no, Err(problem) => yes }}
-        keep third_ok = choose third {{ Ok(value) => value == "three", Err(problem) => no }}
+define consume takes {{ }} gives Result<Bool, String> needs Network {{
+    keep opened set std.net.connect("127.0.0.1", {port}, 2.0) or give
+    using connection set opened {{
+        keep lines set std.iter.tcp_lines(connection, 5, 2.0) or give
+        keep first set std.iter.next(lines) ?? err("missing first line")
+        keep oversized set std.iter.next(lines) ?? err("missing oversized line")
+        keep third set std.iter.next(lines) ?? err("missing third line")
+        keep ended set std.iter.next(lines)
+        keep first_ok set choose first {{ case Ok carries value => value == "one", case Err carries problem => no }}
+        keep overflow_ok set choose oversized {{ case Ok carries value => no, case Err carries problem => yes }}
+        keep third_ok set choose third {{ case Ok carries value => value == "three", case Err carries problem => no }}
         give ok(first_ok and overflow_ok and third_ok and ended == none)
     }}
 }}
-choose consume() {{ Ok(value) => value, Err(problem) => no }}
+choose consume() {{ case Ok carries value => value, case Err carries problem => no }}
 "#
         );
         let value = if bytecode {
@@ -5013,21 +5048,21 @@ fn web_servers_parse_bounded_requests_and_write_managed_responses() {
         });
         let source = format!(
             r#"
-define serve(listener: TcpListener) gives Result<String, String> needs Network {{
-    using server = listener {{
-        keep accepted = std.net.accept(server, 2.0)
-        using connection = accepted or give {{
-            keep request = std.web.read_request(connection, 1024) or give
-            keep path = std.map.get(request, "path") ?? ""
-            keep body = std.map.get(request, "body") ?? ""
-            keep headers = std.map.single("Content-Type", "text/plain")
-            keep sent = std.web.respond(connection, 201, headers, "created") or give
+define serve takes {{ listener is TcpListener }} gives Result<String, String> needs Network {{
+    using server set listener {{
+        keep accepted set std.net.accept(server, 2.0)
+        using connection set accepted or give {{
+            keep request set std.web.read_request(connection, 1024) or give
+            keep path set request.path
+            keep body set request.body
+            keep headers set std.map.of("Content-Type", "text/plain")
+            keep sent set std.web.respond(connection, 201, headers, "created") or give
             give ok(path + ":" + body)
         }}
     }}
 }}
-keep opened = std.net.listen("127.0.0.1", {port})
-choose opened {{ Ok(listener) => serve(listener), Err(problem) => err(problem) }}
+keep opened set std.net.listen("127.0.0.1", {port})
+choose opened {{ case Ok carries listener => serve(listener), case Err carries problem => err(problem) }}
 "#
         );
         let result = if bytecode {
@@ -5067,12 +5102,12 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
             received
         });
         let function = if early_return {
-            "define finish(stream: TcpStream) gives Int needs Network { using socket = stream { give 7 } }"
+            "define finish takes { stream is TcpStream } gives Int needs Network { using socket set stream { give 7 } }"
         } else {
-            "define finish(stream: TcpStream) gives Int needs Network { using socket = stream { keep sent = std.net.write(socket, \"closed\") none } give 7 }"
+            "define finish takes { stream is TcpStream } gives Int needs Network { using socket set stream { keep sent set std.net.write(socket, \"closed\") none } give 7 }"
         };
         let source = format!(
-            "{function} keep opened = std.net.connect(\"127.0.0.1\", {port}, 2.0) choose opened {{ Ok(stream) => finish(stream), Err(problem) => 0 }}"
+            "{function} keep opened set std.net.connect(\"127.0.0.1\", {port}, 2.0) choose opened {{ case Ok carries stream => finish(stream), case Err carries problem => 0 }}"
         );
         let value = if bytecode {
             eval_vm(&source)
@@ -5086,9 +5121,9 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
         }
     }
 
-    assert!(nivren::check("using value = 42 { value }").is_err());
+    assert!(nivren::check("using value set 42 { value }").is_err());
     let missing = nivren::check(
-        "define finish(stream: TcpStream) gives Null { using socket = stream { none } }",
+        "define finish takes { stream is TcpStream } gives Nothing { using socket set stream { none } }",
     )
     .unwrap_err();
     assert!(
@@ -5105,10 +5140,10 @@ fn using_scopes_close_bounded_file_handles_in_both_engines() {
         let path = directory.join(name);
         let source = format!(
             r#"
-define save(path: String) gives Result<Int, String> needs FileWrite {{
-    keep opened = std.files.open_write(path)
-    using file = opened or give {{
-        keep written = std.files.write_open(file, "nivren") or give
+define save takes {{ path is String }} gives Result<Int, String> needs FileWrite {{
+    keep opened set std.files.open_write(path)
+    using file set opened or give {{
+        keep written set std.files.write_to(file, "nivren") or give
         give ok(7)
     }}
 }}
@@ -5129,10 +5164,10 @@ save("{}")
     fs::write(&readable, "bounded").unwrap();
     let source = format!(
         r#"
-define load(path: String) gives Result<String, String> needs FileRead {{
-    keep opened = std.files.open_read(path)
-    using file = opened or give {{
-        give std.files.read_open(file, 64)
+define load takes {{ path is String }} gives Result<String, String> needs FileRead {{
+    keep opened set std.files.open_read(path)
+    using file set opened or give {{
+        give std.files.read_from(file, 64)
     }}
 }}
 load("{}")
@@ -5166,19 +5201,19 @@ fn cross_resource_failure_stress_closes_files_and_tcp_streams_in_both_engines() 
         });
         let source = format!(
             r#"
-define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
-    change index = 0
+define stress takes {{ path is String }} gives Result<Int, String> needs FileRead, Network {{
+    change index set 0
     repeat index < 64 {{
-        keep opened_file = std.files.open_read(path) or give
-        using file = opened_file {{
-            keep closed = std.files.close(file) or give
-            keep rejected = choose std.files.read_open(file, 1) {{ Ok(value) => no, Err(problem) => yes }}
-            when !rejected {{ give err("closed file accepted a read") }}
+        keep opened_file set std.files.open_read(path) or give
+        using file set opened_file {{
+            keep closed set std.files.close(file) or give
+            keep rejected set choose std.files.read_from(file, 1) {{ case Ok carries value => no, case Err carries problem => yes }}
+            when not rejected {{ give err("closed file accepted a read") }}
         }}
-        keep opened_stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
-        using connection = opened_stream {{
-            keep rejected = choose std.net.read_exact_bytes(connection, 1, 2.0) {{ Ok(value) => no, Err(problem) => yes }}
-            when !rejected {{ give err("closed peer produced an exact byte") }}
+        keep opened_stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
+        using connection set opened_stream {{
+            keep rejected set choose std.net.read_exact_bytes(connection, 1, 2.0) {{ case Ok carries value => no, case Err carries problem => yes }}
+            when not rejected {{ give err("closed peer produced an exact byte") }}
         }}
         index = index + 1
     }}
@@ -5210,13 +5245,13 @@ fn async_files_use_bounded_executor_tasks_in_both_engines() {
         .replace('"', "\\\"");
     let source = format!(
         r#"
-define roundtrip() gives Result<String, String> needs FileRead, FileWrite, Task {{
-    keep writing = std.files.write_async("{path}", "async nivren") or give
-    keep written = wait writing or give
-    keep reading = std.files.read_async("{path}", 1024) or give
+define roundtrip takes {{ }} gives Result<String, String> needs FileRead, FileWrite, Task {{
+    keep writing set std.files.write_async("{path}", "async nivren") or give
+    keep written set wait writing or give
+    keep reading set std.files.read_async("{path}", 1024) or give
     give wait reading
 }}
-choose roundtrip() {{ Ok(contents) => contents, Err(problem) => problem }}
+choose roundtrip() {{ case Ok carries contents => contents, case Err carries problem => problem }}
 "#
     );
     assert_eq!(eval_tree(&source), Value::String("async nivren".into()));
@@ -5227,29 +5262,29 @@ choose roundtrip() {{ Ok(contents) => contents, Err(problem) => problem }}
 
 #[test]
 fn structured_tasks_cancel_and_exchange_channel_values() {
-    let source = "keep channel = std.channel.create(1); define producer() gives Int needs Channel { keep sent = std.channel.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.task.spawn(producer); keep received = std.channel.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.task.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
+    let source = "keep channel set std.channels.create(1); define producer takes { } gives Int needs Channel { keep sent set std.channels.send(channel, 42, 2.0); give choose (sent) { case Ok carries value => 1, case Err carries error => 0 }; } keep task set std.tasks.spawn(producer); keep received set std.channels.receive(channel, 2.0); keep value set choose (received) { case Ok carries item => item, case Err carries error => 0 }; keep completed set std.tasks.await(task); assert(choose (completed) { case Ok carries code => code == 1, case Err carries error => no }, \"task completion\"); value";
     assert_eq!(eval_vm(source), Value::Int(42));
 
-    let cancellation = "define forever() gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.task.spawn(forever); std.task.cancel(task); keep result = std.task.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
+    let cancellation = "define forever takes { } gives Int { change value set 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task set std.tasks.spawn(forever); std.tasks.cancel(task); keep result set std.tasks.await(task); choose (result) { case Ok carries value => no, case Err carries error => yes }";
     assert_eq!(eval_vm(cancellation), Value::Bool(true));
-    assert!(nivren::check("std.task.spawn(42)").is_err());
-    assert!(nivren::run("std.task.spawn(42)").is_err());
+    assert!(nivren::check("std.tasks.spawn(42)").is_err());
+    assert!(nivren::run("std.tasks.spawn(42)").is_err());
 }
 
 #[test]
 fn bytecode_vm_matches_the_tree_interpreter() {
     let programs = [
         "2 + 3 * 4",
-        "change n = 0; repeat (n < 5) { n = n + 1; } n",
-        "when yes and !no { 42 } otherwise { 0 }",
-        "define outer(x: Int) { define inner(y: Int) { give x + y; } give inner; } outer(2)(40)",
-        "keep values = append([1, 2], 3); values[2]",
-        "keep missing: String? = none; missing ?? \"fallback\"",
-        "shape Person { name: String, age: Int } keep person = Person(\"Ada\", 37); person.age",
-        "choice State { Idle, Ready } keep state = State.Ready; choose (state) { Idle => 0, Ready => 42 }",
-        "keep result: Result<Int, String> = ok(42); choose (result) { Ok(value) => value, Err(message) => 0 }",
-        "change total = 0; each (value within [10, 20, 12]) { total = total + value; } total",
-        "define first() gives Int { each (value within [42, 0]) { give value; } give 0; } first()",
+        "change n set 0; repeat (n < 5) { n = n + 1; } n",
+        "when yes and not no { 42 } otherwise { 0 }",
+        "define outer takes { x is Int } { define inner takes { y is Int } { give x + y; } give inner; } outer(2)(40)",
+        "keep values set append([1, 2], 3); values[2]",
+        "keep missing is String? set none; missing ?? \"fallback\"",
+        "shape Person { name is String, age is Int } keep person set Person(\"Ada\", 37); person.age",
+        "choice State { Idle, Ready } keep state set State.Ready; choose (state) { case Idle => 0, case Ready => 42 }",
+        "keep result is Result<Int, String> set ok(42); choose (result) { case Ok carries value => value, case Err carries message => 0 }",
+        "change total set 0; each (value within [10, 20, 12]) { total = total + value; } total",
+        "define first takes { } gives Int { each (value within [42, 0]) { give value; } give 0; } first()",
     ];
     for source in programs {
         assert_eq!(
@@ -5265,7 +5300,7 @@ fn bytecode_vm_executes_namespaced_modules() {
     let directory = module_fixture("bytecode-modules");
     fs::write(
         directory.join("answer.niv"),
-        "define value() gives Int { give 42; } expose { value };",
+        "define value takes { } gives Int { give 42; } expose { value };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -5285,7 +5320,7 @@ fn bytecode_vm_executes_namespaced_modules() {
 #[test]
 fn bytecode_runtime_errors_include_call_frames() {
     let errors = nivren::run(
-        "define inner() gives Int { give 1 / 0; } define outer() gives Int { give inner(); } outer()",
+        "define inner takes { } gives Int { give 1 / 0; } define outer takes { } gives Int { give inner(); } outer()",
     )
     .unwrap_err();
     let functions: Vec<&str> = errors[0]
@@ -5298,8 +5333,7 @@ fn bytecode_runtime_errors_include_call_frames() {
 
 #[test]
 fn runtime_metrics_cover_nested_bytecode_and_operations() {
-    let source =
-        "define twice(value: Int) gives Int { give value * 2; }\nkeep answer = twice(21);\nanswer";
+    let source = "define twice takes { value is Int } gives Int { give value * 2; }\nkeep answer set twice(21);\nanswer";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5330,7 +5364,7 @@ fn structured_log_events_are_machine_readable_and_capability_checked() {
     let source = directory.join("event.niv");
     fs::write(
         &source,
-        "std.log.event(\"info\", \"started\", std.map.single(\"request\", \"42\"))",
+        "std.log.event(\"info\", \"started\", std.map.of(\"request\", \"42\"))",
     )
     .unwrap();
     let source_text = source.display().to_string();
@@ -5345,7 +5379,7 @@ fn structured_log_events_are_machine_readable_and_capability_checked() {
     assert_eq!(event["fields"]["request"], "42");
 
     let missing = nivren::check(
-        "define emit() gives Null { give std.log.event(\"info\", \"x\", std.map.single(\"key\", \"value\")) }",
+        "define emit takes { } gives Nothing { give std.log.event(\"info\", \"x\", std.map.of(\"key\", \"value\")) }",
     )
     .unwrap_err();
     assert!(
@@ -5376,7 +5410,7 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     .unwrap();
     fs::write(
         &failing,
-        "define secret() gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
+        "define secret takes { } gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
     )
     .unwrap();
     let niv = env!("CARGO_BIN_EXE_niv");
@@ -5467,7 +5501,7 @@ fn cli_snapshot_tests_require_explicit_review_and_acceptance() {
 
 #[test]
 fn debugger_hook_steps_source_and_exposes_user_variables() {
-    let source = "keep answer = 42;\nanswer + 1";
+    let source = "keep answer set 42;\nanswer + 1";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5498,7 +5532,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
         "[package]\nname = \"sample\"\nversion = \"1.2.3\"\nentry = \"src/main.niv\"\n\n[capabilities]\nFileRead = \"path:./data\"\n",
     )
     .unwrap();
-    fs::write(project.join("src/main.niv"), "keep answer = 42; answer").unwrap();
+    fs::write(project.join("src/main.niv"), "keep answer set 42; answer").unwrap();
     let manifest = nivren::project::Manifest::load(&project).unwrap();
     let package = nivren::package::Package::build(&manifest).unwrap();
     let first = package.encode().unwrap();
@@ -5551,7 +5585,7 @@ fn packages_are_deterministic_traversal_safe_and_registry_verified() {
     let mut changed = package.clone();
     changed
         .files
-        .insert("src/main.niv".into(), b"keep answer = 7; answer".to_vec());
+        .insert("src/main.niv".into(), b"keep answer set 7; answer".to_vec());
     assert!(nivren::package::publish(&changed.encode().unwrap(), &registry).is_err());
     let mut unsafe_package = package;
     unsafe_package
@@ -5705,67 +5739,67 @@ use "@nivren_svg"
 use "@nivren_wav"
 use "@nivren_trace"
 
-keep health = nivren_routing.route("GET", "/health", "health")
-keep selected = nivren_routing.first_match([health], "GET", "/health")
-keep body = nivren_discord.message_body("hello")
-keep encoded = choose body { Ok(text) => text, Err(problem) => "" }
-keep crypto_ok = choose nivren_crypto.sign("secret", "hello") {
-    Ok(tag) => nivren_crypto.verify("secret", "hello", tag) == ok(yes),
-    Err(problem) => no,
+keep health set nivren_routing.route("GET", "/health", "health")
+keep selected set nivren_routing.first_match([health], "GET", "/health")
+keep body set nivren_discord.message_body("hello")
+keep encoded set choose body { case Ok carries text => text, case Err carries problem => "" }
+keep crypto_ok set choose nivren_crypto.sign("secret", "hello") {
+    case Ok carries tag => nivren_crypto.verify("secret", "hello", tag) == ok(yes),
+    case Err carries problem => no,
 }
-keep sql_ok = choose nivren_sql.select("users", ["id"]) {
-    Ok(query) => query.text == "SELECT id FROM users",
-    Err(problem) => no,
+keep sql_ok set choose nivren_sql.select("users", ["id"]) {
+    case Ok carries query => query.text == "SELECT id FROM users",
+    case Err carries problem => no,
 }
-keep redis_ok = nivren_redis.command(["PING"]) == ok("*1\r\n$4\r\nPING\r\n")
-keep compressed = nivren_compression.gzip_text("Nivren", 6)
-keep compression_ok = choose compressed { Ok(bytes) => nivren_compression.gunzip_text(bytes, 1024) == ok("Nivren"), Err(problem) => no }
-keep csv_rows = nivren_csv.decode("Nivren,1\r\n", ["name", "version"], 10)
-keep csv_ok = choose csv_rows { Ok(rows) => len(rows) == 1 and std.map.get(rows[0], "name") == "Nivren", Err(problem) => no }
-keep database_pool = nivren_database.PoolConfig(1, 4, 5.0, 60.0)
-keep database_ok = nivren_database.validate_pool(database_pool) == ok(database_pool)
-keep desktop_window = nivren_desktop.Window("Nivren", 800, 600, "app://index.html")
-keep desktop_ok = nivren_desktop.validate_window(desktop_window) == ok(desktop_window)
-keep gpu_plan = nivren_gpu.AddPlan([1, 2], [3, 4], nivren_gpu.ComputeLimits(8, 4))
-keep gpu_ok = choose nivren_gpu.compile_add(gpu_plan) { Ok(value) => value.cpu_fallback == [4, 6], Err(problem) => no }
-keep stats_ok = nivren_stats.mean([1.0, 2.0, 3.0]) == ok(2.0)
-keep jwt_secret = std.bytes.from_string("official package test secret")
-keep jwt_token = nivren_jwt.sign_hs256("{\"sub\":\"42\"}", jwt_secret)
-keep jwt_ok = choose jwt_token { Ok(token) => nivren_jwt.verify_hs256(token, jwt_secret) == ok("{\"sub\":\"42\"}"), Err(problem) => no }
-keep aws_signed = nivren_aws.sign_v4("GET", "/", "Action=ListUsers&Version=2010-05-08", "content-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z", "content-type;host;x-amz-date", "", "20150830T123600Z", "20150830", "us-east-1", "iam", "AKIDEXAMPLE", std.bytes.from_string("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"))
-keep aws_ok = choose aws_signed { Ok(value) => value.canonical_request_hash == "f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59", Err(problem) => no }
-keep matrix_value = nivren_matrix.matrix(1, 2, [2.0, 3.0])
-keep matrix_ok = choose matrix_value { Ok(value) => nivren_matrix.transpose(value).values == [2.0, 3.0], Err(problem) => no }
-keep columnar_value = nivren_columnar.table([nivren_columnar.Column.Ints(nivren_columnar.IntColumn("id", [1, 2]))])
-keep columnar_ok = choose columnar_value { Ok(value) => value.rows == 2, Err(problem) => no }
-keep svg_value = nivren_svg.canvas(16, 16)
-keep svg_ok = choose svg_value { Ok(value) => choose nivren_svg.render(value) { Ok(text) => text != "", Err(problem) => no }, Err(problem) => no }
-keep wav_value = nivren_wav.encode_pcm16(nivren_wav.Audio(48000, 1, [0, 42]))
-keep wav_ok = choose wav_value { Ok(bytes) => choose nivren_wav.decode_pcm16(bytes) { Ok(audio) => audio.samples == [0, 42], Err(problem) => no }, Err(problem) => no }
-keep image_pixels = std.bytes.from_values([255, 0, 0])
-keep image_ok = choose image_pixels { Ok(pixels) => choose nivren_image.image(1, 1, pixels) { Ok(value) => choose nivren_image.encode_ppm(value) { Ok(bytes) => nivren_image.decode_ppm(bytes) == ok(value), Err(problem) => no }, Err(problem) => no }, Err(problem) => no }
-keep metric_value = nivren_metrics.sample("nivren_ready", "Readiness", "gauge", 1.0, std.map.single("edition", "3"))
-keep metrics_ok = choose metric_value { Ok(value) => choose nivren_metrics.encode([value]) { Ok(text) => text != "", Err(problem) => no }, Err(problem) => no }
-keep trace_value = nivren_trace.parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
-keep trace_ok = choose trace_value { Ok(value) => nivren_trace.traceparent(value) == ok("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), Err(problem) => no }
-keep oidc_ok = nivren_oidc.pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == ok("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
-keep password_hash = nivren_secrets.hash_password_with_salt("secret", std.bytes.from_string("0123456789abcdef"))
-keep secrets_ok = choose password_hash { Ok(hash) => nivren_secrets.verify_password("secret", hash) == ok(yes), Err(problem) => no }
-keep aead_key = nivren_aead.import_key(std.bytes.from_string("0123456789abcdef0123456789abcdef"))
-keep aead_nonce = std.bytes.from_string("unique-nonce")
-keep aead_context = std.bytes.from_string("record:42")
-keep aead_ok = choose aead_key {
-    Ok(key) => choose nivren_aead.seal_with_nonce(key, aead_nonce, aead_context, std.bytes.from_string("Nivren")) {
-        Ok(value) => nivren_aead.unseal(key, aead_context, value) == ok(std.bytes.from_string("Nivren")),
-        Err(problem) => no,
+keep redis_ok set nivren_redis.command(["PING"]) == ok("*1\r\n$4\r\nPING\r\n")
+keep compressed set nivren_compression.gzip_text("Nivren", 6)
+keep compression_ok set choose compressed { case Ok carries bytes => nivren_compression.gunzip_text(bytes, 1024) == ok("Nivren"), case Err carries problem => no }
+keep csv_rows set nivren_csv.decode("Nivren,1\r\n", ["name", "version"], 10)
+keep csv_ok set choose csv_rows { case Ok carries rows => len(rows) == 1 and std.map.get(rows[0], "name") == "Nivren", case Err carries problem => no }
+keep database_pool set nivren_database.PoolConfig(1, 4, 5.0, 60.0)
+keep database_ok set nivren_database.validate_pool(database_pool) == ok(database_pool)
+keep desktop_window set nivren_desktop.Window("Nivren", 800, 600, "app://index.html")
+keep desktop_ok set nivren_desktop.validate_window(desktop_window) == ok(desktop_window)
+keep gpu_plan set nivren_gpu.AddPlan([1, 2], [3, 4], nivren_gpu.ComputeLimits(8, 4))
+keep gpu_ok set choose nivren_gpu.compile_add(gpu_plan) { case Ok carries value => value.cpu_fallback == [4, 6], case Err carries problem => no }
+keep stats_ok set nivren_stats.mean([1.0, 2.0, 3.0]) == ok(2.0)
+keep jwt_secret set std.bytes.from_string("official package test secret")
+keep jwt_token set nivren_jwt.sign_hs256("{\"sub\":\"42\"}", jwt_secret)
+keep jwt_ok set choose jwt_token { case Ok carries token => nivren_jwt.verify_hs256(token, jwt_secret) == ok("{\"sub\":\"42\"}"), case Err carries problem => no }
+keep aws_signed set nivren_aws.sign_v4("GET", "/", "Action=ListUsers&Version=2010-05-08", "content-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z", "content-type;host;x-amz-date", "", "20150830T123600Z", "20150830", "us-east-1", "iam", "AKIDEXAMPLE", std.bytes.from_string("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"))
+keep aws_ok set choose aws_signed { case Ok carries value => value.canonical_request_hash == "f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59", case Err carries problem => no }
+keep matrix_value set nivren_matrix.matrix(1, 2, [2.0, 3.0])
+keep matrix_ok set choose matrix_value { case Ok carries value => nivren_matrix.transpose(value).values == [2.0, 3.0], case Err carries problem => no }
+keep columnar_value set nivren_columnar.table([nivren_columnar.Column.Ints(nivren_columnar.IntColumn("id", [1, 2]))])
+keep columnar_ok set choose columnar_value { case Ok carries value => value.rows == 2, case Err carries problem => no }
+keep svg_value set nivren_svg.canvas(16, 16)
+keep svg_ok set choose svg_value { case Ok carries value => choose nivren_svg.render(value) { case Ok carries text => text != "", case Err carries problem => no }, case Err carries problem => no }
+keep wav_value set nivren_wav.encode_pcm16(nivren_wav.Audio(48000, 1, [0, 42]))
+keep wav_ok set choose wav_value { case Ok carries bytes => choose nivren_wav.decode_pcm16(bytes) { case Ok carries audio => audio.samples == [0, 42], case Err carries problem => no }, case Err carries problem => no }
+keep image_pixels set std.bytes.from_values([255, 0, 0])
+keep image_ok set choose image_pixels { case Ok carries pixels => choose nivren_image.image(1, 1, pixels) { case Ok carries value => choose nivren_image.encode_ppm(value) { case Ok carries bytes => nivren_image.decode_ppm(bytes) == ok(value), case Err carries problem => no }, case Err carries problem => no }, case Err carries problem => no }
+keep metric_value set nivren_metrics.sample("nivren_ready", "Readiness", "gauge", 1.0, std.map.of("edition", "3"))
+keep metrics_ok set choose metric_value { case Ok carries value => choose nivren_metrics.encode([value]) { case Ok carries text => text != "", case Err carries problem => no }, case Err carries problem => no }
+keep trace_value set nivren_trace.parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+keep trace_ok set choose trace_value { case Ok carries value => nivren_trace.traceparent(value) == ok("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), case Err carries problem => no }
+keep oidc_ok set nivren_oidc.pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == ok("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+keep password_hash set nivren_secrets.hash_password_with_salt("secret", std.bytes.from_string("0123456789abcdef"))
+keep secrets_ok set choose password_hash { case Ok carries hash => nivren_secrets.verify_password("secret", hash) == ok(yes), case Err carries problem => no }
+keep aead_key set nivren_aead.import_key(std.bytes.from_string("0123456789abcdef0123456789abcdef"))
+keep aead_nonce set std.bytes.from_string("unique-nonce")
+keep aead_context set std.bytes.from_string("record:42")
+keep aead_ok set choose aead_key {
+    case Ok carries key => choose nivren_aead.seal_with_nonce(key, aead_nonce, aead_context, std.bytes.from_string("Nivren")) {
+        case Ok carries value => nivren_aead.unseal(key, aead_context, value) == ok(std.bytes.from_string("Nivren")),
+        case Err carries problem => no,
     },
-    Err(problem) => no,
+    case Err carries problem => no,
 }
-keep checked = nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and database_ok and desktop_ok and gpu_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
-keep port = nivren_validation.range("port", 443, 1, 65535)
+keep checked set nivren_testing.expect_yes(selected != none and encoded != "" and crypto_ok and sql_ok and redis_ok and compression_ok and csv_ok and database_ok and desktop_ok and gpu_ok and stats_ok and jwt_ok and aws_ok and matrix_ok and columnar_ok and svg_ok and wav_ok and image_ok and metrics_ok and trace_ok and oidc_ok and secrets_ok and aead_ok, "official packages")
+keep port set nivren_validation.range("port", 443, 1, 65535)
 choose checked {
-    Ok(value) => choose port { Ok(number) => number, Err(problem) => 0 },
-    Err(problem) => 0,
+    case Ok carries value => choose port { case Ok carries number => number, case Err carries problem => 0 },
+    case Err carries problem => 0,
 }
 "#,
     )
@@ -5817,7 +5851,7 @@ fn official_image_codec_is_bounded_in_both_engines() {
 
 #[test]
 fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
-    let source = "define twice_sum(a: Int, b: Int) gives Int { keep sum = a + b; give sum * 2; } twice_sum(1, 2); twice_sum(20, 1)";
+    let source = "define twice_sum takes { a is Int, b is Int } gives Int { keep sum set a + b; give sum * 2; } twice_sum(1, 2); twice_sum(20, 1)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5832,8 +5866,7 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
         }
     );
 
-    let overflow =
-        "define add(a: Int, b: Int) gives Int { give a + b; } add(9223372036854775807, 1)";
+    let overflow = "define add takes { a is Int, b is Int } gives Int { give a + b; } add(9223372036854775807, 1)";
     let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5845,7 +5878,7 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
 
 #[test]
 fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
-    let source = "define sum9(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int) gives Int { give a + b + c + d + e + f + g + h + i; } sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)";
+    let source = "define sum9 takes { a is Int, b is Int, c is Int, d is Int, e is Int, f is Int, g is Int, h is Int, i is Int } gives Int { give a + b + c + d + e + f + g + h + i; } sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5857,7 +5890,7 @@ fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
 
 #[test]
 fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
-    let source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust(value: Int) gives Int { change result = value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
+    let source = "define fibonacci takes { value is Int } gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust takes { value is Int } gives Int { change result set value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5870,11 +5903,11 @@ fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
 #[test]
 fn general_call_frames_preserve_values_and_lexical_shadowing() {
     let source = r#"
-shape Sample { label: String, enabled: Bool }
-keep label = "outer"
-define inspect(sample: Sample) gives String {
+shape Sample { label is String, enabled is Bool }
+keep label set "outer"
+define inspect takes { sample is Sample } gives String {
     when sample.enabled {
-        keep label = "inner"
+        keep label set "inner"
         assert(label == "inner", "nested slot")
     }
     give label + sample.label
@@ -5895,14 +5928,14 @@ inspect(Sample("!", yes)) + inspect(Sample("?", no))
 #[test]
 fn fast_frames_do_not_leak_into_general_callees() {
     let source = r#"
-define unwrap(value: Result<Int, String>) gives Int {
+define unwrap takes { value is Result<Int, String> } gives Int {
     give choose value {
-        Ok(number) => number,
-        Err(problem) => 0
+        case Ok carries number => number,
+        case Err carries problem => 0
     }
 }
-define wrapper(value: Int) gives Int {
-    keep adjusted = value + 2
+define wrapper takes { value is Int } gives Int {
+    keep adjusted set value + 2
     give unwrap(ok(adjusted))
 }
 wrapper(40)
@@ -5919,7 +5952,7 @@ wrapper(40)
 fn integer_root_slots_preserve_bindings_between_bytecode_runs() {
     let mut interpreter = nivren::runtime::Interpreter::new();
     let define = nivren::parser::parse(
-        nivren::lexer::scan("change answer = 40; answer = answer + 2; answer").unwrap(),
+        nivren::lexer::scan("change answer set 40; answer = answer + 2; answer").unwrap(),
     )
     .unwrap();
     nivren::typecheck::check(&define).unwrap();
@@ -5931,7 +5964,7 @@ fn integer_root_slots_preserve_bindings_between_bytecode_runs() {
     assert_eq!(interpreter.run_bytecode(&load).unwrap(), Value::Int(42));
 
     let redeclare =
-        nivren::parser::parse(nivren::lexer::scan("change answer = 0").unwrap()).unwrap();
+        nivren::parser::parse(nivren::lexer::scan("change answer set 0").unwrap()).unwrap();
     let redeclare = nivren::bytecode::compile(&redeclare).unwrap();
     assert!(interpreter.run_bytecode(&redeclare).is_err());
 }
@@ -5947,7 +5980,7 @@ fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
     .unwrap();
     fs::write(
         directory.join("src/main.niv"),
-        "define double(value: Int) gives Int { give value * 2 }\ndouble(21)",
+        "define double takes { value is Int } gives Int { give value * 2 }\ndouble(21)",
     )
     .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
@@ -6053,7 +6086,7 @@ fn complete_program_aot_does_not_require_an_integer_kernel() {
     .unwrap();
     fs::write(
         directory.join("src/main.niv"),
-        "shape Greeting { text: String }\nGreeting(\"hello\").text",
+        "shape Greeting { text is String }\nGreeting(\"hello\").text",
     )
     .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
@@ -6397,4 +6430,1358 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
     );
     fs::remove_dir_all(registry).unwrap();
     fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn stop_ends_the_nearest_repeat_loop_in_both_engines() {
+    let source = r#"
+change total set 0
+change value set 0
+repeat while value < 10 {
+    change value to value + 1
+    when value == 4 { stop }
+    change total to total + value
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(6));
+    assert_eq!(eval_vm(source), Value::Int(6));
+}
+
+#[test]
+fn skip_ends_only_the_current_loop_pass_in_both_engines() {
+    let source = r#"
+change total set 0
+change value set 0
+repeat while value < 6 {
+    change value to value + 1
+    when value == 2 { skip }
+    change total to total + value
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(19));
+    assert_eq!(eval_vm(source), Value::Int(19));
+}
+
+#[test]
+fn stop_and_skip_control_each_loops_in_both_engines() {
+    let stop_source = r#"
+change total set 0
+each item in [1, 2, 3, 4, 5] {
+    when item == 4 { stop }
+    change total to total + item
+}
+total
+"#;
+    assert_eq!(eval_tree(stop_source), Value::Int(6));
+    assert_eq!(eval_vm(stop_source), Value::Int(6));
+    let skip_source = r#"
+change total set 0
+each item in [1, 2, 3, 4, 5] {
+    when item == 2 { skip }
+    change total to total + item
+}
+total
+"#;
+    assert_eq!(eval_tree(skip_source), Value::Int(13));
+    assert_eq!(eval_vm(skip_source), Value::Int(13));
+}
+
+#[test]
+fn stop_only_ends_the_innermost_loop() {
+    let source = r#"
+change total set 0
+each outer in [1, 2, 3] {
+    each inner in [1, 2, 3] {
+        when inner == 2 { stop }
+        change total to total + inner
+    }
+    change total to total + 10
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(33));
+    assert_eq!(eval_vm(source), Value::Int(33));
+}
+
+#[test]
+fn loop_exits_outside_a_loop_are_rejected() {
+    let errors = nivren::check("stop").unwrap_err();
+    assert!(errors[0].to_string().contains("no 'repeat' or 'each' loop"));
+    let errors = nivren::check("skip").unwrap_err();
+    assert!(errors[0].to_string().contains("no 'repeat' or 'each' loop"));
+}
+
+#[test]
+fn loop_exits_cannot_cross_function_or_using_boundaries() {
+    let function_source = r#"
+each item in [1] {
+    define helper {
+        skip
+    }
+}
+"#;
+    let errors = nivren::check(function_source).unwrap_err();
+    assert!(errors[0].to_string().contains("function boundary"));
+    let using_source = r#"
+each item in [1] {
+    using thing set append([], 1) {
+        stop
+    }
+}
+"#;
+    let errors = nivren::check(using_source).unwrap_err();
+    assert!(errors[0].to_string().contains("'using' scope"));
+}
+
+#[test]
+fn contextual_stop_and_skip_leave_library_names_untouched() {
+    let source = r#"
+keep source set std.iter.from([1, 2, 3, 4])
+keep advanced set std.iter.skip(source, 2)
+len(std.iter.collect(advanced))
+"#;
+    assert_eq!(eval_tree(source), Value::Int(2));
+    assert_eq!(eval_vm(source), Value::Int(2));
+}
+
+#[test]
+fn when_carries_unwraps_present_maybe_values_in_both_engines() {
+    let source = r#"
+keep table set std.map.of(1, "one")
+change seen set ""
+when std.map.get(table, 1) carries value {
+    change seen to value
+} otherwise {
+    change seen to "missing"
+}
+seen
+"#;
+    assert_eq!(eval_tree(source), Value::String("one".into()));
+    assert_eq!(eval_vm(source), Value::String("one".into()));
+}
+
+#[test]
+fn when_carries_takes_the_otherwise_branch_for_none_in_both_engines() {
+    let source = r#"
+keep table set std.map.of(1, "one")
+change seen set ""
+when std.map.get(table, 2) carries value {
+    change seen to value
+} otherwise {
+    change seen to "missing"
+}
+seen
+"#;
+    assert_eq!(eval_tree(source), Value::String("missing".into()));
+    assert_eq!(eval_vm(source), Value::String("missing".into()));
+}
+
+#[test]
+fn when_carries_bindings_stay_inside_the_matched_branch() {
+    let source = r#"
+keep table set std.map.of(1, "one")
+when std.map.get(table, 1) carries value {
+    show value
+}
+show value
+"#;
+    let errors = nivren::check(source).unwrap_err();
+    assert!(errors[0].to_string().contains("value"));
+}
+
+#[test]
+fn when_carries_rejects_subjects_that_are_not_maybe_values() {
+    let errors = nivren::check("when 5 carries x { show(x) }").unwrap_err();
+    assert!(errors[0].to_string().contains("maybe"));
+}
+
+#[test]
+fn loop_exits_pass_through_when_carries_branches_in_both_engines() {
+    let source = r#"
+keep table set std.map.of(3, "three")
+change total set 0
+each item in [1, 2, 3, 4] {
+    when std.map.get(table, item) carries found {
+        stop
+    }
+    change total to total + item
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(3));
+    assert_eq!(eval_vm(source), Value::Int(3));
+}
+
+#[test]
+fn text_literals_interpolate_values_in_both_engines() {
+    let source = r#"
+keep name set "world"
+text "Hello {name}, {1 + 2} and {yes}!"
+"#;
+    let expected = Value::String("Hello world, 3 and yes!".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn text_literals_escape_braces_and_allow_nested_hole_braces() {
+    let source = r#"text "{{a}} has {len([1, 2, 3])} items""#;
+    let expected = Value::String("{a} has 3 items".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn text_holes_reject_values_without_canonical_text() {
+    let errors = nivren::check(r#"text "{[1, 2]}""#).unwrap_err();
+    assert!(errors[0].to_string().contains("text hole"));
+}
+
+#[test]
+fn text_holes_reject_perform_boundaries() {
+    let errors = nivren::check(r#"text "{perform 1}""#).unwrap_err();
+    assert!(errors[0].to_string().contains("pure"));
+}
+
+#[test]
+fn text_holes_reject_empty_and_unterminated_forms() {
+    assert!(nivren::check(r#"text "{}""#).is_err());
+    assert!(nivren::check(r#"text "{name""#).is_err());
+    assert!(nivren::check(r#"text "name}""#).is_err());
+}
+
+#[test]
+fn text_stays_an_ordinary_identifier_without_a_string() {
+    let source = r#"
+keep text set 5
+text + 1
+"#;
+    assert_eq!(eval_tree(source), Value::Int(6));
+    assert_eq!(eval_vm(source), Value::Int(6));
+}
+
+#[test]
+fn choose_guards_select_arms_with_bound_values_in_both_engines() {
+    let source = r#"
+choice Size holds {
+    case Small
+    case Large carries Int
+}
+define describe takes { value is Size } gives String {
+    give choose value {
+        case Large carries amount when amount > 10 => "big"
+        case Large carries amount => "large"
+        case Small => "small"
+    }
+}
+keep first set describe with { value set Size.Large(25) }
+keep second set describe with { value set Size.Large(5) }
+keep third set describe with { value set Size.Small }
+text "{first} {second} {third}"
+"#;
+    let expected = Value::String("big large small".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_or_patterns_join_cases_in_both_engines() {
+    let source = r#"
+choice Color holds {
+    case Red
+    case Green
+    case Blue
+}
+choose Color.Green {
+    case Red or Green => "warm"
+    case Blue => "cool"
+}
+"#;
+    let expected = Value::String("warm".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_matches_literals_with_an_otherwise_arm_in_both_engines() {
+    let source = r#"
+choose 3 {
+    case 1 => "one"
+    case 2 => "two"
+    otherwise as number => std.int.format(number)
+}
+"#;
+    let expected = Value::String("3".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_matches_nested_shape_patterns_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+keep origin set Point with { x set 0, y set 0 }
+choose origin {
+    case Point holds { x set 0, y set 0 } => "origin"
+    case Point holds { x set x } => std.int.format(x)
+}
+"#;
+    let expected = Value::String("origin".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_matches_case_payloads_with_nested_patterns_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+choice Placement holds {
+    case At carries Point
+}
+choose Placement.At(Point with { x set 0, y set 7 }) {
+    case At carries Point holds { x set 0, y set y } => std.int.format(y)
+    case At carries any => "elsewhere"
+}
+"#;
+    let expected = Value::String("7".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn choose_exhaustiveness_rules_guard_the_new_patterns() {
+    let errors = nivren::check(r#"choose 5 { case 1 => "one" }"#).unwrap_err();
+    assert!(errors[0].to_string().contains("otherwise"));
+    let errors = nivren::check(
+        r#"
+choose 5 {
+    otherwise => 1
+    case 2 => 2
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("unreachable"));
+    let errors = nivren::check(
+        r#"
+choice Color holds {
+    case Red
+    case Blue
+}
+choose Color.Red {
+    case Red => 1
+    case Red => 2
+    case Blue => 3
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("duplicate"));
+    let errors = nivren::check(
+        r#"
+choice Color holds {
+    case Red
+    case Blue
+}
+choose Color.Red {
+    case Red => 1
+    case Blue => 2
+    otherwise => 3
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("already exhaustive"));
+}
+
+#[test]
+fn choose_rejects_unsafe_or_impure_pattern_forms() {
+    let errors = nivren::check(
+        r#"
+choose 1.5 {
+    case 1.5 => 1
+    otherwise => 2
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("safe selector"));
+    let errors = nivren::check(
+        r#"
+choose 5 {
+    case any when perform 1 => 1
+    otherwise => 2
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("pure"));
+    let errors = nivren::check(
+        r#"
+choice Size holds {
+    case Small
+    case Large carries Int
+}
+choose Size.Small {
+    case Large carries amount or Small => 1
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("same names"));
+}
+
+#[test]
+fn keep_destructures_shape_patterns_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+keep Point holds { x set x, y set y } set Point with { x set 3, y set 4 }
+x * 10 + y
+"#;
+    assert_eq!(eval_tree(source), Value::Int(34));
+    assert_eq!(eval_vm(source), Value::Int(34));
+}
+
+#[test]
+fn each_destructures_shape_patterns_in_both_engines() {
+    let source = r#"
+shape Row holds {
+    id is Int
+    label is String
+}
+change total set 0
+each Row holds { id set id } in [
+    Row with { id set 1, label set "one" },
+    Row with { id set 2, label set "two" }
+] {
+    change total to total + id
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(3));
+    assert_eq!(eval_vm(source), Value::Int(3));
+}
+
+#[test]
+fn binding_patterns_must_be_irrefutable() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+}
+keep Point holds { x set 0 } set Point with { x set 1, y set 2 }
+"#;
+    let errors = nivren::check(source).unwrap_err();
+    assert!(errors[0].to_string().contains("never fails"));
+}
+
+#[test]
+fn when_carries_tests_choice_cases_with_patterns_in_both_engines() {
+    let source = r#"
+choice Signal holds {
+    case Quit
+    case Retry carries Int
+    case Note carries String
+}
+define describe takes { value is Signal } gives String {
+    when value carries Retry carries delay {
+        give text "retry {delay}"
+    }
+    when value carries Quit or Note carries any {
+        give "handled"
+    }
+    give "other"
+}
+keep first set describe with { value set Signal.Retry(3) }
+keep second set describe with { value set Signal.Quit }
+keep third set describe with { value set Signal.Note("hi") }
+text "{first} {second} {third}"
+"#;
+    let expected = Value::String("retry 3 handled handled".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn promise_never_rejects_renounced_needs_and_calls() {
+    let declaration = r#"
+promise never Network
+define fetch takes { address is String } gives String or String needs Network {
+    give std.web.get(address, 1.0)
+}
+"#;
+    let errors = nivren::check(declaration).unwrap_err();
+    assert!(errors[0].to_string().contains("promise never Network"));
+    let call = r#"
+promise never Time
+std.time.sleep(0.1)
+"#;
+    let errors = nivren::check(call).unwrap_err();
+    assert!(errors[0].to_string().contains("promise never Time"));
+}
+
+#[test]
+fn promise_only_within_confines_declared_scopes() {
+    let outside = r#"
+promise FileRead only within "path:./data"
+define read_config takes { } gives String or String needs FileRead within "path:./other" {
+    give std.files.read("./other/config")
+}
+"#;
+    let errors = nivren::check(outside).unwrap_err();
+    assert!(
+        errors[0]
+            .to_string()
+            .contains("outside the promised boundaries")
+    );
+    let inside = r#"
+promise FileRead only within "path:./data"
+define read_config takes { } gives String or String needs FileRead within "path:./data" {
+    give std.files.read("./data/config")
+}
+"#;
+    assert!(nivren::check(inside).is_ok());
+}
+
+#[test]
+fn promises_bind_only_their_enclosing_scope() {
+    let source = r#"
+{
+    promise never Time
+}
+std.time.sleep(0.1)
+"#;
+    assert!(nivren::check(source).is_ok());
+    let errors = nivren::check("promise never Magic").unwrap_err();
+    assert!(errors[0].to_string().contains("not a capability"));
+}
+
+#[test]
+fn promise_statements_run_as_quiet_declarations_in_both_engines() {
+    let source = r#"
+promise never Network
+1 + 2
+"#;
+    assert_eq!(eval_tree(source), Value::Int(3));
+    assert_eq!(eval_vm(source), Value::Int(3));
+}
+
+#[test]
+fn samples_stay_quiet_in_ordinary_runs_and_execute_under_test_mode() {
+    let failing = r#"
+sample "adding" {
+    1 + 1
+} shows "3"
+42
+"#;
+    assert_eq!(eval_tree(failing), Value::Int(42));
+    assert_eq!(eval_vm(failing), Value::Int(42));
+    let program = nivren::parser::parse(nivren::lexer::scan(failing).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.enable_samples();
+    let error = interpreter.run_bytecode(&chunk).unwrap_err();
+    assert!(error.to_string().contains("sample 'adding'"));
+    let passing = failing.replace("shows \"3\"", "shows \"2\"");
+    let program = nivren::parser::parse(nivren::lexer::scan(&passing).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.enable_samples();
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(42));
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.enable_samples();
+    assert_eq!(interpreter.run(&program).unwrap(), Value::Int(42));
+}
+
+#[test]
+fn samples_are_checked_hermetic_and_uniquely_titled() {
+    let errors = nivren::check("sample \"a\" { 1 }\nsample \"a\" { 2 }\nnone").unwrap_err();
+    assert!(errors[0].to_string().contains("duplicate sample title"));
+    let errors = nivren::check("sample \"io\" { std.time.sleep(0.1) }\nnone").unwrap_err();
+    assert!(errors[0].to_string().contains("renounces"));
+    let errors = nivren::check("sample \"x\" { keep a set 1 } shows \"1\"\nnone").unwrap_err();
+    assert!(errors[0].to_string().contains("ends with one expression"));
+}
+
+#[test]
+fn the_grown_text_library_builds_and_transforms_in_both_engines() {
+    let source = r#"
+define build takes { } gives String or String {
+    keep sliced set std.text.slice("hello", 1, 3) or give
+    keep replaced set std.text.replace("a-b-a", "a", "x", 2) or give
+    keep upper set std.text.to_upper("up") or give
+    keep padded set std.text.pad_start("7", 3, "0") or give
+    keep repeated set std.text.repeat("ab", 2) or give
+    give std.text.join([sliced, replaced, upper, padded, repeated], "|")
+}
+choose build with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("el|x-b-x|UP|007|abab".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn the_grown_text_library_tests_and_measures_in_both_engines() {
+    let source = r#"
+change passes set 0
+each fact in [
+    std.text.contains("hello", "ell"),
+    std.text.ends_with("hello", "lo"),
+    (std.text.index_of("hello", "l") ?? 0) == 2,
+    len(std.text.lines("a\nb\r\nc")) == 3,
+    std.text.trim_start("  x") == "x",
+    std.text.trim_end("x  ") == "x",
+    std.text.trim("  mid  ") == "mid"
+] {
+    when fact { change passes to passes + 1 }
+}
+passes
+"#;
+    assert_eq!(eval_tree(source), Value::Int(7));
+    assert_eq!(eval_vm(source), Value::Int(7));
+}
+
+#[test]
+fn calendar_fields_and_difference_read_datetimes_in_both_engines() {
+    let source = r#"
+define inspect takes { } gives String or String {
+    keep opening set std.time.from_unix(0, "UTC") or give
+    keep later set std.time.add_seconds(opening, 90061) or give
+    keep difference set std.time.difference_seconds(later, opening) or give
+    give std.text.join([
+        std.int.format(std.time.year(opening)),
+        std.int.format(std.time.month(opening)),
+        std.int.format(std.time.day(opening)),
+        std.int.format(std.time.weekday(opening)),
+        std.int.format(std.time.hour(later)),
+        std.int.format(std.time.minute(later)),
+        std.int.format(std.time.second(later)),
+        std.int.format(difference)
+    ], ":")
+}
+choose inspect with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("1970:1:1:4:1:1:1:90061".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn monotonic_time_never_goes_backward() {
+    let source = r#"
+keep first set std.time.monotonic()
+keep second set std.time.monotonic()
+second >= first
+"#;
+    assert_eq!(eval_tree(source), Value::Bool(true));
+    assert_eq!(eval_vm(source), Value::Bool(true));
+}
+
+#[test]
+fn intent_stories_render_deterministic_plain_language() {
+    let source = r#"
+define fetch takes { path is String } gives String or String needs FileRead {
+    give perform std.files.read(path)
+}
+perform fetch with { path set "notes.txt" }
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let graph = nivren::intent::analyze(&program, nivren::intent::Optimization::Enabled);
+    graph.validate().unwrap();
+    let first = graph.story();
+    assert_eq!(first, graph.story());
+    assert!(first.contains("reads through std.files.read"));
+    assert!(first.contains("needs FileRead"));
+    assert!(first.contains("visible effect boundary"));
+    assert!(first.contains("required capabilities: FileRead"));
+    let pure = nivren::parser::parse(nivren::lexer::scan("1 + 2").unwrap()).unwrap();
+    let graph = nivren::intent::analyze(&pure, nivren::intent::Optimization::Enabled);
+    assert!(graph.story().contains("pure computation"));
+}
+
+#[test]
+fn effects_record_and_replay_byte_identically() {
+    let source = r#"
+keep moment set std.time.now_zoned("UTC")
+choose moment {
+    case Ok carries value => std.time.format(value)
+    case Err carries message => message
+}
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut recording = nivren::runtime::Interpreter::new();
+    let recorder = recording.record_effects();
+    let first = recording.run_bytecode(&chunk).unwrap();
+    let entries = recorder.lock().unwrap().clone();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].capability, "Time");
+    let mut replaying = nivren::runtime::Interpreter::new();
+    replaying.replay_effects(entries.clone());
+    assert_eq!(replaying.run_bytecode(&chunk).unwrap(), first);
+    assert_eq!(replaying.replay_remaining(), 0);
+    let mut replaying_tree = nivren::runtime::Interpreter::new();
+    replaying_tree.replay_effects(entries.clone());
+    assert_eq!(replaying_tree.run(&program).unwrap(), first);
+    let divergent = r#"std.env.get("NIVREN_REPLAY_TEST")"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(divergent).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut replaying = nivren::runtime::Interpreter::new();
+    replaying.replay_effects(entries);
+    let error = replaying.run_bytecode(&chunk).unwrap_err();
+    assert!(error.to_string().contains("replay diverged"));
+}
+
+#[test]
+fn portable_plans_encode_and_decode_across_programs_in_both_engines() {
+    let source = r#"
+shape FetchPlan holds {
+    address is String
+    attempts is Int
+} derives Json
+define round_trip takes { } gives String or String {
+    prepare request as FetchPlan with { address set "example.com", attempts set 3 }
+    keep encoded set std.plans.encode(request) or give
+    keep decoded set std.plans.decode(FetchPlan, encoded) or give
+    give ok(decoded.address)
+}
+choose round_trip with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("example.com".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn plan_decoding_rejects_mismatched_shapes() {
+    let source = r#"
+shape FetchPlan holds {
+    address is String
+} derives Json
+shape OtherPlan holds {
+    address is String
+    extra is Int
+} derives Json
+define attempt takes { } gives String or String {
+    prepare request as FetchPlan with { address set "example.com" }
+    keep encoded set std.plans.encode(request) or give
+    keep decoded set std.plans.decode(OtherPlan, encoded) or give
+    give ok("decoded")
+}
+choose attempt with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let tree = eval_tree(source);
+    let Value::String(message) = tree else {
+        panic!("expected a message");
+    };
+    assert!(message.contains("shape"));
+}
+
+#[test]
+fn the_gpu_stub_reports_visible_unavailability() {
+    let source = r#"
+when std.gpu.available() {
+    "available"
+} otherwise {
+    choose std.gpu.open("cpu") {
+        case Ok carries device => "opened"
+        case Err carries message => message
+    }
+}
+"#;
+    let tree = eval_tree(source);
+    let Value::String(message) = tree else {
+        panic!("expected a message");
+    };
+    assert!(message.contains("no GPU adapter"));
+}
+
+#[test]
+fn modules_need_trusted_to_cross_the_systems_boundary() {
+    let span = nivren::ast::Span { line: 1, column: 1 };
+    let module = |source: &str| nivren::ast::Stmt::Module {
+        name: "bridge".into(),
+        body: nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap(),
+        exports: vec![],
+        span,
+    };
+    let errors =
+        nivren::typecheck::check(&[module(r#"std.host.invoke("nivren.echo", "{}")"#)]).unwrap_err();
+    assert!(errors[0].to_string().contains("trusted"));
+    assert!(
+        nivren::typecheck::check(&[module(
+            r#"
+trusted "wraps the demo host bridge"
+std.host.invoke("nivren.echo", "{}")
+"#
+        )])
+        .is_ok()
+    );
+    let errors = nivren::typecheck::check(&[module(
+        r#"
+trusted "   "
+std.host.invoke("nivren.echo", "{}")
+"#,
+    )])
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("states its reason"));
+    assert!(nivren::check(r#"std.host.invoke("nivren.echo", "{}")"#).is_ok());
+}
+
+#[test]
+fn reflection_schema_describes_functions_in_both_engines() {
+    let source = r#"
+define add takes { left is Int, right is Int } gives Int {
+    give left + right
+}
+choose std.reflect.schema(add) {
+    case Ok carries schema => choose std.text.join([
+        std.map.get(schema, "$kind") ?? "?",
+        std.map.get(schema, "$name") ?? "?",
+        std.map.get(schema, "left") ?? "?",
+        std.map.get(schema, "right") ?? "?"
+    ], " ") {
+        case Ok carries joined => joined
+        case Err carries message => message
+    }
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("function add 0 1".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn uint_arithmetic_is_checked_wrapping_is_explicit_and_dual_engine() {
+    let source = r#"
+define compute takes { } gives String or String {
+    keep small set std.uint.from_int(7) or give
+    keep large set std.uint.from_int(6) or give
+    keep sum set small + large
+    keep product set small * large
+    keep wrapped set std.uint.wrapping_sub(std.uint.min(), small)
+    keep back set std.uint.to_int(sum) or give
+    give ok(text "{std.uint.format(sum)} {std.uint.format(product)} {std.uint.format(wrapped)} {back} {small < large}")
+}
+choose compute with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("13 42 18446744073709551609 13 no".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn uint_overflow_and_negation_are_typed_runtime_errors() {
+    let overflow = r#"
+define boom takes { } gives UInt or String {
+    keep one set std.uint.from_int(1) or give
+    give ok(std.uint.max() + one)
+}
+boom with {}
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(error.to_string().contains("unsigned integer overflow"));
+    let negation = r#"
+define flip takes { } gives UInt or String {
+    keep one set std.uint.from_int(1) or give
+    give ok(-one)
+}
+flip with {}
+"#;
+    let errors = nivren::check(negation).unwrap_err();
+    assert!(errors[0].to_string().contains("UInt"));
+    let mixed = nivren::check("std.uint.max() + 1").unwrap_err();
+    assert!(mixed[0].to_string().contains("same type"));
+}
+
+#[test]
+fn generators_expand_into_checked_declarations() {
+    let source = r#"
+generate schemas {
+    keep fields set std.map.set(std.map.of("x", "Int"), "y", "Int")
+    keep point set choose std.source.shape("Point", fields, ["Compare"]) {
+        case Ok carries declaration => declaration
+        otherwise as problem => problem
+    }
+    give [point]
+}
+expand schemas
+keep origin set Point with { x set 1, y set 2 }
+show(origin.x + origin.y)
+"#;
+    assert_eq!(eval(source), Value::Null);
+    let misuse = source.replace("x set 1", "x set \"one\"");
+    assert!(nivren::check(&misuse).is_err());
+}
+
+#[test]
+fn generators_build_functions_from_statement_builders() {
+    let source = r#"
+generate doubling {
+    keep params set std.map.of("value", "Int")
+    keep body set [
+        std.source.when("value < 0", [std.source.give("0 - value * 2") or give], []) or give,
+        std.source.give("value * 2") or give
+    ]
+    keep doubled set std.source.function("double", params, "Int", body) or give
+    give [doubled]
+}
+expand doubling
+double(21) + double(0 - 5)
+"#;
+    assert_eq!(eval(source), Value::Int(52));
+
+    let invalid = source.replace("value * 2", "value +");
+    let errors = nivren::run(&invalid).unwrap_err();
+    assert!(errors[0].message.contains("doubling"));
+}
+
+#[test]
+fn generators_stay_pure_bounded_and_validated() {
+    let errors = nivren::check("expand missing").unwrap_err();
+    assert!(errors[0].to_string().contains("unknown generator"));
+    let effectful = r#"
+generate impure {
+    std.time.sleep(0.1)
+    give []
+}
+expand impure
+"#;
+    let errors = nivren::check(effectful).unwrap_err();
+    assert!(errors[0].to_string().contains("does not allow Time"));
+    let wrong_shape = r#"
+generate wrong {
+    give [42]
+}
+expand wrong
+"#;
+    let errors = nivren::check(wrong_shape).unwrap_err();
+    assert!(errors[0].to_string().contains("source.Declaration"));
+    let bad_label = r#"
+generate sized takes { limit is Int } {
+    give []
+}
+expand sized with { size set 3 }
+"#;
+    let errors = nivren::check(bad_label).unwrap_err();
+    assert!(errors[0].to_string().contains("canonical order"));
+}
+
+#[test]
+fn generated_choices_join_pattern_matching() {
+    let source = r#"
+generate signals {
+    keep cases set std.map.set(std.map.of("Go", ""), "Wait", "Int")
+    keep signal set choose std.source.choice("Signal", cases) {
+        case Ok carries declaration => declaration
+        otherwise as problem => problem
+    }
+    give [signal]
+}
+expand signals
+show(choose Signal.Wait(7) {
+    case Wait carries delay => delay
+    case Go => 0
+})
+"#;
+    assert_eq!(eval(source), Value::Null);
+}
+
+#[test]
+fn i128_joins_the_fixed_width_family_in_both_engines() {
+    let source = r#"
+define compute takes { } gives String or String {
+    keep big set std.i128.parse("170141183460469231731687303715884105727") or give
+    keep one set std.i128.from_int(1) or give
+    keep smaller set big - one
+    give ok(std.i128.format(smaller))
+}
+choose compute with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("170141183460469231731687303715884105726".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn text_holes_render_display_shapes_and_datetimes_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+} derives Display
+keep origin set Point with { x set 1, y set 2 }
+text "at {origin}"
+"#;
+    let tree = eval_tree(source);
+    let Value::String(rendered) = &tree else {
+        panic!("expected text");
+    };
+    assert!(rendered.starts_with("at "));
+    assert!(rendered.contains('1') && rendered.contains('2'));
+    assert_eq!(eval_vm(source), tree);
+    let undisplayable = r#"
+shape Quiet holds {
+    x is Int
+}
+keep value set Quiet with { x set 1 }
+text "at {value}"
+"#;
+    let errors = nivren::check(undisplayable).unwrap_err();
+    assert!(errors[0].to_string().contains("Display"));
+}
+
+#[test]
+fn promises_are_enforced_again_at_runtime_in_both_engines() {
+    let source = r#"
+promise never Time
+std.time.sleep(0.0)
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(error.to_string().contains("promise never Time"));
+    let error = nivren::runtime::Interpreter::new()
+        .run(&program)
+        .unwrap_err();
+    assert!(error.to_string().contains("promise never Time"));
+    let scoped = r#"
+define quiet takes { } gives Int {
+    promise never Time
+    give 1
+}
+keep first set quiet with {}
+std.time.sleep(0.0)
+first
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(scoped).unwrap()).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&chunk)
+            .unwrap(),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn declared_payload_limits_bound_text_literals_in_both_engines() {
+    let source = r#"
+keep chunk set "0123456789abcdef"
+text "{chunk}{chunk}{chunk}"
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .with_payload_limit(32)
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(error.to_string().contains("payload limit"));
+    let error = nivren::runtime::Interpreter::new()
+        .with_payload_limit(32)
+        .run(&program)
+        .unwrap_err();
+    assert!(error.to_string().contains("payload limit"));
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&chunk)
+            .unwrap(),
+        Value::String("0123456789abcdef".repeat(3))
+    );
+}
+
+#[test]
+fn authority_diffs_show_added_and_removed_grants() {
+    let old = "package = \"app\"\n[dependency.web]\nNetwork = \"host:api.example.com\"\n";
+    let new = "package = \"app\"\n[dependency.web]\nNetwork = \"host:api.example.com,host:evil.example.com\"\n";
+    let diff = nivren::package::authority_diff(old, new);
+    assert!(diff.contains("- Network = \"host:api.example.com\""));
+    assert!(diff.contains("+ Network = \"host:api.example.com,host:evil.example.com\""));
+    assert!(
+        nivren::package::authority_diff(old, old).contains("formatting-only")
+            || nivren::package::authority_diff(old, old).is_empty()
+    );
+}
+
+#[test]
+fn published_diagnostics_carry_stable_catalog_codes() {
+    let cases = [
+        ("stop", "NIV5001"),
+        ("choose 5 { case 1 => \"one\" }", "NIV5003"),
+        (
+            "choose 5 {\n    otherwise => 1\n    case 2 => 2\n}",
+            "NIV5004",
+        ),
+        ("promise never Magic", "NIV5013"),
+        ("promise never Time\nstd.time.sleep(0.1)", "NIV5011"),
+        ("expand missing", "NIV5016"),
+        (
+            "shape Point holds {\n    x is Int\n    y is Int\n}\nkeep Point holds { x set 0 } set Point with { x set 1, y set 2 }",
+            "NIV5017",
+        ),
+    ];
+    for (source, expected) in cases {
+        let errors = nivren::check(source).unwrap_err();
+        assert_eq!(
+            errors[0].code(),
+            Some(expected),
+            "for source: {source} ({})",
+            errors[0].message
+        );
+    }
+}
+
+#[test]
+fn generated_bindings_declare_literal_constants() {
+    let source = r#"
+generate constants {
+    keep limit set choose std.source.binding("answer", 42) {
+        case Ok carries declaration => declaration
+        otherwise as problem => problem
+    }
+    give [limit]
+}
+expand constants
+answer
+"#;
+    assert_eq!(nivren::run(source).unwrap(), Value::Int(42));
+}
+
+#[test]
+fn user_iterate_adopters_drive_each_loops_in_both_engines() {
+    let source = r#"
+shape Counter holds {
+    current is Int
+    limit is Int
+}
+shape CounterStep holds {
+    item is Int
+    next is Counter
+}
+define counter_advance takes { state is Counter } gives CounterStep? {
+    when state.current > state.limit {
+        give none
+    }
+    give CounterStep with {
+        item set state.current
+        next set Counter with { current set state.current + 1, limit set state.limit }
+    }
+}
+protocol Iterate { define advance takes { state is Self } gives CounterStep? }
+adopt Iterate for Counter { advance set counter_advance }
+change total set 0
+each value in Counter with { current set 1, limit set 4 } {
+    change total to total + value
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(10));
+    assert_eq!(eval_vm(source), Value::Int(10));
+}
+
+#[test]
+fn text_holes_may_contain_string_literals_in_both_engines() {
+    let source = r#"
+keep table set std.map.of("kind", "demo")
+text "value {std.map.get(table, "kind") ?? "?"} end"
+"#;
+    let expected = Value::String("value demo end".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn u128_completes_the_unsigned_family_in_both_engines() {
+    let source = r#"
+define compute takes { } gives String or String {
+    keep huge set std.u128.parse("340282366920938463463374607431768211455") or give
+    keep one set std.u128.from_int(1) or give
+    keep smaller set huge - one
+    give ok(std.u128.format(smaller))
+}
+choose compute with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("340282366920938463463374607431768211454".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn edition_five_projects_opt_into_strict_gates() {
+    let manifest = nivren::project::Manifest::parse(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\nedition = \"5\"\n",
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    assert_eq!(manifest.edition, 5);
+    assert!(manifest.source().contains("edition = \"5\""));
+    let default = nivren::project::Manifest::parse(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\n",
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    assert_eq!(default.edition, 4);
+    let error = nivren::project::Manifest::parse(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\nedition = \"3\"\n",
+        std::path::PathBuf::from("."),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown edition"));
+    let program = nivren::parser::parse(
+        nivren::lexer::scan(r#"std.host.invoke("nivren.echo", "{}")"#).unwrap(),
+    )
+    .unwrap();
+    assert!(nivren::typecheck::check_with_edition(&program, 4).is_ok());
+    let errors = nivren::typecheck::check_with_edition(&program, 5).unwrap_err();
+    assert!(errors[0].to_string().contains("trusted"));
+}
+
+#[test]
+fn edition_five_lexis_upgrades_work_in_both_engines() {
+    let source = r#"
+keep million set 1_000_000
+keep mask set 0xFF
+keep bits set 0b1010
+keep exponent set 1.5e3
+keep unicode set "A\u{2192}B"
+keep pem set raw "line\none"
+text "{million} {mask} {bits} {exponent} {unicode} {pem}"
+"#;
+    let expected = Value::String("1000000 255 10 1500 A→B line\\none".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+    let errors = nivren::lexer::scan(r#""bad \q escape""#).unwrap_err();
+    assert!(errors[0].to_string().contains("unknown escape"));
+    assert!(nivren::lexer::scan("1__0").is_err());
+}
+
+#[test]
+fn use_as_names_imported_modules_explicitly() {
+    let directory = module_fixture("use-as");
+    fs::write(
+        directory.join("helper.niv"),
+        "define double takes { value is Int } gives Int { give value * 2 }\nexpose { double }",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("main.niv"),
+        "use \"helper.niv\" as tools\nshow(tools.double with { value set 21 })",
+    )
+    .unwrap();
+    let program = nivren::modules::load(&directory.join("main.niv")).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    nivren::runtime::Interpreter::new()
+        .run_bytecode(&chunk)
+        .unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn declared_gives_may_not_fall_off_the_end() {
+    let errors = nivren::check(
+        r#"
+define lucky takes { value is Int } gives Int {
+    when value > 0 {
+        give value
+    }
+}
+lucky with { value set 1 }
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("without 'give'"));
+    assert!(
+        nivren::check(
+            r#"
+define lucky takes { value is Int } gives Int {
+    when value > 0 {
+        give value
+    } otherwise {
+        give 0
+    }
+}
+lucky with { value set 1 }
+"#,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn expose_marks_declarations_in_place() {
+    let directory = module_fixture("expose-modifier");
+    fs::write(
+        directory.join("helper.niv"),
+        "expose define triple takes { value is Int } gives Int { give value * 3 }\ndefine hidden takes { } gives Int { give 0 }",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("main.niv"),
+        "use \"helper.niv\" as tools\nshow(tools.triple with { value set 14 })",
+    )
+    .unwrap();
+    let program = nivren::modules::load(&directory.join("main.niv")).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let hidden = fs::read_to_string(directory.join("main.niv"))
+        .unwrap()
+        .replace("triple with { value set 14 }", "hidden with { }");
+    fs::write(directory.join("main.niv"), hidden).unwrap();
+    let program = nivren::modules::load(&directory.join("main.niv")).unwrap();
+    assert!(nivren::typecheck::check(&program).is_err());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
+    let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
+    let error = nivren::bytecode::compile(&program).unwrap_err();
+    assert!(error[0].to_string().contains("outside a loop body"));
 }

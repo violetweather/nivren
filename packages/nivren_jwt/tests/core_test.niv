@@ -12,7 +12,7 @@ gives Bool or String
         case Ok carries value => no
         case Err carries problem => yes
     }
-    keep seed set std.encoding.unhex with { source set "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60" } or give
+    keep seed set std.encoding.hex_decode with { source set "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60" } or give
     keep key set std.crypto.key_import with { bytes set seed } or give
     keep public set std.crypto.ed25519_public with { key set key } or give
     keep signed set main.sign_eddsa with { payload_json set "{\"sub\":\"42\"}" key set key } or give

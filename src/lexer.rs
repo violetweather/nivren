@@ -30,6 +30,7 @@ pub enum TokenKind {
     Less,
     LessEqual,
     Identifier(String),
+    DocComment(String),
     Int(i64),
     Float(f64),
     String(String),
@@ -161,12 +162,15 @@ impl Lexer {
             '*' => self.add(TokenKind::Star),
             '%' => self.add(TokenKind::Percent),
             '!' => {
-                let kind = if self.matches('=') {
-                    TokenKind::BangEqual
+                if self.matches('=') {
+                    self.add(TokenKind::BangEqual);
                 } else {
-                    TokenKind::Bang
-                };
-                self.add(kind);
+                    self.errors.push(NivError::new(
+                        "negation is spelled 'not'",
+                        self.line,
+                        self.start_column,
+                    ));
+                }
             }
             '=' => {
                 let kind = if self.matches('=') {
@@ -195,8 +199,13 @@ impl Lexer {
                 self.add(kind);
             }
             '/' if self.matches('/') => {
+                let documentation = self.matches('/');
+                let mut text = String::new();
                 while self.peek() != '\n' && !self.is_at_end() {
-                    self.advance();
+                    text.push(self.advance());
+                }
+                if documentation {
+                    self.add(TokenKind::DocComment(text.trim().to_string()));
                 }
             }
             '/' if self.matches('*') => self.block_comment(),
@@ -220,11 +229,7 @@ impl Lexer {
     fn block_comment(&mut self) {
         let mut depth = 1;
         while depth > 0 && !self.is_at_end() {
-            if self.peek() == '/' && self.peek_next() == '*' {
-                self.advance();
-                self.advance();
-                depth += 1;
-            } else if self.peek() == '*' && self.peek_next() == '/' {
+            if self.peek() == '*' && self.peek_next() == '/' {
                 self.advance();
                 self.advance();
                 depth -= 1;
@@ -246,8 +251,44 @@ impl Lexer {
     }
 
     fn string(&mut self) {
+        // A string directly after the contextual word `text` is a text
+        // literal: quotes inside its `{…}` holes belong to hole expressions
+        // and do not end the literal.
+        let hole_aware = matches!(
+            self.tokens.last(),
+            Some(token) if matches!(&token.kind, TokenKind::Identifier(name) if name == "text")
+        );
+        // A string directly after the contextual word `raw` passes through
+        // verbatim: no escape processing, for embedded regex/JSON/PEM text.
+        let raw = matches!(
+            self.tokens.last(),
+            Some(token) if matches!(&token.kind, TokenKind::Identifier(name) if name == "raw")
+        );
+        if raw {
+            let mut value = String::new();
+            while !self.is_at_end() && self.peek() != '"' {
+                let c = self.advance();
+                if c == '\n' {
+                    self.line += 1;
+                    self.column = 1;
+                }
+                value.push(c);
+            }
+            if self.is_at_end() {
+                self.errors.push(NivError::new(
+                    "unterminated string",
+                    self.line,
+                    self.start_column,
+                ));
+                return;
+            }
+            self.advance();
+            self.add(TokenKind::String(value));
+            return;
+        }
+        let mut depth = 0usize;
         let mut value = String::new();
-        while !self.is_at_end() && self.peek() != '"' {
+        while !(self.is_at_end() || self.peek() == '"' && depth == 0) {
             let c = self.advance();
             if c == '\n' {
                 self.line += 1;
@@ -258,14 +299,72 @@ impl Lexer {
                     break;
                 }
                 let escaped = self.advance();
-                value.push(match escaped {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '"' => '"',
-                    '\\' => '\\',
-                    other => other,
-                });
+                match escaped {
+                    'n' => value.push('\n'),
+                    'r' => value.push('\r'),
+                    't' => value.push('\t'),
+                    '"' => value.push('"'),
+                    '\\' => value.push('\\'),
+                    'u' if self.peek() == '{' => {
+                        self.advance();
+                        let mut digits = String::new();
+                        while self.peek().is_ascii_hexdigit() && digits.len() <= 6 {
+                            digits.push(self.advance());
+                        }
+                        let scalar =
+                            (self.peek() == '}' && !digits.is_empty() && digits.len() <= 6)
+                                .then(|| u32::from_str_radix(&digits, 16).ok())
+                                .flatten()
+                                .and_then(char::from_u32);
+                        match scalar {
+                            Some(scalar) => {
+                                self.advance();
+                                value.push(scalar);
+                            }
+                            None => self.errors.push(NivError::new(
+                                "invalid \\u{…} escape; give 1-6 hex digits naming a Unicode scalar",
+                                self.line,
+                                self.column,
+                            )),
+                        }
+                    }
+                    other => self.errors.push(NivError::new(
+                        format!(
+                            "unknown escape '\\{other}'; use \\n, \\r, \\t, \\\", \\\\, or \\u{{…}}"
+                        ),
+                        self.line,
+                        self.column,
+                    )),
+                }
+            } else if hole_aware && c == '{' {
+                value.push('{');
+                if self.peek() == '{' {
+                    value.push(self.advance());
+                } else {
+                    depth += 1;
+                }
+            } else if hole_aware && c == '}' && depth > 0 {
+                depth -= 1;
+                value.push('}');
+            } else if hole_aware && c == '"' {
+                // A nested string inside a hole passes through verbatim so
+                // the hole's own lexer sees it unchanged.
+                value.push('"');
+                while !self.is_at_end() && self.peek() != '"' {
+                    let nested = self.advance();
+                    if nested == '\n' {
+                        self.line += 1;
+                        self.column = 1;
+                    }
+                    value.push(nested);
+                    if nested == '\\' && !self.is_at_end() {
+                        value.push(self.advance());
+                    }
+                }
+                if !self.is_at_end() {
+                    self.advance();
+                    value.push('"');
+                }
             } else {
                 value.push(c);
             }
@@ -283,17 +382,68 @@ impl Lexer {
     }
 
     fn number(&mut self) {
-        while self.peek().is_ascii_digit() {
+        // Hex and binary literals: `0xFF`, `0b1010`, with `_` separators.
+        if self.chars[self.start] == '0' && matches!(self.peek(), 'x' | 'b') {
+            let radix = if self.peek() == 'x' { 16 } else { 2 };
             self.advance();
-        }
-        if self.peek() == '.' && self.peek_next().is_ascii_digit() {
-            self.advance();
-            while self.peek().is_ascii_digit() {
+            while self.peek().is_ascii_hexdigit() || self.peek() == '_' {
                 self.advance();
             }
+            let digits: String = self.chars[self.start + 2..self.current]
+                .iter()
+                .filter(|c| **c != '_')
+                .collect();
+            match i64::from_str_radix(&digits, radix) {
+                Ok(value) if !digits.is_empty() => self.add(TokenKind::Int(value)),
+                _ => self.errors.push(NivError::new(
+                    "invalid number",
+                    self.line,
+                    self.start_column,
+                )),
+            }
+            return;
         }
-        let text: String = self.chars[self.start..self.current].iter().collect();
-        let kind: Result<TokenKind, ()> = if text.contains('.') {
+        let digits = |lexer: &mut Self| {
+            while lexer.peek().is_ascii_digit() || lexer.peek() == '_' {
+                lexer.advance();
+            }
+        };
+        digits(self);
+        let mut float = false;
+        if self.peek() == '.' && self.peek_next().is_ascii_digit() {
+            float = true;
+            self.advance();
+            digits(self);
+        }
+        // Exponent floats: `1e9`, `2.5e-3`.
+        if matches!(self.peek(), 'e' | 'E')
+            && (self.peek_next().is_ascii_digit()
+                || matches!(self.peek_next(), '+' | '-') && {
+                    self.chars
+                        .get(self.current + 2)
+                        .is_some_and(char::is_ascii_digit)
+                })
+        {
+            float = true;
+            self.advance();
+            if matches!(self.peek(), '+' | '-') {
+                self.advance();
+            }
+            digits(self);
+        }
+        let text: String = self.chars[self.start..self.current]
+            .iter()
+            .filter(|c| **c != '_')
+            .collect();
+        let raw: String = self.chars[self.start..self.current].iter().collect();
+        let separators_valid = !raw.starts_with('_')
+            && !raw.ends_with('_')
+            && !raw.contains("_.")
+            && !raw.contains("._")
+            && !raw.contains("__");
+        let kind: Result<TokenKind, ()> = if !separators_valid {
+            Err(())
+        } else if float {
             text.parse().map(TokenKind::Float).map_err(|_| ())
         } else {
             text.parse().map(TokenKind::Int).map_err(|_| ())
@@ -360,6 +510,7 @@ impl Lexer {
             "in" => TokenKind::In,
             "gives" => TokenKind::Arrow,
             "and" => TokenKind::And,
+            "not" => TokenKind::Bang,
             "or" => TokenKind::Or,
             _ => TokenKind::Identifier(text),
         };

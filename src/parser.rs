@@ -1,5 +1,6 @@
 use crate::ast::{
-    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Span, Stmt, TypeParam, TypeRef,
+    CapabilityNeed, Expr, FieldDef, Literal, MatchArm, Param, Pattern, PromiseClause, Span, Stmt,
+    TextPiece, TypeParam, TypeRef,
 };
 use crate::error::NivError;
 use crate::lexer::{Token, TokenKind};
@@ -14,8 +15,59 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, Vec<NivError>> {
         errors: vec![],
         depth: 0,
         callables: HashMap::new(),
+        pending: vec![],
     }
     .program()
+}
+
+/// Parses one complete type reference from builder-provided text, so
+/// generated declarations flow through the real grammar instead of pasting
+/// unchecked source.
+pub fn parse_type(source: &str) -> Result<TypeRef, NivError> {
+    let tokens = crate::lexer::scan(source).map_err(|mut errors| errors.remove(0))?;
+    let mut parser = Parser {
+        tokens,
+        current: 0,
+        errors: vec![],
+        depth: 0,
+        callables: HashMap::new(),
+        pending: vec![],
+    };
+    let reference = parser.type_ref()?;
+    if parser.is_at_end() {
+        Ok(reference)
+    } else {
+        Err(NivError::new(
+            format!("'{source}' is not a single type"),
+            1,
+            1,
+        ))
+    }
+}
+
+/// Parses one complete expression from builder-provided text, so generated
+/// statement bodies flow through the real grammar (`std.source.give`,
+/// `std.source.when`, `std.source.each`, `std.source.call`).
+pub fn parse_expression(source: &str) -> Result<crate::ast::Expr, NivError> {
+    let tokens = crate::lexer::scan(source).map_err(|mut errors| errors.remove(0))?;
+    let mut parser = Parser {
+        tokens,
+        current: 0,
+        errors: vec![],
+        depth: 0,
+        callables: HashMap::new(),
+        pending: vec![],
+    };
+    let expression = parser.expression()?;
+    if parser.is_at_end() {
+        Ok(expression)
+    } else {
+        Err(NivError::new(
+            format!("'{source}' is not a single expression"),
+            1,
+            1,
+        ))
+    }
 }
 
 struct Parser {
@@ -24,6 +76,9 @@ struct Parser {
     errors: Vec<NivError>,
     depth: usize,
     callables: HashMap<String, Vec<String>>,
+    /// Statements queued behind the one being returned (the `expose`
+    /// declaration modifier emits its export marker here).
+    pending: Vec<Stmt>,
 }
 
 impl Parser {
@@ -31,7 +86,10 @@ impl Parser {
         let mut statements = vec![];
         while !self.is_at_end() {
             match self.declaration() {
-                Ok(statement) => statements.push(statement),
+                Ok(statement) => {
+                    statements.push(statement);
+                    statements.append(&mut self.pending);
+                }
                 Err(error) => {
                     self.errors.push(error);
                     self.synchronize();
@@ -46,6 +104,21 @@ impl Parser {
     }
 
     fn declaration(&mut self) -> Result<Stmt, NivError> {
+        if matches!(&self.peek().kind, TokenKind::DocComment(_)) {
+            let span = Span {
+                line: self.peek().line,
+                column: self.peek().column,
+            };
+            let mut lines = vec![];
+            while let TokenKind::DocComment(text) = &self.peek().kind {
+                lines.push(text.clone());
+                self.advance();
+            }
+            return Ok(Stmt::Doc {
+                text: lines.join("\n"),
+                span,
+            });
+        }
         if self.matches(&[TokenKind::Let]) {
             return self.binding(false);
         }
@@ -88,19 +161,30 @@ impl Parser {
     fn binding(&mut self, mutable: bool) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected a name after binding keyword")?;
-        let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
-        let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+        if self.matches(&[TokenKind::Holds]) {
+            if mutable {
+                return Err(NivError::new(
+                    "'change' binds one name; destructuring patterns use 'keep'",
+                    span.line,
+                    span.column,
+                ));
+            }
+            let pattern = Pattern::Shape(name, self.shape_pattern_fields()?, span);
+            self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
+            let initializer = self.expression()?;
+            self.optional_semicolon();
+            return Ok(Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            });
+        }
+        let annotation = if self.matches(&[TokenKind::Is]) {
             Some(self.type_ref()?)
         } else {
             None
         };
-        if edition_four {
-            if !self.matches(&[TokenKind::Set]) {
-                self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
-            }
-        } else {
-            self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
-        }
+        self.consume(&TokenKind::Set, "this binding states its intent with 'set'")?;
         let initializer = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Let {
@@ -120,22 +204,15 @@ impl Parser {
             self.optional_semicolon();
             return Ok(Stmt::Expression(Expr::Assign(name, Box::new(value), span)));
         }
-        let edition_four = self.check(&TokenKind::Is) || self.check(&TokenKind::Set);
-        let annotation = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+        let annotation = if self.matches(&[TokenKind::Is]) {
             Some(self.type_ref()?)
         } else {
             None
         };
-        if edition_four {
-            if !self.matches(&[TokenKind::Set]) {
-                self.consume(
-                    &TokenKind::Set,
-                    "a mutable binding uses 'set' for its initial value",
-                )?;
-            }
-        } else {
-            self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
-        }
+        self.consume(
+            &TokenKind::Set,
+            "a mutable binding uses 'set' for its initial value",
+        )?;
         let initializer = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Let {
@@ -166,40 +243,9 @@ impl Parser {
                     ty: Some(self.type_ref()?),
                     span: param_span,
                 });
-                self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                self.matches(&[TokenKind::Comma]);
             }
             self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
-        } else if self.check(&TokenKind::LeftParen) {
-            self.consume(
-                &TokenKind::LeftParen,
-                "expected 'takes' or '(' after function name",
-            )?;
-            if !self.check(&TokenKind::RightParen) {
-                loop {
-                    if params.len() >= 255 {
-                        return Err(self.error_here("functions may have at most 255 parameters"));
-                    }
-                    let param_span = Span {
-                        line: self.peek().line,
-                        column: self.peek().column,
-                    };
-                    let param_name = self.consume_identifier("expected parameter name")?;
-                    let ty = if self.matches(&[TokenKind::Colon]) {
-                        Some(self.type_ref()?)
-                    } else {
-                        None
-                    };
-                    params.push(Param {
-                        name: param_name,
-                        ty,
-                        span: param_span,
-                    });
-                    if !self.matches(&[TokenKind::Comma]) {
-                        break;
-                    }
-                }
-            }
-            self.consume(&TokenKind::RightParen, "expected ')' after parameters")?;
         }
         let return_type = if self.matches(&[TokenKind::Arrow]) {
             let value = self.type_ref()?;
@@ -286,7 +332,7 @@ impl Parser {
                 {
                     return Err(self.error_here("duplicate generic type parameter"));
                 }
-                let constraint = if self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+                let constraint = if self.matches(&[TokenKind::Is]) {
                     Some(self.consume_identifier("expected protocol constraint")?)
                 } else {
                     None
@@ -321,7 +367,7 @@ impl Parser {
                 column: self.peek().column,
             };
             let field_name = self.consume_identifier("expected field name")?;
-            if !self.matches(&[TokenKind::Colon, TokenKind::Is]) {
+            if !self.matches(&[TokenKind::Is]) {
                 return Err(self.error_here("a shape field states its type with 'is'"));
             }
             let ty = self.type_ref()?;
@@ -331,7 +377,7 @@ impl Parser {
                 span: field_span,
             });
             if !edition_four
-                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+                && !self.matches(&[TokenKind::Comma])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after shape field"));
@@ -364,10 +410,9 @@ impl Parser {
     fn nominal_type(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected nominal type name")?;
-        if !self.check_identifier_value("from") {
-            return Err(self.error_here("a nominal type names its representation with 'from'"));
+        if !self.matches(&[TokenKind::Is]) {
+            return Err(self.error_here("a nominal type names its representation with 'is'"));
         }
-        self.advance();
         let representation = self.type_ref()?;
         self.optional_semicolon();
         self.callables.insert(name.clone(), vec!["value".into()]);
@@ -385,12 +430,20 @@ impl Parser {
     }
 
     fn derive_list(&mut self) -> Result<Vec<String>, NivError> {
-        if !self.matches(&[TokenKind::With]) {
+        // `derives Json, Compare` — `with` is reserved for labeled values
+        // and preparation; derive lists own their word (ledger row 11).
+        if !matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "derives") {
+            if self.check(&TokenKind::With) {
+                return Err(self.error_here(
+                    "a derive list opens with 'derives'; 'with' introduces labeled values",
+                ));
+            }
             return Ok(vec![]);
         }
+        self.advance();
         let mut derives = vec![];
         loop {
-            let derive = self.consume_identifier("expected a derive name after 'with'")?;
+            let derive = self.consume_identifier("expected a derive name after 'derives'")?;
             const BUILT_INS: &[&str] = &[
                 "Json",
                 "Compare",
@@ -454,7 +507,7 @@ impl Parser {
             });
             if !edition_four
                 && !uses_case
-                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
+                && !self.matches(&[TokenKind::Comma])
                 && !self.check(&TokenKind::RightBrace)
             {
                 return Err(self.error_here("expected ',' or '}' after choice variant"));
@@ -501,40 +554,9 @@ impl Parser {
                             ty: Some(self.type_ref()?),
                             span: parameter_span,
                         });
-                        self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                        self.matches(&[TokenKind::Comma]);
                     }
                     self.consume(&TokenKind::RightBrace, "expected '}' after protocol inputs")?;
-                } else {
-                    self.consume(
-                        &TokenKind::LeftParen,
-                        "expected 'takes' or '(' after protocol member name",
-                    )?;
-                    if !self.check(&TokenKind::RightParen) {
-                        loop {
-                            let parameter_span = Span {
-                                line: self.peek().line,
-                                column: self.peek().column,
-                            };
-                            let parameter_name =
-                                self.consume_identifier("expected protocol parameter name")?;
-                            self.consume(
-                                &TokenKind::Colon,
-                                "protocol parameters require an explicit type",
-                            )?;
-                            params.push(Param {
-                                name: parameter_name,
-                                ty: Some(self.type_ref()?),
-                                span: parameter_span,
-                            });
-                            if !self.matches(&[TokenKind::Comma]) {
-                                break;
-                            }
-                        }
-                    }
-                    self.consume(
-                        &TokenKind::RightParen,
-                        "expected ')' after protocol parameters",
-                    )?;
                 }
                 self.consume(&TokenKind::Arrow, "protocol members require a 'gives' type")?;
                 let value_type = self.type_ref()?;
@@ -593,7 +615,7 @@ impl Parser {
                     column: self.peek().column,
                 };
                 let member = self.consume_identifier("expected protocol member name")?;
-                if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+                if !self.matches(&[TokenKind::Set]) {
                     return Err(self.error_here("a protocol adoption maps a member with 'set'"));
                 }
                 let implementation =
@@ -603,9 +625,7 @@ impl Parser {
                     implementation,
                     span: member_span,
                 });
-                if !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
-                    && !self.check(&TokenKind::RightBrace)
-                {
+                if !self.matches(&[TokenKind::Comma]) && !self.check(&TokenKind::RightBrace) {
                     return Err(self.error_here("expected ',' or '}' after protocol mapping"));
                 }
             }
@@ -629,12 +649,35 @@ impl Parser {
             TokenKind::String(path) => path,
             _ => return Err(self.error_here("expected quoted use path")),
         };
+        let alias = if self.matches(&[TokenKind::As]) {
+            Some(self.consume_identifier("expected a namespace name after 'as'")?)
+        } else {
+            None
+        };
         self.optional_semicolon();
-        Ok(Stmt::Import { path, span })
+        Ok(Stmt::Import { path, alias, span })
     }
 
     fn export_declaration(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
+        // Modifier form: `expose define f …` exposes the declaration it
+        // precedes (ledger row 19); the block list stays for re-exporting
+        // generated declarations.
+        if !self.check(&TokenKind::LeftBrace) {
+            let declaration = self.declaration()?;
+            let name = declared_statement_name(&declaration).ok_or_else(|| {
+                NivError::new(
+                    "expose marks a named declaration or lists names in braces",
+                    span.line,
+                    span.column,
+                )
+            })?;
+            self.pending.push(Stmt::Export {
+                names: vec![name],
+                span,
+            });
+            return Ok(declaration);
+        }
         self.consume(&TokenKind::LeftBrace, "expected '{' after expose")?;
         let mut names = vec![];
         if !self.check(&TokenKind::RightBrace) {
@@ -744,9 +787,220 @@ impl Parser {
             let span = self.previous_span();
             return Ok(Stmt::Block(self.block_contents()?, span));
         }
+        if let Some(statement) = self.promise_statement()? {
+            return Ok(statement);
+        }
+        if let Some(statement) = self.sample_statement()? {
+            return Ok(statement);
+        }
+        if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "generate")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+        {
+            self.advance();
+            let span = self.previous_span();
+            let name = self.consume_identifier("expected a generator name")?;
+            let mut params = vec![];
+            if self.matches(&[TokenKind::Takes]) {
+                self.consume(&TokenKind::LeftBrace, "expected '{' after 'takes'")?;
+                while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+                    let param_span = Span {
+                        line: self.peek().line,
+                        column: self.peek().column,
+                    };
+                    let param_name = self.consume_identifier("expected an input name")?;
+                    self.consume(&TokenKind::Is, "an input states its type with 'is'")?;
+                    params.push(Param {
+                        name: param_name,
+                        ty: Some(self.type_ref()?),
+                        span: param_span,
+                    });
+                    self.matches(&[TokenKind::Comma]);
+                }
+                self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
+            }
+            self.consume(
+                &TokenKind::LeftBrace,
+                "expected '{' before the generator body",
+            )?;
+            let body = self.block_contents()?;
+            self.optional_semicolon();
+            return Ok(Stmt::Generator {
+                name,
+                params,
+                body,
+                span,
+            });
+        }
+        if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "expand")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+        {
+            self.advance();
+            let span = self.previous_span();
+            let name = self.consume_identifier("expected a generator name after 'expand'")?;
+            let (labels, arguments) = if self.matches(&[TokenKind::With]) {
+                self.intent_arguments()?
+            } else {
+                (vec![], vec![])
+            };
+            self.optional_semicolon();
+            return Ok(Stmt::Expand {
+                name,
+                labels,
+                arguments,
+                span,
+            });
+        }
+        if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "trusted")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
+        {
+            self.advance();
+            let span = self.previous_span();
+            let TokenKind::String(reason) = self.advance().kind.clone() else {
+                unreachable!("the peeked token is a string");
+            };
+            self.optional_semicolon();
+            return Ok(Stmt::Trusted { reason, span });
+        }
+        if let Some(statement) = self.loop_exit_statement() {
+            return Ok(statement);
+        }
         let expression = self.expression()?;
         self.optional_semicolon();
         Ok(Stmt::Expression(expression))
+    }
+
+    /// `promise` is a contextual statement keyword: it introduces clauses
+    /// only when followed by `never` or a capability clause.
+    fn promise_statement(&mut self) -> Result<Option<Stmt>, NivError> {
+        let TokenKind::Identifier(word) = &self.peek().kind else {
+            return Ok(None);
+        };
+        if word != "promise"
+            || !matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+        {
+            return Ok(None);
+        }
+        self.advance();
+        let span = self.previous_span();
+        let mut clauses = vec![];
+        loop {
+            let clause_span = Span {
+                line: self.peek().line,
+                column: self.peek().column,
+            };
+            let first = self.consume_identifier("expected 'never' or a capability name")?;
+            if first == "never" {
+                let capability =
+                    self.consume_identifier("expected a capability name after 'never'")?;
+                clauses.push(PromiseClause {
+                    capability,
+                    never: true,
+                    boundaries: vec![],
+                    span: clause_span,
+                });
+            } else {
+                let only = self.consume_identifier("a scoped promise continues with 'only'")?;
+                if only != "only" {
+                    return Err(NivError::new(
+                        "a scoped promise reads 'Capability only within \"boundary\"'",
+                        clause_span.line,
+                        clause_span.column,
+                    ));
+                }
+                self.consume(&TokenKind::In, "expected 'within' after 'only'")?;
+                let mut boundaries = vec![];
+                loop {
+                    let TokenKind::String(boundary) = self.peek().kind.clone() else {
+                        return Err(self.error_here("expected a boundary string after 'within'"));
+                    };
+                    self.advance();
+                    boundaries.push(boundary);
+                    if self.check(&TokenKind::Comma)
+                        && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
+                    {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+                clauses.push(PromiseClause {
+                    capability: first,
+                    never: false,
+                    boundaries,
+                    span: clause_span,
+                });
+            }
+            if self.check(&TokenKind::Comma)
+                && matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+            {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.optional_semicolon();
+        Ok(Some(Stmt::Promise { clauses, span }))
+    }
+
+    /// `sample` is a contextual statement keyword: it introduces a checked
+    /// example only when followed by its title string.
+    fn sample_statement(&mut self) -> Result<Option<Stmt>, NivError> {
+        let TokenKind::Identifier(word) = &self.peek().kind else {
+            return Ok(None);
+        };
+        if word != "sample" || !matches!(self.tokens[self.current + 1].kind, TokenKind::String(_)) {
+            return Ok(None);
+        }
+        self.advance();
+        let span = self.previous_span();
+        let TokenKind::String(title) = self.advance().kind.clone() else {
+            unreachable!("the peeked token is a string");
+        };
+        self.consume(&TokenKind::LeftBrace, "expected '{' before the sample body")?;
+        let body = self.block_contents()?;
+        let shows = if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "shows")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
+        {
+            self.advance();
+            let TokenKind::String(expected) = self.advance().kind.clone() else {
+                unreachable!("the peeked token is a string");
+            };
+            Some(expected)
+        } else {
+            None
+        };
+        self.optional_semicolon();
+        Ok(Some(Stmt::Sample {
+            title,
+            body,
+            shows,
+            span,
+        }))
+    }
+
+    /// `stop` and `skip` are contextual statement keywords: they end or
+    /// advance the nearest loop only when the word stands alone, so member
+    /// access such as `std.iter.skip` keeps its ordinary meaning.
+    fn loop_exit_statement(&mut self) -> Option<Stmt> {
+        let TokenKind::Identifier(word) = &self.peek().kind else {
+            return None;
+        };
+        let stop = match word.as_str() {
+            "stop" => true,
+            "skip" => false,
+            _ => return None,
+        };
+        if expression_continues(&self.tokens[self.current + 1].kind) {
+            return None;
+        }
+        self.advance();
+        let span = self.previous_span();
+        self.optional_semicolon();
+        Some(if stop {
+            Stmt::Stop(span)
+        } else {
+            Stmt::Skip(span)
+        })
     }
 
     fn prepare_statement(&mut self) -> Result<Stmt, NivError> {
@@ -789,7 +1043,7 @@ impl Parser {
             self.consume(&TokenKind::Set, "a labeled value uses 'set'")?;
             labels.push(name);
             arguments.push(self.expression()?);
-            self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+            self.matches(&[TokenKind::Comma]);
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after labeled values")?;
         Ok((labels, arguments))
@@ -825,13 +1079,12 @@ impl Parser {
 
     fn print_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
-        let value = if self.matches(&[TokenKind::LeftParen]) {
-            let expression = self.expression()?;
-            self.consume(&TokenKind::RightParen, "expected ')' after show value")?;
-            expression
-        } else {
-            self.expression()?
-        };
+        self.consume(
+            &TokenKind::LeftParen,
+            "show writes one value with 'show(value)'",
+        )?;
+        let value = self.expression()?;
+        self.consume(&TokenKind::RightParen, "expected ')' after show value")?;
         self.optional_semicolon();
         Ok(Stmt::Print(value, span))
     }
@@ -850,17 +1103,35 @@ impl Parser {
     fn if_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let condition = self.control_condition("when")?;
+        let patterns = if self.matches(&[TokenKind::Carries]) {
+            let mut patterns = vec![self.arm_pattern()?];
+            while self.matches(&[TokenKind::Or]) {
+                patterns.push(self.arm_pattern()?);
+            }
+            Some(patterns)
+        } else {
+            None
+        };
         let then_branch = Box::new(self.statement()?);
         let else_branch = if self.matches(&[TokenKind::Else]) {
             Some(Box::new(self.statement()?))
         } else {
             None
         };
-        Ok(Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-            span,
+        Ok(match patterns {
+            Some(patterns) => Stmt::IfCarries {
+                subject: condition,
+                patterns,
+                then_branch,
+                else_branch,
+                span,
+            },
+            None => Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            },
         })
     }
 
@@ -880,7 +1151,16 @@ impl Parser {
         let span = self.previous_span();
         let parenthesized = self.matches(&[TokenKind::LeftParen]);
         let name = self.consume_identifier("expected iteration binding")?;
-        self.consume(&TokenKind::In, "expected 'within' after iteration binding")?;
+        let pattern = if self.matches(&[TokenKind::Holds]) {
+            Some(Pattern::Shape(
+                name.clone(),
+                self.shape_pattern_fields()?,
+                span,
+            ))
+        } else {
+            None
+        };
+        self.consume(&TokenKind::In, "expected 'in' after iteration binding")?;
         let iterable = self.expression()?;
         if parenthesized {
             self.consume(&TokenKind::RightParen, "expected ')' after iterable")?;
@@ -888,6 +1168,7 @@ impl Parser {
         let body = Box::new(self.statement()?);
         Ok(Stmt::For {
             name,
+            pattern,
             iterable,
             body,
             span,
@@ -897,7 +1178,7 @@ impl Parser {
     fn using_statement(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
         let name = self.consume_identifier("expected resource name after using")?;
-        if !self.matches(&[TokenKind::Set, TokenKind::Equal]) {
+        if !self.matches(&[TokenKind::Set]) {
             return Err(self.error_here("a scoped resource uses 'set'"));
         }
         let resource = self.expression()?;
@@ -1139,7 +1420,25 @@ impl Parser {
                 expression = Expr::Index(Box::new(expression), Box::new(index), span);
             } else if self.matches(&[TokenKind::Dot]) {
                 let span = self.previous_span();
-                let name = self.consume_identifier("expected field name after '.'")?;
+                // Member names may spell word keywords such as `repeat`,
+                // `shape`, or `choice` (`std.text.repeat`, `std.source.shape`);
+                // after '.', a word is always a name.
+                let keyword_name = match self.peek().kind {
+                    TokenKind::While => Some("repeat"),
+                    TokenKind::Record => Some("shape"),
+                    TokenKind::Enum => Some("choice"),
+                    TokenKind::If => Some("when"),
+                    TokenKind::Return => Some("give"),
+                    TokenKind::For => Some("each"),
+                    _ => None,
+                };
+                let name = match keyword_name {
+                    Some(name) => {
+                        self.advance();
+                        name.to_string()
+                    }
+                    None => self.consume_identifier("expected field name after '.'")?,
+                };
                 expression = Expr::Get(Box::new(expression), name, span);
             } else {
                 break;
@@ -1161,7 +1460,21 @@ impl Parser {
             TokenKind::Int(value) => Ok(Expr::Literal(Literal::Int(value), span)),
             TokenKind::Float(value) => Ok(Expr::Literal(Literal::Float(value), span)),
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value), span)),
-            TokenKind::Identifier(name) => Ok(Expr::Variable(name, span)),
+            TokenKind::Identifier(name) => {
+                if name == "raw" && matches!(self.peek().kind, TokenKind::String(_)) {
+                    let TokenKind::String(value) = self.advance().kind.clone() else {
+                        unreachable!("the peeked token is a string");
+                    };
+                    return Ok(Expr::Literal(Literal::String(value), span));
+                }
+                if name == "text" && matches!(self.peek().kind, TokenKind::String(_)) {
+                    let TokenKind::String(raw) = self.advance().kind.clone() else {
+                        unreachable!("the peeked token is a string");
+                    };
+                    return self.text_literal(&raw, span);
+                }
+                Ok(Expr::Variable(name, span))
+            }
             TokenKind::Match => self.match_expression(span),
             TokenKind::LeftBracket => {
                 let mut values = vec![];
@@ -1185,6 +1498,118 @@ impl Parser {
         }
     }
 
+    /// Splits a `text "…"` literal into fixed pieces and hole expressions.
+    /// `{` and `}` delimit one hole; `{{` and `}}` spell literal braces.
+    fn text_literal(&mut self, raw: &str, span: Span) -> Result<Expr, NivError> {
+        let mut pieces = vec![];
+        let mut literal = String::new();
+        let characters = raw.chars().collect::<Vec<_>>();
+        let mut index = 0;
+        while index < characters.len() {
+            let character = characters[index];
+            let next = characters.get(index + 1).copied();
+            match character {
+                '{' if next == Some('{') => {
+                    literal.push('{');
+                    index += 2;
+                }
+                '}' if next == Some('}') => {
+                    literal.push('}');
+                    index += 2;
+                }
+                '}' => {
+                    return Err(NivError::new(
+                        "a text literal found '}' without a hole; spell a literal brace '}}'",
+                        span.line,
+                        span.column,
+                    ));
+                }
+                '{' => {
+                    if !literal.is_empty() {
+                        pieces.push(TextPiece::Literal(std::mem::take(&mut literal)));
+                    }
+                    let mut depth = 1usize;
+                    let mut in_string = false;
+                    let mut escaped = false;
+                    let mut hole = String::new();
+                    index += 1;
+                    while index < characters.len() {
+                        let character = characters[index];
+                        if in_string {
+                            if escaped {
+                                escaped = false;
+                            } else if character == '\\' {
+                                escaped = true;
+                            } else if character == '"' {
+                                in_string = false;
+                            }
+                        } else if character == '"' {
+                            in_string = true;
+                        } else if character == '{' {
+                            depth += 1;
+                        } else if character == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        hole.push(character);
+                        index += 1;
+                    }
+                    if depth != 0 {
+                        return Err(NivError::new(
+                            "a text hole is missing its closing '}'",
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    index += 1;
+                    pieces.push(TextPiece::Hole(self.text_hole(&hole, span)?));
+                }
+                other => {
+                    literal.push(other);
+                    index += 1;
+                }
+            }
+        }
+        if !literal.is_empty() {
+            pieces.push(TextPiece::Literal(literal));
+        }
+        Ok(Expr::Text(pieces, span))
+    }
+
+    fn text_hole(&mut self, source: &str, span: Span) -> Result<Expr, NivError> {
+        if source.trim().is_empty() {
+            return Err(NivError::new(
+                "a text hole needs an expression between '{' and '}'",
+                span.line,
+                span.column,
+            ));
+        }
+        let first_error = |errors: Vec<NivError>| {
+            let detail = errors
+                .into_iter()
+                .next()
+                .map(|error| error.message)
+                .unwrap_or_default();
+            NivError::new(
+                format!("a text hole holds an invalid expression: {detail}"),
+                span.line,
+                span.column,
+            )
+        };
+        let tokens = crate::lexer::scan(source).map_err(first_error)?;
+        let mut program = parse(tokens).map_err(first_error)?;
+        match (program.pop(), program.pop()) {
+            (Some(Stmt::Expression(expression)), None) => Ok(expression),
+            _ => Err(NivError::new(
+                "a text hole holds exactly one expression",
+                span.line,
+                span.column,
+            )),
+        }
+    }
+
     fn match_expression(&mut self, span: Span) -> Result<Expr, NivError> {
         let subject = if self.matches(&[TokenKind::LeftParen]) {
             let value = self.expression()?;
@@ -1200,34 +1625,117 @@ impl Parser {
                 line: self.peek().line,
                 column: self.peek().column,
             };
-            let edition_four = self.matches(&[TokenKind::Case]);
-            let variant = self.consume_identifier("expected case name")?;
-            let binding = if self.matches(&[TokenKind::Carries]) {
-                Some(self.consume_identifier("expected payload binding after 'carries'")?)
-            } else if self.matches(&[TokenKind::LeftParen]) {
-                let binding = self.consume_identifier("expected payload binding")?;
-                self.consume(&TokenKind::RightParen, "expected ')' after payload binding")?;
-                Some(binding)
+            if self.matches(&[TokenKind::Else]) {
+                let binding = if self.matches(&[TokenKind::As]) {
+                    Some(self.consume_identifier("expected a binding name after 'as'")?)
+                } else {
+                    None
+                };
+                self.consume(&TokenKind::FatArrow, "expected '=>' after otherwise")?;
+                let value = self.expression()?;
+                arms.push(MatchArm {
+                    patterns: vec![match binding {
+                        Some(name) => Pattern::Binding(name, arm_span),
+                        None => Pattern::Any(arm_span),
+                    }],
+                    guard: None,
+                    value,
+                    span: arm_span,
+                });
+                self.matches(&[TokenKind::Comma]);
+                continue;
+            }
+            self.consume(
+                &TokenKind::Case,
+                "a choose arm opens with 'case' or 'otherwise'",
+            )?;
+            let mut patterns = vec![self.arm_pattern()?];
+            while self.matches(&[TokenKind::Or]) {
+                patterns.push(self.arm_pattern()?);
+            }
+            let guard = if self.matches(&[TokenKind::If]) {
+                Some(self.expression()?)
             } else {
                 None
             };
             self.consume(&TokenKind::FatArrow, "expected '=>' after choice arm")?;
             let value = self.expression()?;
             arms.push(MatchArm {
-                variant,
-                binding,
+                patterns,
+                guard,
                 value,
                 span: arm_span,
             });
-            if !edition_four
-                && !self.matches(&[TokenKind::Comma, TokenKind::Semicolon])
-                && !self.check(&TokenKind::RightBrace)
-            {
-                return Err(self.error_here("expected ',' or '}' after choose arm"));
-            }
+            self.matches(&[TokenKind::Comma]);
         }
         self.consume(&TokenKind::RightBrace, "expected '}' after choose")?;
         Ok(Expr::Match(Box::new(subject), arms, span))
+    }
+
+    fn shape_pattern_fields(&mut self) -> Result<Vec<(String, Pattern)>, NivError> {
+        self.consume(&TokenKind::LeftBrace, "expected '{' after 'holds'")?;
+        let mut fields = vec![];
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            let field = self.consume_identifier("expected a field name")?;
+            self.consume(&TokenKind::Set, "a field pattern uses 'set'")?;
+            fields.push((field, self.arm_pattern()?));
+            self.matches(&[TokenKind::Comma]);
+        }
+        self.consume(&TokenKind::RightBrace, "expected '}' after field patterns")?;
+        Ok(fields)
+    }
+
+    fn arm_pattern(&mut self) -> Result<Pattern, NivError> {
+        let token = self.peek().clone();
+        let span = Span {
+            line: token.line,
+            column: token.column,
+        };
+        match token.kind {
+            TokenKind::Int(value) => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Int(value), span))
+            }
+            TokenKind::Float(value) => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Float(value), span))
+            }
+            TokenKind::String(value) => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::String(value), span))
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Bool(true), span))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Bool(false), span))
+            }
+            TokenKind::Null => {
+                self.advance();
+                Ok(Pattern::Literal(Literal::Null, span))
+            }
+            TokenKind::Identifier(name) => {
+                self.advance();
+                if name == "any" {
+                    return Ok(Pattern::Any(span));
+                }
+                if self.matches(&[TokenKind::Carries]) {
+                    let inner = self.arm_pattern()?;
+                    return Ok(Pattern::Carries(name, Box::new(inner), span));
+                }
+                if self.matches(&[TokenKind::Holds]) {
+                    return Ok(Pattern::Shape(name, self.shape_pattern_fields()?, span));
+                }
+                Ok(Pattern::Name(name, span))
+            }
+            _ => Err(NivError::new(
+                "expected a pattern: a case, a literal, a shape, a binding, or 'any'",
+                span.line,
+                span.column,
+            )),
+        }
     }
 
     fn matches(&mut self, kinds: &[TokenKind]) -> bool {
@@ -1433,4 +1941,50 @@ fn task_call(operation: &str, argument: Expr, span: Span) -> Expr {
 
 fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
+}
+
+/// Reports whether a token after an identifier keeps that identifier inside
+/// an ordinary expression, which disqualifies a contextual `stop`/`skip`.
+fn expression_continues(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::LeftParen
+            | TokenKind::LeftBracket
+            | TokenKind::Dot
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Question
+            | TokenKind::QuestionQuestion
+            | TokenKind::Equal
+            | TokenKind::FatArrow
+            | TokenKind::Through
+            | TokenKind::With
+            | TokenKind::Set
+            | TokenKind::To
+            | TokenKind::Is
+            | TokenKind::Colon
+            | TokenKind::Arrow
+    )
+}
+
+fn declared_statement_name(statement: &Stmt) -> Option<String> {
+    match statement {
+        Stmt::Function { name, .. }
+        | Stmt::Record { name, .. }
+        | Stmt::Enum { name, .. }
+        | Stmt::Protocol { name, .. }
+        | Stmt::Let { name, .. } => Some(name.clone()),
+        _ => None,
+    }
 }

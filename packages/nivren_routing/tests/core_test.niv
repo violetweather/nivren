@@ -13,7 +13,7 @@ gives Bool or String
     keep matched set selected ?? main.RouteMatch with {
         route set health
         parameters set std.map.remove with {
-            map set std.map.single with { key set "__empty__" value set "" }
+            map set std.map.of with { key set "__empty__" value set "" }
             key set "__empty__"
         }
     }
@@ -22,7 +22,7 @@ gives Bool or String
     keep request set main.RequestContext with {
         method set "POST"
         path set "/events"
-        headers set std.map.single with { key set "authorization" value set "Bearer token" }
+        headers set std.map.of with { key set "authorization" value set "Bearer token" }
         body set "{}"
     }
     keep policy set main.RequestPolicy with { maximum_body set 1024 required_headers set ["authorization"] bearer set yes }

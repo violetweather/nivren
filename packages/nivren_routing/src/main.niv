@@ -2,31 +2,31 @@ shape Route holds {
     method is String
     path is String
     name is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape RouteMatch holds {
     route is Route
     parameters is Map<String, String>
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape RequestContext holds {
     method is String
     path is String
     headers is Map<String, String>
     body is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape RequestPolicy holds {
     maximum_body is Int
     required_headers is [String]
     bearer is Bool
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape Response holds {
     status is Int
     headers is Map<String, String>
     body is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 define route
 takes {
@@ -87,7 +87,7 @@ gives maybe RouteMatch or String
         give ok(none)
     }
     change parameters set std.map.remove with {
-        map set std.map.single with { key set "__empty__" value set "" }
+        map set std.map.of with { key set "__empty__" value set "" }
         key set "__empty__"
     }
     change index set 0
@@ -141,16 +141,16 @@ gives RequestContext or String
         give err("request body exceeds its policy ceiling")
     }
     each header in policy.required_headers {
-        when !std.map.contains with { map set request.headers key set header } {
+        when not std.map.contains with { map set request.headers key set header } {
             give err("request is missing required header " + header)
         }
     }
     when policy.bearer {
-        when !std.map.contains with { map set request.headers key set "authorization" } {
+        when not std.map.contains with { map set request.headers key set "authorization" } {
             give err("request requires bearer authorization")
         }
         keep authorization set std.map.get with { map set request.headers key set "authorization" }
-        when !std.text.starts_with with { value set authorization prefix set "Bearer " } {
+        when not std.text.starts_with with { value set authorization prefix set "Bearer " } {
             give err("request bearer authorization is malformed")
         }
     }
@@ -172,7 +172,7 @@ gives Response or String
     }
     give ok(Response with {
         status set status
-        headers set std.map.single with { key set "content-type" value set "text/plain; charset=utf-8" }
+        headers set std.map.of with { key set "content-type" value set "text/plain; charset=utf-8" }
         body set body
     })
 }

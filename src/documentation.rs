@@ -19,11 +19,26 @@ fn document_entry_exports(statements: &[Stmt], output: &mut String) {
     };
     output.push_str("\n## Public API\n\n");
     for export in exports {
-        if let Some(declaration) = statements
+        if let Some(position) = statements
             .iter()
-            .find(|item| declared_name(item) == Some(export))
+            .position(|item| declared_name(item) == Some(export))
         {
-            output.push_str(&format!("- {}\n", declaration_signature(declaration)));
+            output.push_str(&format!(
+                "- {}\n",
+                declaration_signature(&statements[position])
+            ));
+            push_doc_text(statements, position, output);
+        }
+    }
+}
+
+fn push_doc_text(statements: &[Stmt], position: usize, output: &mut String) {
+    if position == 0 {
+        return;
+    }
+    if let Stmt::Doc { text, .. } = &statements[position - 1] {
+        for line in text.lines() {
+            output.push_str(&format!("  {line}\n"));
         }
     }
 }
@@ -39,10 +54,12 @@ fn document_modules(statements: &[Stmt], output: &mut String) {
         {
             output.push_str(&format!("\n## Module `{name}`\n\n"));
             for export in exports {
-                if let Some(declaration) =
-                    body.iter().find(|item| declared_name(item) == Some(export))
+                if let Some(position) = body
+                    .iter()
+                    .position(|item| declared_name(item) == Some(export))
                 {
-                    output.push_str(&format!("- {}\n", declaration_signature(declaration)));
+                    output.push_str(&format!("- {}\n", declaration_signature(&body[position])));
+                    push_doc_text(body, position, output);
                 }
             }
             document_modules(body, output);
@@ -88,7 +105,7 @@ fn declaration_signature(statement: &Stmt) -> String {
                         .iter()
                         .map(|parameter| parameter.constraint.as_ref().map_or_else(
                             || parameter.name.clone(),
-                            |constraint| format!("{}: {constraint}", parameter.name)
+                            |constraint| format!("{} is {constraint}", parameter.name)
                         ))
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -116,7 +133,7 @@ fn declaration_signature(statement: &Stmt) -> String {
             } else {
                 format!(" needs {}", needs.join(", "))
             };
-            format!("`define {name}{generics}({parameters}){result}{capabilities}`")
+            format!("`define {name}{generics} takes {{ {parameters} }}{result}{capabilities}`")
         }
         Stmt::Record {
             name,
@@ -130,7 +147,7 @@ fn declaration_signature(statement: &Stmt) -> String {
             let derives = if derives.is_empty() {
                 String::new()
             } else {
-                format!(" with {}", derives.join(", "))
+                format!(" derives {}", derives.join(", "))
             };
             format!("`shape {name}{generics} {{ {fields} }}{derives}`")
         }
@@ -197,7 +214,7 @@ fn generic_parameters(parameters: &[crate::ast::TypeParam]) -> String {
                 .iter()
                 .map(|parameter| parameter.constraint.as_ref().map_or_else(
                     || parameter.name.clone(),
-                    |constraint| format!("{}: {constraint}", parameter.name)
+                    |constraint| format!("{} is {constraint}", parameter.name)
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -208,12 +225,12 @@ fn generic_parameters(parameters: &[crate::ast::TypeParam]) -> String {
 fn param_name(param: &Param) -> String {
     param.ty.as_ref().map_or_else(
         || param.name.clone(),
-        |ty| format!("{}: {}", param.name, type_name(ty)),
+        |ty| format!("{} is {}", param.name, type_name(ty)),
     )
 }
 
 fn field_name(field: &FieldDef) -> String {
-    format!("{}: {}", field.name, type_name(&field.ty))
+    format!("{} is {}", field.name, type_name(&field.ty))
 }
 
 fn type_name(reference: &TypeRef) -> String {

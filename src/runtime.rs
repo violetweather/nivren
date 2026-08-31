@@ -2,7 +2,7 @@
 use rustls::pki_types::pem::PemObject;
 #[cfg(feature = "host-runtime")]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -38,7 +38,7 @@ use nivren_jit::{CallError as JitCallError, CompiledFunction, CompiledTrace};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::ast::{Expr, Literal, Span, Stmt, TypeRef};
+use crate::ast::{Expr, Literal, Pattern, Span, Stmt, TextPiece, TypeRef};
 use crate::bytecode::{BytecodeArm, Chunk, Op};
 use crate::error::NivError;
 use crate::fixed::{FixedInt, FixedKind};
@@ -179,6 +179,11 @@ macro_rules! evaluate_part {
 #[derive(Clone)]
 pub enum Value {
     Int(i64),
+    UInt(u64),
+    U128(u128),
+    /// A checked declaration built by `std.source` inside a generator; the
+    /// expansion pass splices the carried statement into the module.
+    SourceDeclaration(Arc<Stmt>),
     Float(f64),
     String(String),
     Bytes(Arc<Vec<u8>>),
@@ -227,12 +232,15 @@ impl Value {
     pub fn type_name(&self) -> &str {
         match self {
             Self::Int(_) => "Int",
+            Self::UInt(_) => "UInt",
+            Self::U128(_) => "U128",
+            Self::SourceDeclaration(_) => "source.Declaration",
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::Bytes(_) => "Bytes",
             Self::SecretKey(_) => "SecretKey",
             Self::Bool(_) => "Bool",
-            Self::Null => "Null",
+            Self::Null => "Nothing",
             Self::Function(_) | Self::Native(_) => "Function",
             Self::Array(_) => "Array",
             Self::Map(_) => "Map",
@@ -274,6 +282,9 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::UInt(a), Self::UInt(b)) => a == b,
+            (Self::U128(a), Self::U128(b)) => a == b,
+            (Self::SourceDeclaration(a), Self::SourceDeclaration(b)) => Arc::ptr_eq(a, b),
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
@@ -334,6 +345,9 @@ impl Display for Value {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Int(number) => write!(formatter, "{number}"),
+            Self::UInt(number) => write!(formatter, "{number}"),
+            Self::U128(number) => write!(formatter, "{number}"),
+            Self::SourceDeclaration(_) => write!(formatter, "<source declaration>"),
             Self::Float(number) => write!(formatter, "{number}"),
             Self::String(string) => write!(formatter, "{string}"),
             Self::Bytes(bytes) => write!(formatter, "<{} bytes>", bytes.len()),
@@ -530,6 +544,26 @@ pub struct RecordValue {
     type_name: String,
     fields: Vec<(String, Value)>,
     field_indices: Arc<HashMap<String, usize>>,
+}
+
+/// Builds a value of one of the builtin shapes (`Response`, `Request`) that
+/// the standard library gives back in place of stringly-keyed maps.
+fn builtin_record(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
+    let field_indices = Arc::new(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.to_string(), index))
+            .collect::<HashMap<_, _>>(),
+    );
+    Value::Record(Arc::new(RecordValue {
+        type_name: type_name.to_string(),
+        fields: fields
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect(),
+        field_indices,
+    }))
 }
 
 pub enum ManagedFile {
@@ -947,6 +981,21 @@ pub struct Interpreter {
     event_loop: Arc<RuntimeEventLoop>,
     protocol_dispatch: HashMap<(String, String, String), Value>,
     fast_frames: Vec<FastFrame>,
+    /// Whether `sample` declarations execute; `niv test` turns this on and
+    /// every other entry point leaves samples quiet.
+    run_samples: bool,
+    /// When present, every authorized effect appends an
+    /// `org.nivren.effects.v1` record after it completes.
+    effect_recorder: Option<Arc<Mutex<Vec<EffectRecord>>>>,
+    /// When present, authorized effects are satisfied from the recorded
+    /// trace instead of touching the outside world.
+    effect_replay: Option<Arc<Mutex<VecDeque<EffectRecord>>>>,
+    /// Promises active in the running dynamic extent; effects check them
+    /// again at the capability gate so even unchecked bytecode honors them.
+    active_promises: Vec<crate::ast::PromiseClause>,
+    /// The declared `payload_bytes` limit for interpreter-owned bounds such
+    /// as text-literal construction; the frozen default is 16 MiB.
+    payload_limit: usize,
     native_execution_depth: usize,
     native_compilations: usize,
     native_executions: usize,
@@ -1015,28 +1064,30 @@ pub struct NativeStats {
 enum Flow {
     Continue(Value),
     Return(Value),
+    /// `stop`: unwind to the nearest enclosing loop and end it.
+    Stop,
+    /// `skip`: unwind to the nearest enclosing loop and begin its next pass.
+    Skip,
 }
 
 enum VmFlow {
     Continue(Value),
     Return(Value),
+    Stop,
+    Skip,
 }
 
 enum BytecodeStep {
     Next(usize),
     Return(Value),
+    Stop,
+    Skip,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
         let globals = Arc::new(Mutex::new(Scope::default()));
         for function in [
-            NativeFunction {
-                name: "clock",
-                arity: 0,
-                call: native_clock,
-                capability: None,
-            },
             NativeFunction {
                 name: "len",
                 arity: 1,
@@ -1089,6 +1140,17 @@ impl Interpreter {
                 mutable: false,
             },
         );
+        globals.lock().unwrap().values.insert(
+            "Interest".into(),
+            Binding {
+                value: Value::EnumType(Arc::new(EnumType {
+                    name: "Interest".into(),
+                    variants: vec!["Read".into(), "Write".into(), "ReadWrite".into()],
+                    payload_variants: BTreeSet::new(),
+                })),
+                mutable: false,
+            },
+        );
         Self {
             globals: globals.clone(),
             environment: globals.clone(),
@@ -1119,6 +1181,11 @@ impl Interpreter {
             event_loop: Arc::new(RuntimeEventLoop::default()),
             protocol_dispatch: HashMap::new(),
             fast_frames: Vec::new(),
+            run_samples: false,
+            effect_recorder: None,
+            effect_replay: None,
+            active_promises: vec![],
+            payload_limit: MAX_TEXT_LITERAL_BYTES,
             native_execution_depth: 0,
             native_compilations: 0,
             native_executions: 0,
@@ -1157,6 +1224,13 @@ impl Interpreter {
         self
     }
 
+    /// Applies the root manifest's declared `payload_bytes` limit to
+    /// interpreter-owned payload bounds.
+    pub fn with_payload_limit(mut self, bytes: u64) -> Self {
+        self.payload_limit = usize::try_from(bytes).unwrap_or(usize::MAX).max(1);
+        self
+    }
+
     pub fn with_instruction_limit(mut self, instructions: u64) -> Self {
         self.instruction_budget = Some(Arc::new(AtomicU64::new(instructions)));
         self
@@ -1175,6 +1249,32 @@ impl Interpreter {
         self
     }
 
+    /// Executes `sample` declarations instead of leaving them quiet.
+    pub fn enable_samples(&mut self) {
+        self.run_samples = true;
+    }
+
+    /// Starts recording every authorized effect; the caller reads the shared
+    /// list after the run to write an `org.nivren.effects.v1` trace.
+    pub fn record_effects(&mut self) -> Arc<Mutex<Vec<EffectRecord>>> {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        self.effect_recorder = Some(recorder.clone());
+        recorder
+    }
+
+    /// Satisfies every authorized effect from the recorded trace, in order,
+    /// instead of touching the outside world.
+    pub fn replay_effects(&mut self, entries: Vec<EffectRecord>) {
+        self.effect_replay = Some(Arc::new(Mutex::new(entries.into())));
+    }
+
+    /// Trace entries a replay has not consumed yet.
+    pub fn replay_remaining(&self) -> usize {
+        self.effect_replay
+            .as_ref()
+            .map_or(0, |replay| replay.lock().unwrap().len())
+    }
+
     pub fn run(&mut self, statements: &[Stmt]) -> Result<Value, NivError> {
         let mut value = Value::Null;
         for statement in statements {
@@ -1186,6 +1286,9 @@ impl Interpreter {
                         statement_span(statement).line,
                         statement_span(statement).column,
                     ));
+                }
+                Flow::Stop | Flow::Skip => {
+                    return Err(loop_exit_escape_error(statement_span(statement)));
                 }
             }
         }
@@ -1240,6 +1343,7 @@ impl Interpreter {
                 1,
                 1,
             )),
+            VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(Span { line: 1, column: 1 })),
         };
         self.collect(&[]);
         result
@@ -1268,6 +1372,7 @@ impl Interpreter {
                 1,
                 1,
             )),
+            VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(Span { line: 1, column: 1 })),
         };
         self.collect(&[]);
         result
@@ -1394,6 +1499,42 @@ impl Interpreter {
                 );
                 Ok(Flow::Continue(value))
             }
+            Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            } => {
+                let value = self.evaluate(initializer)?;
+                if let Value::EarlyReturn(value) = value {
+                    return Ok(Flow::Return(value.as_ref().clone()));
+                }
+                let bindings = self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                    NivError::new(
+                        "this value did not match the binding pattern",
+                        span.line,
+                        span.column,
+                    )
+                })?;
+                let mut scope = self.environment.lock().unwrap();
+                for (name, bound) in bindings {
+                    if scope.values.contains_key(&name) {
+                        return Err(NivError::new(
+                            format!("'{name}' is already declared in this scope"),
+                            span.line,
+                            span.column,
+                        ));
+                    }
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value: bound,
+                            mutable: false,
+                        },
+                    );
+                }
+                drop(scope);
+                Ok(Flow::Continue(value))
+            }
             Stmt::Expression(expression) => {
                 let value = self.evaluate(expression)?;
                 Ok(match value {
@@ -1431,6 +1572,50 @@ impl Interpreter {
                     Ok(Flow::Continue(Value::Null))
                 }
             }
+            Stmt::IfCarries {
+                subject,
+                patterns,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let value = self.evaluate(subject)?;
+                if let Value::EarlyReturn(value) = value {
+                    return Ok(Flow::Return(value.as_ref().clone()));
+                }
+                let matched = if matches!(value, Value::Null) {
+                    None
+                } else {
+                    patterns
+                        .iter()
+                        .find_map(|pattern| self.pattern_bindings(pattern, &value))
+                };
+                match matched {
+                    Some(bindings) => {
+                        let environment = self.child_scope(self.environment.clone());
+                        {
+                            let mut scope = environment.lock().unwrap();
+                            for (name, bound) in bindings {
+                                scope.values.insert(
+                                    name,
+                                    Binding {
+                                        value: bound,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                        self.execute_block(std::slice::from_ref(then_branch.as_ref()), environment)
+                    }
+                    None => {
+                        if let Some(branch) = else_branch {
+                            self.execute(branch)
+                        } else {
+                            Ok(Flow::Continue(Value::Null))
+                        }
+                    }
+                }
+            }
             Stmt::While {
                 condition, body, ..
             } => {
@@ -1446,12 +1631,62 @@ impl Interpreter {
                     match self.execute(body)? {
                         Flow::Continue(value) => last = value,
                         returned @ Flow::Return(_) => return Ok(returned),
+                        Flow::Stop => break,
+                        Flow::Skip => {}
                     }
                 }
                 Ok(Flow::Continue(last))
             }
+            Stmt::Stop(_) => Ok(Flow::Stop),
+            Stmt::Skip(_) => Ok(Flow::Skip),
+            Stmt::Promise { clauses, .. } => {
+                self.active_promises.extend(clauses.iter().cloned());
+                Ok(Flow::Continue(Value::Null))
+            }
+            Stmt::Trusted { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Doc { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Generator { span, .. } | Stmt::Expand { span, .. } => Err(NivError::new(
+                "generator expansion runs before execution",
+                span.line,
+                span.column,
+            )),
+            Stmt::Sample {
+                title,
+                body,
+                shows,
+                span,
+            } => {
+                if !self.run_samples {
+                    return Ok(Flow::Continue(Value::Null));
+                }
+                let environment = self.child_scope(self.environment.clone());
+                match self.execute_block(body, environment)? {
+                    Flow::Continue(value) => {
+                        if let Some(expected) = shows {
+                            let actual = value.to_string();
+                            if &actual != expected {
+                                return Err(NivError::new(
+                                    format!(
+                                        "sample '{title}' shows {expected:?}, produced {actual:?}"
+                                    ),
+                                    span.line,
+                                    span.column,
+                                ));
+                            }
+                        }
+                        Ok(Flow::Continue(Value::Null))
+                    }
+                    Flow::Return(_) => Err(NivError::new(
+                        format!("sample '{title}' ends with an expression, not 'give'"),
+                        span.line,
+                        span.column,
+                    )),
+                    Flow::Stop | Flow::Skip => Err(loop_exit_escape_error(*span)),
+                }
+            }
             Stmt::For {
                 name,
+                pattern,
                 iterable,
                 body,
                 span,
@@ -1471,27 +1706,58 @@ impl Interpreter {
                         "each within iterator",
                         *span,
                     )?,
-                    other => {
-                        return Err(NivError::new(
-                            format!("{} is not iterable", other.type_name()),
-                            span.line,
-                            span.column,
-                        ));
-                    }
+                    other => match self.drain_iterate_adopter(&other, *span)? {
+                        Some(items) => items,
+                        None => {
+                            return Err(NivError::new(
+                                format!("{} is not iterable", other.type_name()),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    },
                 };
                 let mut last = Value::Null;
                 for value in values {
                     let environment = self.child_scope(self.environment.clone());
-                    environment.lock().unwrap().values.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: false,
-                        },
-                    );
+                    {
+                        let mut scope = environment.lock().unwrap();
+                        match pattern {
+                            Some(pattern) => {
+                                let bindings =
+                                    self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                                        NivError::new(
+                                            "this element did not match the iteration pattern",
+                                            span.line,
+                                            span.column,
+                                        )
+                                    })?;
+                                for (bound, bound_value) in bindings {
+                                    scope.values.insert(
+                                        bound,
+                                        Binding {
+                                            value: bound_value,
+                                            mutable: false,
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                scope.values.insert(
+                                    name.clone(),
+                                    Binding {
+                                        value,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     match self.execute_block(std::slice::from_ref(body.as_ref()), environment)? {
                         Flow::Continue(value) => last = value,
                         returned @ Flow::Return(_) => return Ok(returned),
+                        Flow::Stop => break,
+                        Flow::Skip => {}
                     }
                 }
                 Ok(Flow::Continue(last))
@@ -1685,6 +1951,9 @@ impl Interpreter {
                             span.column,
                         ));
                     }
+                    Flow::Stop | Flow::Skip => {
+                        return Err(loop_exit_escape_error(*span));
+                    }
                 }
                 let scope = module_environment.lock().unwrap();
                 let mut values = HashMap::new();
@@ -1714,16 +1983,18 @@ impl Interpreter {
 
     fn execute_block(&mut self, statements: &[Stmt], environment: Env) -> Result<Flow, NivError> {
         let previous = std::mem::replace(&mut self.environment, environment);
+        let promise_mark = self.active_promises.len();
         let result = (|| {
             let mut last = Value::Null;
             for statement in statements {
                 match self.execute(statement)? {
                     Flow::Continue(value) => last = value,
-                    returned @ Flow::Return(_) => return Ok(returned),
+                    other => return Ok(other),
                 }
             }
             Ok(Flow::Continue(last))
         })();
+        self.active_promises.truncate(promise_mark);
         self.environment = previous;
         result
     }
@@ -1741,6 +2012,22 @@ impl Interpreter {
             Expr::Variable(name, span) => self.lookup(name).ok_or_else(|| {
                 NivError::new(format!("undefined name '{name}'"), span.line, span.column)
             }),
+            Expr::Text(pieces, span) => {
+                let mut output = String::new();
+                for piece in pieces {
+                    match piece {
+                        TextPiece::Literal(part) => output.push_str(part),
+                        TextPiece::Hole(hole) => {
+                            let value = evaluate_part!(self, hole);
+                            output.push_str(&self.text_hole_string(&value, *span)?);
+                        }
+                    }
+                    if output.len() > self.payload_limit {
+                        return Err(text_too_long_error(self.payload_limit, *span));
+                    }
+                }
+                Ok(Value::String(output))
+            }
             Expr::Assign(name, expression, span) => {
                 let value = evaluate_part!(self, expression);
                 assign(&self.environment, name, value.clone(), *span)?;
@@ -1922,72 +2209,305 @@ impl Interpreter {
                     span.column,
                 )),
             },
-            Expr::Match(subject, arms, span) => match evaluate_part!(self, subject) {
-                Value::Enum(value) => {
-                    let arm = arms
-                        .iter()
-                        .find(|arm| arm.variant == value.variant)
-                        .ok_or_else(|| {
-                            NivError::new(
-                                format!("no choose arm for {}.{}", value.type_name, value.variant),
-                                span.line,
-                                span.column,
-                            )
-                        })?;
-                    self.evaluate_match_arm(arm, value.payload.clone())
-                }
-                Value::Ok(value) => {
-                    let arm = arms.iter().find(|arm| arm.variant == "Ok").ok_or_else(|| {
-                        NivError::new("no choose arm for Ok", span.line, span.column)
-                    })?;
-                    self.evaluate_match_arm(arm, Some(value.as_ref().clone()))
-                }
-                Value::Err(value) => {
-                    let arm = arms
-                        .iter()
-                        .find(|arm| arm.variant == "Err")
-                        .ok_or_else(|| {
-                            NivError::new("no choose arm for Err", span.line, span.column)
-                        })?;
-                    self.evaluate_match_arm(arm, Some(value.as_ref().clone()))
-                }
-                other => Err(NivError::new(
-                    format!(
-                        "choose requires choice or Result value, found {}",
-                        other.type_name()
-                    ),
-                    span.line,
-                    span.column,
-                )),
-            },
+            Expr::Match(subject, arms, span) => {
+                let subject_value = evaluate_part!(self, subject);
+                self.evaluate_match(&subject_value, arms, *span)
+            }
         };
         let value = result?;
         self.charge_memory(&value, expression.span())?;
         Ok(value)
     }
 
-    fn evaluate_match_arm(
+    fn evaluate_match(
         &mut self,
-        arm: &crate::ast::MatchArm,
-        payload: Option<Value>,
+        subject: &Value,
+        arms: &[crate::ast::MatchArm],
+        span: Span,
     ) -> Result<Value, NivError> {
-        if let (Some(name), Some(value)) = (&arm.binding, payload) {
+        for arm in arms {
+            let mut matched = None;
+            for pattern in &arm.patterns {
+                if let Some(bindings) = self.pattern_bindings(pattern, subject) {
+                    matched = Some(bindings);
+                    break;
+                }
+            }
+            let Some(bindings) = matched else { continue };
             let previous = self.environment.clone();
             let environment = self.child_scope(previous.clone());
-            environment.lock().unwrap().values.insert(
-                name.clone(),
-                Binding {
-                    value,
-                    mutable: false,
-                },
-            );
+            {
+                let mut scope = environment.lock().unwrap();
+                for (name, value) in bindings {
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
             self.environment = environment;
-            let result = self.evaluate(&arm.value);
+            let outcome = (|| {
+                if let Some(guard) = &arm.guard {
+                    let decision = self.evaluate(guard)?;
+                    if let Value::EarlyReturn(value) = decision {
+                        return Ok(Some(Value::EarlyReturn(value)));
+                    }
+                    if !expect_bool(decision, span)? {
+                        return Ok(None);
+                    }
+                }
+                self.evaluate(&arm.value).map(Some)
+            })();
             self.environment = previous;
-            result
-        } else {
-            self.evaluate(&arm.value)
+            match outcome? {
+                Some(value) => return Ok(value),
+                None => continue,
+            }
         }
+        Err(NivError::new(
+            "no choose arm matched this value; add an 'otherwise' arm",
+            span.line,
+            span.column,
+        ))
+    }
+
+    /// Matches one pattern against a value, producing its bindings on
+    /// success. Name resolution follows the checker's rule: an identifier
+    /// that names a case of the subject's own choice type is a case test;
+    /// any other identifier binds.
+    fn pattern_bindings(&self, pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+        let mut bindings = vec![];
+        self.pattern_matches(pattern, value, &mut bindings)
+            .then_some(bindings)
+    }
+
+    fn pattern_matches(
+        &self,
+        pattern: &Pattern,
+        value: &Value,
+        bindings: &mut Vec<(String, Value)>,
+    ) -> bool {
+        match pattern {
+            Pattern::Any(_) => true,
+            Pattern::Binding(name, _) => {
+                bindings.push((name.clone(), value.clone()));
+                true
+            }
+            Pattern::Literal(literal, _) => {
+                let literal_value = match literal {
+                    Literal::Int(int) => Value::Int(*int),
+                    Literal::Float(float) => Value::Float(*float),
+                    Literal::String(string) => Value::String(string.clone()),
+                    Literal::Bool(boolean) => Value::Bool(*boolean),
+                    Literal::Null => Value::Null,
+                };
+                *value == literal_value
+            }
+            Pattern::Name(name, _) => match value {
+                Value::Enum(subject) => {
+                    if subject.variant == *name {
+                        true
+                    } else if self.enum_has_variant(&subject.type_name, name) {
+                        false
+                    } else {
+                        bindings.push((name.clone(), value.clone()));
+                        true
+                    }
+                }
+                Value::Ok(_) => match name.as_str() {
+                    "Ok" => true,
+                    "Err" => false,
+                    _ => {
+                        bindings.push((name.clone(), value.clone()));
+                        true
+                    }
+                },
+                Value::Err(_) => match name.as_str() {
+                    "Err" => true,
+                    "Ok" => false,
+                    _ => {
+                        bindings.push((name.clone(), value.clone()));
+                        true
+                    }
+                },
+                _ => {
+                    bindings.push((name.clone(), value.clone()));
+                    true
+                }
+            },
+            Pattern::Carries(name, inner, _) => match value {
+                Value::Enum(subject) if subject.variant == *name => match &subject.payload {
+                    Some(payload) => {
+                        let payload = payload.clone();
+                        self.pattern_matches(inner, &payload, bindings)
+                    }
+                    None => false,
+                },
+                Value::Ok(payload) if name == "Ok" => {
+                    let payload = payload.as_ref().clone();
+                    self.pattern_matches(inner, &payload, bindings)
+                }
+                Value::Err(payload) if name == "Err" => {
+                    let payload = payload.as_ref().clone();
+                    self.pattern_matches(inner, &payload, bindings)
+                }
+                _ => false,
+            },
+            Pattern::Shape(name, fields, _) => match value {
+                Value::Record(record)
+                    if record.type_name == *name
+                        || record.type_name.ends_with(&format!(".{name}")) =>
+                {
+                    for (field, sub_pattern) in fields {
+                        let Some(index) = record.field_indices.get(field).copied() else {
+                            return false;
+                        };
+                        let field_value = record.fields[index].1.clone();
+                        if !self.pattern_matches(sub_pattern, &field_value, bindings) {
+                            return false;
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// Renders one text-hole value canonically. Text, numbers, booleans,
+    /// date/times, and shapes deriving Display have a canonical form;
+    /// everything else is a typed error the checker normally prevents.
+    fn text_hole_string(&self, value: &Value, span: Span) -> Result<String, NivError> {
+        match value {
+            Value::String(text) => Ok(text.clone()),
+            Value::Int(_)
+            | Value::UInt(_)
+            | Value::U128(_)
+            | Value::Bool(_)
+            | Value::BigInt(_)
+            | Value::Decimal(_)
+            | Value::FixedInt(_)
+            | Value::DateTime(_) => Ok(value.to_string()),
+            Value::Float(number) if number.is_finite() => Ok(value.to_string()),
+            Value::Float(_) => Err(NivError::new(
+                "a text hole attempted to render a float that is not finite; handle NaN or infinity before formatting",
+                span.line,
+                span.column,
+            )),
+            Value::Record(record) => {
+                let derives_display = matches!(
+                    lookup(&self.environment, &record.type_name).or_else(|| {
+                        record
+                            .type_name
+                            .rsplit('.')
+                            .next()
+                            .and_then(|short| lookup(&self.environment, short))
+                    }),
+                    Some(Value::RecordType(schema)) if schema.derives.iter().any(|derive| derive == "Display")
+                );
+                if derives_display {
+                    Ok(value.to_string())
+                } else {
+                    Err(NivError::new(
+                        format!(
+                            "a text hole attempted to render {}, which does not derive Display; {TEXT_HOLE_CONTRACT}",
+                            record.type_name
+                        ),
+                        span.line,
+                        span.column,
+                    ))
+                }
+            }
+            other => Err(NivError::new(
+                format!(
+                    "a text hole attempted to render {}, which has no canonical text; {TEXT_HOLE_CONTRACT}",
+                    other.type_name()
+                ),
+                span.line,
+                span.column,
+            )),
+        }
+    }
+
+    /// Drains a user `Iterate` adopter through the persistent unfold
+    /// contract: `advance(state)` gives `none` to finish or a step shape
+    /// holding `item` (the yielded value) and `next` (the following state).
+    /// Returns `None` when the value adopts no `Iterate` protocol.
+    fn drain_iterate_adopter(
+        &mut self,
+        value: &Value,
+        span: Span,
+    ) -> Result<Option<Vec<Value>>, NivError> {
+        if !matches!(value, Value::Record(_)) {
+            return Ok(None);
+        }
+        let key = (
+            "Iterate".to_string(),
+            "advance".to_string(),
+            value.type_name().to_string(),
+        );
+        let Some(implementation) = self.protocol_dispatch.get(&key).cloned() else {
+            return Ok(None);
+        };
+        let mut state = value.clone();
+        let mut items = vec![];
+        loop {
+            let step = self.call(implementation.clone(), vec![state], span)?;
+            match step {
+                Value::Null => break,
+                Value::Record(record) => {
+                    let (Some(item), Some(next)) = (
+                        record.field_indices.get("item").copied(),
+                        record.field_indices.get("next").copied(),
+                    ) else {
+                        return Err(NivError::new(
+                            "an Iterate step holds 'item' and 'next' fields",
+                            span.line,
+                            span.column,
+                        ));
+                    };
+                    items.push(record.fields[item].1.clone());
+                    state = record.fields[next].1.clone();
+                }
+                other => {
+                    return Err(NivError::new(
+                        format!(
+                            "Iterate.advance gives none or a step shape, found {}",
+                            other.type_name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
+            }
+            if items.len() > 1_000_000 {
+                return Err(NivError::new(
+                    "Iterate materialization refuses more than 1000000 values",
+                    span.line,
+                    span.column,
+                ));
+            }
+        }
+        Ok(Some(items))
+    }
+
+    /// Whether `variant` is a declared case of the named choice type. The
+    /// type value is found by its full name first, then by its final path
+    /// segment; an unknown type conservatively reports no such case.
+    fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
+        let found = lookup(&self.environment, type_name).or_else(|| {
+            type_name
+                .rsplit('.')
+                .next()
+                .and_then(|short| lookup(&self.environment, short))
+        });
+        matches!(
+            found,
+            Some(Value::EnumType(enum_type)) if enum_type.variants.iter().any(|name| name == variant)
+        )
     }
 
     fn binary(
@@ -2002,6 +2522,8 @@ impl Interpreter {
             TokenKind::BangEqual => Ok(Value::Bool(left != right)),
             TokenKind::Plus => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => checked_int(a.checked_add(b), span),
+                (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
+                (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     Ok(Value::BigInt(Arc::new(a.as_ref() + b.as_ref())))
@@ -2022,6 +2544,8 @@ impl Interpreter {
             TokenKind::Minus | TokenKind::Star | TokenKind::Slash | TokenKind::Percent => {
                 match (left, right) {
                     (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
+                    (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
+                    (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
                     (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                     (Value::BigInt(a), Value::BigInt(b)) => {
                         bigint_binary(a.as_ref(), operator, b.as_ref(), span)
@@ -2041,6 +2565,8 @@ impl Interpreter {
             | TokenKind::Less
             | TokenKind::LessEqual => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
+                (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
+                (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
                 (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     bigint_binary(a.as_ref(), operator, b.as_ref(), span)
@@ -2074,7 +2600,64 @@ impl Interpreter {
         match callee {
             Value::Native(function) => {
                 check_arity(function.name, function.arity, arguments.len(), span)?;
+                let effect_digest = function
+                    .capability
+                    .filter(|_| self.effect_recorder.is_some() || self.effect_replay.is_some())
+                    .map(|_| effect_arguments_digest(&arguments));
                 if let Some(capability) = function.capability {
+                    if let Some(replay) = &self.effect_replay {
+                        let entry = replay.lock().unwrap().pop_front();
+                        let Some(entry) = entry else {
+                            return Err(NivError::new(
+                                format!(
+                                    "replay diverged: the trace holds no entry for {capability}:{}",
+                                    function.name
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                        };
+                        let digest = effect_digest.clone().unwrap_or_default();
+                        if entry.operation != function.name
+                            || entry.capability != capability
+                            || entry.arguments != digest
+                        {
+                            return Err(NivError::new(
+                                format!(
+                                    "replay diverged: the trace expected {}:{} with argument digest {}, the program performed {capability}:{} with argument digest {digest}",
+                                    entry.capability,
+                                    entry.operation,
+                                    entry.arguments,
+                                    function.name
+                                ),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                        if let Some(metrics) = &self.metrics {
+                            metrics
+                                .lock()
+                                .unwrap()
+                                .effect_sequence
+                                .push(format!("{capability}:{}", function.name));
+                        }
+                        return effect_json_to_value(&entry.result, span);
+                    }
+                    if let Some(clause) = self
+                        .active_promises
+                        .iter()
+                        .rev()
+                        .find(|clause| clause.capability == capability && clause.never)
+                    {
+                        return Err(NivError::new(
+                            format!(
+                                "this effect needs {capability}, but an active 'promise never {}' renounces it",
+                                clause.capability
+                            ),
+                            span.line,
+                            span.column,
+                        ));
+                    }
                     if self
                         .capabilities
                         .as_ref()
@@ -2097,7 +2680,7 @@ impl Interpreter {
                             .push(format!("{capability}:{}", function.name));
                     }
                 }
-                match function.name {
+                let result = match function.name {
                     "spawn" => self.task_spawn(arguments, span),
                     "await" => self.task_await(arguments, span),
                     "await_for" => self.task_await_for(arguments, span),
@@ -2134,7 +2717,29 @@ impl Interpreter {
                     "call_handle" => self.host_call_handle(arguments, span),
                     "close_handle" => self.host_close_handle(arguments, span),
                     _ => (function.call)(arguments, span),
+                };
+                if let (Some(capability), Some(digest)) = (function.capability, effect_digest)
+                    && let Some(recorder) = &self.effect_recorder
+                    && let Ok(value) = &result
+                {
+                    let json = effect_value_to_json(value).map_err(|reason| {
+                        NivError::new(
+                            format!(
+                                "niv record cannot capture the {capability}:{} result: {reason}",
+                                function.name
+                            ),
+                            span.line,
+                            span.column,
+                        )
+                    })?;
+                    recorder.lock().unwrap().push(EffectRecord {
+                        operation: function.name.to_string(),
+                        capability: capability.to_string(),
+                        arguments: digest,
+                        result: json,
+                    });
                 }
+                result
             }
             Value::Function(function) => self.call_function(&function, &arguments, span),
             Value::RecordType(record) => {
@@ -2259,8 +2864,9 @@ impl Interpreter {
                 self.roots.pop();
                 self.environment = previous;
                 self.fast_frames.pop();
-                execution.map(|flow| match flow {
-                    VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                execution.and_then(|flow| match flow {
+                    VmFlow::Continue(value) | VmFlow::Return(value) => Ok(value),
+                    VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(span)),
                 })
             } else {
                 let environment = self.child_scope(function.closure.clone());
@@ -2277,6 +2883,7 @@ impl Interpreter {
                     FunctionBody::Tree(body) => match self.execute_block(body, environment)? {
                         Flow::Continue(_) => Ok(Value::Null),
                         Flow::Return(value) => Ok(value),
+                        Flow::Stop | Flow::Skip => Err(loop_exit_escape_error(span)),
                     },
                     FunctionBody::Bytecode(body) => {
                         let previous = std::mem::replace(&mut self.environment, environment);
@@ -2294,8 +2901,9 @@ impl Interpreter {
                         }
                         self.roots.pop();
                         self.environment = previous;
-                        execution.map(|flow| match flow {
-                            VmFlow::Continue(value) | VmFlow::Return(value) => value,
+                        execution.and_then(|flow| match flow {
+                            VmFlow::Continue(value) | VmFlow::Return(value) => Ok(value),
+                            VmFlow::Stop | VmFlow::Skip => Err(loop_exit_escape_error(span)),
                         })
                     }
                 })()
@@ -2625,12 +3233,12 @@ impl Interpreter {
             Value::Function(function) if function.params.is_empty() => arguments[0].clone(),
             Value::Function(_) => {
                 return Err(NivError::new(
-                    "std.task.spawn requires a function with no parameters",
+                    "std.tasks.spawn requires a function with no parameters",
                     span.line,
                     span.column,
                 ));
             }
-            other => return Err(expected_value("std.task.spawn", "Function", other, span)),
+            other => return Err(expected_value("std.tasks.spawn", "Function", other, span)),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
@@ -2786,7 +3394,7 @@ impl Interpreter {
     }
 
     fn task_await(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let task = expect_task(&arguments[0], "std.task.await", span)?;
+        let task = expect_task(&arguments[0], "std.tasks.await", span)?;
         let handle = task.lock().unwrap().take().ok_or_else(|| {
             NivError::new("task has already been awaited", span.line, span.column)
         })?;
@@ -2795,8 +3403,8 @@ impl Interpreter {
     }
 
     fn task_await_for(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let task = expect_task(&arguments[0], "std.task.await_for", span)?;
-        let timeout = expect_duration(&arguments[1], "std.task.await_for", span)?;
+        let task = expect_task(&arguments[0], "std.tasks.await_for", span)?;
+        let timeout = expect_duration(&arguments[1], "std.tasks.await_for", span)?;
         let deadline = Instant::now() + timeout;
         loop {
             let observed = self.event_loop.generation();
@@ -2826,7 +3434,7 @@ impl Interpreter {
     fn task_cancel(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let task = match &arguments[0] {
             Value::Task(task) => task,
-            other => return Err(expected_value("std.task.cancel", "Task", other, span)),
+            other => return Err(expected_value("std.tasks.cancel", "Task", other, span)),
         };
         task.cancelled.store(true, Ordering::Release);
         self.record_task_cancellations(1);
@@ -2834,8 +3442,8 @@ impl Interpreter {
     }
 
     fn task_all(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let tasks = task_array(&arguments[0], "std.task.all", span)?;
-        ensure_pending_tasks(&tasks, "std.task.all", span)?;
+        let tasks = task_array(&arguments[0], "std.tasks.all", span)?;
+        ensure_pending_tasks(&tasks, "std.tasks.all", span)?;
         self.record_task_joins(tasks.len());
         let mut values = Vec::with_capacity(tasks.len());
         for task in tasks {
@@ -2855,15 +3463,15 @@ impl Interpreter {
     }
 
     fn task_race(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let tasks = task_array(&arguments[0], "std.task.race", span)?;
+        let tasks = task_array(&arguments[0], "std.tasks.race", span)?;
         if tasks.is_empty() {
             return Err(NivError::new(
-                "std.task.race requires at least one task",
+                "std.tasks.race requires at least one task",
                 span.line,
                 span.column,
             ));
         }
-        ensure_pending_tasks(&tasks, "std.task.race", span)?;
+        ensure_pending_tasks(&tasks, "std.tasks.race", span)?;
         loop {
             let observed = self.event_loop.generation();
             if let Some(winner) = tasks.iter().position(|task| {
@@ -2904,7 +3512,7 @@ impl Interpreter {
             Value::Int(value) if (0..=65_536).contains(&value) => value as usize,
             _ => {
                 return Err(NivError::new(
-                    "std.channel.create capacity must be an Int from 0 through 65536",
+                    "std.channels.create capacity must be an Int from 0 through 65536",
                     span.line,
                     span.column,
                 ));
@@ -3209,7 +3817,7 @@ impl Interpreter {
     }
 
     fn channel_send(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let channel = expect_channel(&arguments[0], "std.channel.send", span)?;
+        let channel = expect_channel(&arguments[0], "std.channels.send", span)?;
         if !transferable(&arguments[1]) {
             return Err(NivError::new(
                 "channel payload is not transferable",
@@ -3217,7 +3825,7 @@ impl Interpreter {
                 span.column,
             ));
         }
-        let timeout = expect_duration(&arguments[2], "std.channel.send", span)?;
+        let timeout = expect_duration(&arguments[2], "std.channels.send", span)?;
         let deadline = Instant::now() + timeout;
         let mut value = arguments[1].clone();
         loop {
@@ -3236,8 +3844,8 @@ impl Interpreter {
     }
 
     fn channel_receive(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let channel = expect_channel(&arguments[0], "std.channel.receive", span)?;
-        let timeout = expect_duration(&arguments[1], "std.channel.receive", span)?;
+        let channel = expect_channel(&arguments[0], "std.channels.receive", span)?;
+        let timeout = expect_duration(&arguments[1], "std.channels.receive", span)?;
         Ok(
             match channel.receiver.lock().unwrap().recv_timeout(timeout) {
                 Ok(value) => Value::Ok(Arc::new(value)),
@@ -3307,6 +3915,8 @@ impl Interpreter {
                             BytecodeStep::Return(value) => {
                                 return Ok((-2, Some(VmFlow::Return(value))));
                             }
+                            BytecodeStep::Stop => return Ok((-2, Some(VmFlow::Stop))),
+                            BytecodeStep::Skip => return Ok((-2, Some(VmFlow::Skip))),
                         }
                     }
                     let next = i64::try_from(instruction)
@@ -3352,12 +3962,32 @@ impl Interpreter {
     fn execute_chunk_vm(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
         let mut stack = Vec::new();
         let mut instruction = 0usize;
+        let promise_mark = self.active_promises.len();
+        let finish = |interpreter: &mut Self| {
+            interpreter.active_promises.truncate(promise_mark);
+        };
         while instruction < chunk.code.len() {
-            match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
-                BytecodeStep::Next(next) => instruction = next,
-                BytecodeStep::Return(value) => return Ok(VmFlow::Return(value)),
+            match self.execute_bytecode_step(chunk, &mut stack, instruction) {
+                Ok(BytecodeStep::Next(next)) => instruction = next,
+                Ok(BytecodeStep::Return(value)) => {
+                    finish(self);
+                    return Ok(VmFlow::Return(value));
+                }
+                Ok(BytecodeStep::Stop) => {
+                    finish(self);
+                    return Ok(VmFlow::Stop);
+                }
+                Ok(BytecodeStep::Skip) => {
+                    finish(self);
+                    return Ok(VmFlow::Skip);
+                }
+                Err(error) => {
+                    finish(self);
+                    return Err(error);
+                }
             }
         }
+        finish(self);
         if self.is_cancelled() {
             return Err(NivError::new("task cancelled", 1, 1));
         }
@@ -3516,6 +4146,17 @@ impl Interpreter {
             Op::MakeArray(length) => {
                 let values = stack.split_off(stack.len() - length);
                 stack.push(Value::Array(Arc::new(values)));
+            }
+            Op::MakeText(length) => {
+                let values = stack.split_off(stack.len() - length);
+                let mut output = String::new();
+                for value in &values {
+                    output.push_str(&self.text_hole_string(value, item.span)?);
+                    if output.len() > self.payload_limit {
+                        return Err(text_too_long_error(self.payload_limit, item.span));
+                    }
+                }
+                stack.push(Value::String(output));
             }
             Op::Index => {
                 let index = expect_index(stack.pop().unwrap(), item.span)?;
@@ -3683,11 +4324,17 @@ impl Interpreter {
                     metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
                 }
             }
+            Op::Promise(clauses) => {
+                self.active_promises.extend(clauses.iter().cloned());
+            }
             Op::Match(arms) => {
                 let subject = stack.pop().unwrap();
                 match self.execute_bytecode_match(subject, arms, item.span)? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
                 }
             }
             Op::DefineModule {
@@ -3697,18 +4344,163 @@ impl Interpreter {
             } => {
                 stack.push(self.execute_bytecode_module(name, body, exports, item.span)?);
             }
-            Op::Iterate { name, body } => {
+            Op::DefinePattern { pattern } => {
+                let value = stack.last().cloned().unwrap();
+                let bindings = self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                    NivError::new(
+                        "this value did not match the binding pattern",
+                        item.span.line,
+                        item.span.column,
+                    )
+                })?;
+                let mut scope = self.environment.lock().unwrap();
+                for (name, bound) in bindings {
+                    if scope.values.contains_key(&name) {
+                        return Err(NivError::new(
+                            format!("'{name}' is already declared in this scope"),
+                            item.span.line,
+                            item.span.column,
+                        ));
+                    }
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value: bound,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
                 let iterable = stack.pop().unwrap();
-                match self.execute_bytecode_iteration(name, iterable, body, item.span)? {
+                match self.execute_bytecode_iteration(
+                    name,
+                    pattern.as_ref(),
+                    iterable,
+                    body,
+                    item.span,
+                )? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
                 }
+            }
+            Op::Repeat { condition, body } => {
+                match self.execute_bytecode_repeat(condition, body, item.span)? {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
+                }
+            }
+            Op::LoopExit { skip } => {
+                return Ok(if *skip {
+                    BytecodeStep::Skip
+                } else {
+                    BytecodeStep::Stop
+                });
+            }
+            Op::IfCarries {
+                patterns,
+                then_branch,
+                else_branch,
+            } => {
+                let subject = stack.pop().unwrap();
+                let matched = if matches!(subject, Value::Null) {
+                    None
+                } else {
+                    patterns
+                        .iter()
+                        .find_map(|pattern| self.pattern_bindings(pattern, &subject))
+                };
+                let flow = match matched {
+                    None => match else_branch {
+                        Some(branch) => self.execute_chunk(branch)?,
+                        None => VmFlow::Continue(Value::Null),
+                    },
+                    Some(bindings) => {
+                        let previous = self.environment.clone();
+                        self.roots.push(previous.clone());
+                        let child = self.child_scope(previous.clone());
+                        {
+                            let mut scope = child.lock().unwrap();
+                            for (name, bound) in bindings {
+                                scope.values.insert(
+                                    name,
+                                    Binding {
+                                        value: bound,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                        self.environment = child;
+                        let result = self.execute_chunk(then_branch);
+                        self.roots.pop();
+                        self.environment = previous;
+                        result?
+                    }
+                };
+                match flow {
+                    VmFlow::Continue(value) => stack.push(value),
+                    VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop => return Ok(BytecodeStep::Stop),
+                    VmFlow::Skip => return Ok(BytecodeStep::Skip),
+                }
+            }
+            Op::Sample { title, body, shows } => {
+                if self.run_samples {
+                    let previous = self.environment.clone();
+                    self.roots.push(previous.clone());
+                    let child = self.child_scope(previous.clone());
+                    self.environment = child;
+                    let result = self.execute_chunk(body);
+                    self.roots.pop();
+                    self.environment = previous;
+                    match result? {
+                        VmFlow::Continue(value) => {
+                            if let Some(expected) = shows {
+                                let actual = value.to_string();
+                                if &actual != expected {
+                                    return Err(NivError::new(
+                                        format!(
+                                            "sample '{title}' shows {expected:?}, produced {actual:?}"
+                                        ),
+                                        item.span.line,
+                                        item.span.column,
+                                    ));
+                                }
+                            }
+                        }
+                        VmFlow::Return(_) => {
+                            return Err(NivError::new(
+                                format!("sample '{title}' ends with an expression, not 'give'"),
+                                item.span.line,
+                                item.span.column,
+                            ));
+                        }
+                        VmFlow::Stop | VmFlow::Skip => {
+                            return Err(loop_exit_escape_error(item.span));
+                        }
+                    }
+                }
+                stack.push(Value::Null);
             }
             Op::Using { name, body } => {
                 let resource = stack.pop().unwrap();
                 match self.execute_bytecode_using(name, resource, body, item.span)? {
                     VmFlow::Continue(value) => stack.push(value),
                     VmFlow::Return(value) => return Ok(BytecodeStep::Return(value)),
+                    VmFlow::Stop | VmFlow::Skip => {
+                        return Err(loop_exit_escape_error(item.span));
+                    }
                 }
             }
         }
@@ -3720,6 +4512,7 @@ impl Interpreter {
                 | Op::Call(_)
                 | Op::PerformCall(_)
                 | Op::MakeArray(_)
+                | Op::MakeText(_)
                 | Op::Index
                 | Op::Get(_)
                 | Op::MakeFunction { .. }
@@ -3750,7 +4543,7 @@ impl Interpreter {
             for (name, binding) in &scope.values {
                 if !matches!(
                     name.as_str(),
-                    "clock" | "len" | "type" | "append" | "assert" | "ok" | "err" | "std"
+                    "len" | "type" | "append" | "assert" | "ok" | "err" | "std"
                 ) {
                     let rendered = binding.value.to_string();
                     let mut value = rendered.chars().take(200).collect::<String>();
@@ -3771,48 +4564,59 @@ impl Interpreter {
         arms: &[BytecodeArm],
         span: Span,
     ) -> Result<VmFlow, NivError> {
-        let (variant, payload) = match subject {
-            Value::Enum(value) => (value.variant.clone(), value.payload.clone()),
-            Value::Ok(value) => ("Ok".into(), Some(value.as_ref().clone())),
-            Value::Err(value) => ("Err".into(), Some(value.as_ref().clone())),
-            other => {
-                return Err(NivError::new(
-                    format!(
-                        "choose requires choice or Result value, found {}",
-                        other.type_name()
-                    ),
-                    span.line,
-                    span.column,
-                ));
+        for arm in arms {
+            let mut matched = None;
+            for pattern in &arm.patterns {
+                if let Some(bindings) = self.pattern_bindings(pattern, &subject) {
+                    matched = Some(bindings);
+                    break;
+                }
             }
-        };
-        let arm = arms
-            .iter()
-            .find(|arm| arm.variant == variant)
-            .ok_or_else(|| {
-                NivError::new(
-                    format!("no choose arm for {variant}"),
-                    span.line,
-                    span.column,
-                )
-            })?;
-        let previous = self.environment.clone();
-        self.roots.push(previous.clone());
-        if let (Some(binding), Some(value)) = (&arm.binding, payload) {
+            let Some(bindings) = matched else { continue };
+            let previous = self.environment.clone();
+            self.roots.push(previous.clone());
             let child = self.child_scope(previous.clone());
-            child.lock().unwrap().values.insert(
-                binding.clone(),
-                Binding {
-                    value,
-                    mutable: false,
-                },
-            );
+            {
+                let mut scope = child.lock().unwrap();
+                for (name, value) in bindings {
+                    scope.values.insert(
+                        name,
+                        Binding {
+                            value,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
             self.environment = child;
+            let outcome = (|| {
+                if let Some(guard) = &arm.guard {
+                    match self.execute_chunk(guard)? {
+                        VmFlow::Continue(decision) => {
+                            if !expect_bool(decision, span)? {
+                                return Ok(None);
+                            }
+                        }
+                        returned @ VmFlow::Return(_) => return Ok(Some(returned)),
+                        VmFlow::Stop | VmFlow::Skip => {
+                            return Err(loop_exit_escape_error(span));
+                        }
+                    }
+                }
+                self.execute_chunk(&arm.body).map(Some)
+            })();
+            self.roots.pop();
+            self.environment = previous;
+            match outcome? {
+                Some(flow) => return Ok(flow),
+                None => continue,
+            }
         }
-        let result = self.execute_chunk(&arm.body);
-        self.roots.pop();
-        self.environment = previous;
-        result
+        Err(NivError::new(
+            "no choose arm matched this value; add an 'otherwise' arm",
+            span.line,
+            span.column,
+        ))
     }
 
     fn execute_bytecode_module(
@@ -3864,6 +4668,7 @@ impl Interpreter {
     fn execute_bytecode_iteration(
         &mut self,
         name: &str,
+        pattern: Option<&Pattern>,
         iterable: Value,
         body: &Chunk,
         span: Span,
@@ -3877,26 +4682,54 @@ impl Interpreter {
             Value::Iterator(iterator) => {
                 self.drain_iterator(&Value::Iterator(iterator), "each within iterator", span)?
             }
-            other => {
-                return Err(NivError::new(
-                    format!("{} is not iterable", other.type_name()),
-                    span.line,
-                    span.column,
-                ));
-            }
+            other => match self.drain_iterate_adopter(&other, span)? {
+                Some(items) => items,
+                None => {
+                    return Err(NivError::new(
+                        format!("{} is not iterable", other.type_name()),
+                        span.line,
+                        span.column,
+                    ));
+                }
+            },
         };
         let mut last = Value::Null;
         for value in values {
             let previous = self.environment.clone();
             self.roots.push(previous.clone());
             let child = self.child_scope(previous.clone());
-            child.lock().unwrap().values.insert(
-                name.to_string(),
-                Binding {
-                    value,
-                    mutable: false,
-                },
-            );
+            {
+                let mut scope = child.lock().unwrap();
+                match pattern {
+                    Some(pattern) => {
+                        let bindings = self.pattern_bindings(pattern, &value).ok_or_else(|| {
+                            NivError::new(
+                                "this element did not match the iteration pattern",
+                                span.line,
+                                span.column,
+                            )
+                        })?;
+                        for (bound, bound_value) in bindings {
+                            scope.values.insert(
+                                bound,
+                                Binding {
+                                    value: bound_value,
+                                    mutable: false,
+                                },
+                            );
+                        }
+                    }
+                    None => {
+                        scope.values.insert(
+                            name.to_string(),
+                            Binding {
+                                value,
+                                mutable: false,
+                            },
+                        );
+                    }
+                }
+            }
             self.environment = child;
             let result = self.execute_chunk(body);
             self.roots.pop();
@@ -3904,6 +4737,34 @@ impl Interpreter {
             match result? {
                 VmFlow::Continue(value) => last = value,
                 returned @ VmFlow::Return(_) => return Ok(returned),
+                VmFlow::Stop => break,
+                VmFlow::Skip => {}
+            }
+        }
+        Ok(VmFlow::Continue(last))
+    }
+
+    fn execute_bytecode_repeat(
+        &mut self,
+        condition: &Chunk,
+        body: &Chunk,
+        span: Span,
+    ) -> Result<VmFlow, NivError> {
+        let mut last = Value::Null;
+        loop {
+            let decision = match self.execute_chunk(condition)? {
+                VmFlow::Continue(value) => value,
+                returned @ VmFlow::Return(_) => return Ok(returned),
+                VmFlow::Stop | VmFlow::Skip => return Err(loop_exit_escape_error(span)),
+            };
+            if !expect_bool(decision, span)? {
+                break;
+            }
+            match self.execute_chunk(body)? {
+                VmFlow::Continue(value) => last = value,
+                returned @ VmFlow::Return(_) => return Ok(returned),
+                VmFlow::Stop => break,
+                VmFlow::Skip => {}
             }
         }
         Ok(VmFlow::Continue(last))
@@ -4314,6 +5175,9 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
         Value::Lock(lock) => mark_value(&lock.value.lock().unwrap(), marked),
         Value::LockGuard(guard) => mark_value(&guard.lock.value.lock().unwrap(), marked),
         Value::Int(_)
+        | Value::UInt(_)
+        | Value::U128(_)
+        | Value::SourceDeclaration(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -4566,8 +5430,223 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::Match(_) => "choose",
         Op::DefineModule { .. } => "define_module",
         Op::Iterate { .. } => "iterate",
+        Op::Repeat { .. } => "repeat",
+        Op::LoopExit { skip: false } => "stop",
+        Op::LoopExit { skip: true } => "skip",
+        Op::IfCarries { .. } => "when_carries",
+        Op::MakeText(_) => "text",
+        Op::DefinePattern { .. } => "define_pattern",
+        Op::Sample { .. } => "sample",
+        Op::Promise(_) => "promise",
         Op::Using { .. } => "using",
     }
+}
+
+/// One recorded authorized effect in an `org.nivren.effects.v1` trace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectRecord {
+    pub operation: String,
+    pub capability: String,
+    pub arguments: String,
+    pub result: serde_json::Value,
+}
+
+fn effect_arguments_digest(arguments: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    for argument in arguments {
+        hasher.update(argument.to_string().as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+/// Serializes an effect result for a trace. Live state — handles, tasks,
+/// channels, functions, secrets — has no trace form and fails recording.
+fn effect_value_to_json(value: &Value) -> Result<serde_json::Value, String> {
+    Ok(match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(inner) => serde_json::Value::Bool(*inner),
+        Value::Int(inner) => serde_json::Value::Number((*inner).into()),
+        Value::Float(inner) => serde_json::Number::from_f64(*inner)
+            .map(serde_json::Value::Number)
+            .ok_or("a non-finite float has no trace form")?,
+        Value::String(inner) => serde_json::Value::String(inner.clone()),
+        Value::Bytes(bytes) => {
+            let mut hex = String::with_capacity(bytes.len() * 2);
+            for byte in bytes.iter() {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            serde_json::json!({ "$bytes": hex })
+        }
+        Value::DateTime(zoned) => serde_json::json!({ "$datetime": zoned.to_string() }),
+        Value::Ok(inner) => serde_json::json!({ "$ok": effect_value_to_json(inner)? }),
+        Value::Err(inner) => serde_json::json!({ "$err": effect_value_to_json(inner)? }),
+        Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(effect_value_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Value::Map(entries) => {
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (key, entry) in entries.iter() {
+                pairs.push(serde_json::Value::Array(vec![
+                    effect_value_to_json(key)?,
+                    effect_value_to_json(entry)?,
+                ]));
+            }
+            serde_json::json!({ "$map": pairs })
+        }
+        Value::Record(record) => {
+            let mut fields = serde_json::Map::new();
+            for (name, field) in &record.fields {
+                fields.insert(name.clone(), effect_value_to_json(field)?);
+            }
+            serde_json::json!({ "$shape": record.type_name, "$fields": fields })
+        }
+        Value::Enum(subject) => serde_json::json!({
+            "$choice": subject.type_name,
+            "$case": subject.variant,
+            "$payload": subject
+                .payload
+                .as_ref()
+                .map(effect_value_to_json)
+                .transpose()?,
+        }),
+        other => {
+            return Err(format!(
+                "{} values hold live state a trace cannot carry",
+                other.type_name()
+            ));
+        }
+    })
+}
+
+fn effect_json_to_value(value: &serde_json::Value, span: Span) -> Result<Value, NivError> {
+    let invalid = |reason: &str| {
+        NivError::new(
+            format!("invalid trace entry: {reason}"),
+            span.line,
+            span.column,
+        )
+    };
+    Ok(match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(inner) => Value::Bool(*inner),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Value::Int(integer)
+            } else if let Some(float) = number.as_f64() {
+                Value::Float(float)
+            } else {
+                return Err(invalid("number outside the supported range"));
+            }
+        }
+        serde_json::Value::String(inner) => Value::String(inner.clone()),
+        serde_json::Value::Array(values) => Value::Array(Arc::new(
+            values
+                .iter()
+                .map(|entry| effect_json_to_value(entry, span))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        serde_json::Value::Object(object) => {
+            if let Some(inner) = object.get("$ok") {
+                Value::Ok(Arc::new(effect_json_to_value(inner, span)?))
+            } else if let Some(inner) = object.get("$err") {
+                Value::Err(Arc::new(effect_json_to_value(inner, span)?))
+            } else if let Some(serde_json::Value::String(hex)) = object.get("$bytes") {
+                if hex.len() % 2 != 0 {
+                    return Err(invalid("odd byte text"));
+                }
+                let mut bytes = Vec::with_capacity(hex.len() / 2);
+                for index in (0..hex.len()).step_by(2) {
+                    let byte = u8::from_str_radix(&hex[index..index + 2], 16)
+                        .map_err(|_| invalid("non-hex byte text"))?;
+                    bytes.push(byte);
+                }
+                Value::Bytes(Arc::new(bytes))
+            } else if let Some(serde_json::Value::String(text)) = object.get("$datetime") {
+                let zoned: jiff::Zoned =
+                    text.parse().map_err(|_| invalid("unparseable date/time"))?;
+                Value::DateTime(Arc::new(zoned))
+            } else if let Some(serde_json::Value::Array(pairs)) = object.get("$map") {
+                let mut entries = Vec::with_capacity(pairs.len());
+                for pair in pairs {
+                    let serde_json::Value::Array(pair) = pair else {
+                        return Err(invalid("map entry is not a pair"));
+                    };
+                    if pair.len() != 2 {
+                        return Err(invalid("map entry is not a pair"));
+                    }
+                    entries.push((
+                        effect_json_to_value(&pair[0], span)?,
+                        effect_json_to_value(&pair[1], span)?,
+                    ));
+                }
+                Value::Map(Arc::new(entries))
+            } else if let (
+                Some(serde_json::Value::String(shape)),
+                Some(serde_json::Value::Object(fields)),
+            ) = (object.get("$shape"), object.get("$fields"))
+            {
+                let mut decoded = Vec::with_capacity(fields.len());
+                let mut indices = HashMap::with_capacity(fields.len());
+                for (index, (name, field)) in fields.iter().enumerate() {
+                    decoded.push((name.clone(), effect_json_to_value(field, span)?));
+                    indices.insert(name.clone(), index);
+                }
+                Value::Record(Arc::new(RecordValue {
+                    type_name: shape.clone(),
+                    fields: decoded,
+                    field_indices: Arc::new(indices),
+                }))
+            } else if let (
+                Some(serde_json::Value::String(choice)),
+                Some(serde_json::Value::String(case)),
+            ) = (object.get("$choice"), object.get("$case"))
+            {
+                let payload = match object.get("$payload") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(payload) => Some(effect_json_to_value(payload, span)?),
+                };
+                Value::Enum(Arc::new(EnumValue {
+                    type_name: choice.clone(),
+                    variant: case.clone(),
+                    payload,
+                }))
+            } else {
+                return Err(invalid("unknown object marker"));
+            }
+        }
+    })
+}
+
+const MAX_TEXT_LITERAL_BYTES: usize = 16 * 1024 * 1024;
+
+const TEXT_HOLE_CONTRACT: &str =
+    "give text, a number, a boolean, a date/time, or a shape that derives Display";
+
+fn text_too_long_error(limit: usize, span: Span) -> NivError {
+    NivError::new(
+        format!(
+            "a text literal grew beyond the declared {limit}-byte payload limit; build large output through bounded streams or raise payload_bytes under [limits]"
+        ),
+        span.line,
+        span.column,
+    )
+}
+
+fn loop_exit_escape_error(span: Span) -> NivError {
+    NivError::new(
+        "a loop exit crossed a scope the checker should have rejected",
+        span.line,
+        span.column,
+    )
 }
 
 fn negate(value: Value, span: Span) -> Result<Value, NivError> {
@@ -4579,6 +5658,11 @@ fn negate(value: Value, span: Span) -> Result<Value, NivError> {
             .checked_sub(number)
             .map(Value::Decimal)
             .ok_or_else(|| NivError::new("decimal overflow", span.line, span.column)),
+        Value::UInt(_) | Value::U128(_) => Err(NivError::new(
+            "unsigned values have no negation; convert with std.uint.to_int first",
+            span.line,
+            span.column,
+        )),
         Value::FixedInt(number) if number.kind.signed() => number
             .value
             .checked_neg()
@@ -4618,6 +5702,183 @@ fn int_binary(a: i64, operator: &TokenKind, b: i64, span: Span) -> Result<Value,
         TokenKind::Less => Ok(Value::Bool(a < b)),
         TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
         _ => unreachable!(),
+    }
+}
+
+fn uint_binary(a: u64, operator: &TokenKind, b: u64, span: Span) -> Result<Value, NivError> {
+    let checked = |value: Option<u64>| {
+        value
+            .map(Value::UInt)
+            .ok_or_else(|| NivError::new("unsigned integer overflow", span.line, span.column))
+    };
+    match operator {
+        TokenKind::Plus => checked(a.checked_add(b)),
+        TokenKind::Minus => checked(a.checked_sub(b)),
+        TokenKind::Star => checked(a.checked_mul(b)),
+        TokenKind::Slash if b == 0 => {
+            Err(NivError::new("division by zero", span.line, span.column))
+        }
+        TokenKind::Slash => checked(a.checked_div(b)),
+        TokenKind::Percent if b == 0 => {
+            Err(NivError::new("remainder by zero", span.line, span.column))
+        }
+        TokenKind::Percent => checked(a.checked_rem(b)),
+        TokenKind::Greater => Ok(Value::Bool(a > b)),
+        TokenKind::GreaterEqual => Ok(Value::Bool(a >= b)),
+        TokenKind::Less => Ok(Value::Bool(a < b)),
+        TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
+        _ => unreachable!(),
+    }
+}
+
+fn u128_binary(a: u128, operator: &TokenKind, b: u128, span: Span) -> Result<Value, NivError> {
+    let checked = |value: Option<u128>| {
+        value
+            .map(Value::U128)
+            .ok_or_else(|| NivError::new("unsigned integer overflow", span.line, span.column))
+    };
+    match operator {
+        TokenKind::Plus => checked(a.checked_add(b)),
+        TokenKind::Minus => checked(a.checked_sub(b)),
+        TokenKind::Star => checked(a.checked_mul(b)),
+        TokenKind::Slash if b == 0 => {
+            Err(NivError::new("division by zero", span.line, span.column))
+        }
+        TokenKind::Slash => checked(a.checked_div(b)),
+        TokenKind::Percent if b == 0 => {
+            Err(NivError::new("remainder by zero", span.line, span.column))
+        }
+        TokenKind::Percent => checked(a.checked_rem(b)),
+        TokenKind::Greater => Ok(Value::Bool(a > b)),
+        TokenKind::GreaterEqual => Ok(Value::Bool(a >= b)),
+        TokenKind::Less => Ok(Value::Bool(a < b)),
+        TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
+        _ => unreachable!(),
+    }
+}
+
+fn native_u128_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let source = expect_string(&arguments[0], "std.u128.parse", span)?;
+    if source.len() > 40 {
+        return Ok(result_error("U128 text exceeds 40 bytes"));
+    }
+    Ok(match source.parse::<u128>() {
+        Ok(value) => Value::Ok(Arc::new(Value::U128(value))),
+        Err(_) => result_error("invalid or out-of-range U128"),
+    })
+}
+
+fn native_u128_format(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    match &arguments[0] {
+        Value::U128(value) => Ok(Value::String(value.to_string())),
+        other => Err(expected_value("std.u128.format", "U128", other, span)),
+    }
+}
+
+fn native_u128_from_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Int(value) = arguments[0] else {
+        return Err(expected_value(
+            "std.u128.from_int",
+            "Int",
+            &arguments[0],
+            span,
+        ));
+    };
+    Ok(match u128::try_from(value) {
+        Ok(value) => Value::Ok(Arc::new(Value::U128(value))),
+        Err(_) => result_error("negative Int cannot become U128"),
+    })
+}
+
+fn native_u128_to_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::U128(value) = &arguments[0] else {
+        return Err(expected_value(
+            "std.u128.to_int",
+            "U128",
+            &arguments[0],
+            span,
+        ));
+    };
+    Ok(match i64::try_from(*value) {
+        Ok(value) => Value::Ok(Arc::new(Value::Int(value))),
+        Err(_) => result_error("U128 exceeds the Int range"),
+    })
+}
+
+fn native_uint_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let source = expect_string(&arguments[0], "std.uint.parse", span)?;
+    if source.len() > 20 {
+        return Ok(result_error("UInt text exceeds 20 bytes"));
+    }
+    Ok(match source.parse::<u64>() {
+        Ok(value) => Value::Ok(Arc::new(Value::UInt(value))),
+        Err(_) => result_error("invalid or out-of-range UInt"),
+    })
+}
+
+fn native_uint_format(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_uint(&arguments[0], "std.uint.format", span)?;
+    Ok(Value::String(value.to_string()))
+}
+
+fn native_uint_from_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Int(value) = arguments[0] else {
+        return Err(expected_value(
+            "std.uint.from_int",
+            "Int",
+            &arguments[0],
+            span,
+        ));
+    };
+    Ok(match u64::try_from(value) {
+        Ok(value) => Value::Ok(Arc::new(Value::UInt(value))),
+        Err(_) => result_error("negative Int cannot become UInt"),
+    })
+}
+
+fn native_uint_to_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_uint(&arguments[0], "std.uint.to_int", span)?;
+    Ok(match i64::try_from(value) {
+        Ok(value) => Value::Ok(Arc::new(Value::Int(value))),
+        Err(_) => result_error("UInt exceeds the Int range"),
+    })
+}
+
+fn native_uint_wrapping(
+    arguments: &[Value],
+    operation: &str,
+    span: Span,
+    wrap: impl Fn(u64, u64) -> u64,
+) -> Result<Value, NivError> {
+    let left = expect_uint(&arguments[0], operation, span)?;
+    let right = expect_uint(&arguments[1], operation, span)?;
+    Ok(Value::UInt(wrap(left, right)))
+}
+
+fn native_uint_wrapping_add(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_uint_wrapping(&arguments, "std.uint.wrapping_add", span, u64::wrapping_add)
+}
+
+fn native_uint_wrapping_sub(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_uint_wrapping(&arguments, "std.uint.wrapping_sub", span, u64::wrapping_sub)
+}
+
+fn native_uint_wrapping_mul(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_uint_wrapping(&arguments, "std.uint.wrapping_mul", span, u64::wrapping_mul)
+}
+
+fn native_uint_min(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    Ok(Value::UInt(u64::MIN))
+}
+
+fn native_uint_max(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    Ok(Value::UInt(u64::MAX))
+}
+
+fn expect_uint(value: &Value, operation: &str, span: Span) -> Result<u64, NivError> {
+    match value {
+        Value::UInt(value) => Ok(*value),
+        other => Err(expected_value(operation, "UInt", other, span)),
     }
 }
 
@@ -4779,9 +6040,6 @@ fn check_arity(name: &str, expected: usize, actual: usize, span: Span) -> Result
         ))
     }
 }
-fn native_clock(_: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    unix_seconds(span).map(Value::Float)
-}
 fn native_len(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     match &arguments[0] {
         Value::String(value) => i64::try_from(value.chars().count())
@@ -4847,19 +6105,6 @@ fn native_err(arguments: Vec<Value>, _: Span) -> Result<Value, NivError> {
 fn standard_library() -> Value {
     let modules = HashMap::from([
         (
-            "fs".into(),
-            native_module(&[
-                ("read", 1, native_fs_read, Some("FileRead")),
-                ("write", 2, native_fs_write, Some("FileWrite")),
-                ("exists", 1, native_fs_exists, Some("FileRead")),
-                ("open_read", 1, native_fs_open_read, Some("FileRead")),
-                ("open_write", 1, native_fs_open_write, Some("FileWrite")),
-                ("read_open", 2, native_fs_read_open, Some("FileRead")),
-                ("write_open", 2, native_fs_write_open, Some("FileWrite")),
-                ("close", 1, native_fs_close, None),
-            ]),
-        ),
-        (
             "files".into(),
             named_native_module(&[
                 ("read", "read", 1, native_fs_read, Some("FileRead")),
@@ -4880,15 +6125,15 @@ fn standard_library() -> Value {
                     Some("FileWrite"),
                 ),
                 (
-                    "read_open",
-                    "read_open",
+                    "read_from",
+                    "read_from",
                     2,
                     native_fs_read_open,
                     Some("FileRead"),
                 ),
                 (
-                    "write_open",
-                    "write_open",
+                    "write_to",
+                    "write_to",
                     2,
                     native_fs_write_open,
                     Some("FileWrite"),
@@ -4925,7 +6170,6 @@ fn standard_library() -> Value {
         (
             "time".into(),
             native_module(&[
-                ("now", 0, native_clock, Some("Time")),
                 ("sleep", 1, native_sleep, Some("Time")),
                 ("from_unix", 2, native_time_from_unix, None),
                 ("parse", 1, native_time_parse, None),
@@ -4934,6 +6178,20 @@ fn standard_library() -> Value {
                 ("unix", 1, native_time_unix, None),
                 ("add_seconds", 2, native_time_add_seconds, None),
                 ("now_zoned", 1, native_time_now_zoned, Some("Time")),
+                ("monotonic", 0, native_time_monotonic, Some("Time")),
+                ("year", 1, native_time_year, None),
+                ("month", 1, native_time_month, None),
+                ("day", 1, native_time_day, None),
+                ("hour", 1, native_time_hour, None),
+                ("minute", 1, native_time_minute, None),
+                ("second", 1, native_time_second, None),
+                ("weekday", 1, native_time_weekday, None),
+                (
+                    "difference_seconds",
+                    2,
+                    native_time_difference_seconds,
+                    None,
+                ),
             ]),
         ),
         (
@@ -4947,7 +6205,7 @@ fn standard_library() -> Value {
                 ("compact", 1, native_json_compact, None),
                 ("pretty", 1, native_json_pretty, None),
                 ("parse", 1, native_json_parse, None),
-                ("stringify", 1, native_json_stringify, None),
+                ("encode", 1, native_json_stringify, None),
                 ("decode", 2, native_json_decode, None),
                 ("read_next", 2, native_json_read_next, Some("FileRead")),
                 (
@@ -4976,6 +6234,21 @@ fn standard_library() -> Value {
                 ("split", 3, native_text_split, None),
                 ("split_last", 2, native_text_split_last, None),
                 ("starts_with", 2, native_text_starts_with, None),
+                ("contains", 2, native_text_contains, None),
+                ("ends_with", 2, native_text_ends_with, None),
+                ("index_of", 2, native_text_index_of, None),
+                ("slice", 3, native_text_slice, None),
+                ("replace", 4, native_text_replace, None),
+                ("trim", 1, native_text_trim, None),
+                ("trim_start", 1, native_text_trim_start, None),
+                ("trim_end", 1, native_text_trim_end, None),
+                ("to_upper", 1, native_text_to_upper, None),
+                ("to_lower", 1, native_text_to_lower, None),
+                ("join", 2, native_text_join, None),
+                ("lines", 1, native_text_lines, None),
+                ("repeat", 2, native_text_repeat, None),
+                ("pad_start", 3, native_text_pad_start, None),
+                ("pad_end", 3, native_text_pad_end, None),
             ]),
         ),
         (
@@ -4983,6 +6256,20 @@ fn standard_library() -> Value {
             native_module(&[
                 ("parse", 1, native_int_parse, None),
                 ("format", 1, native_int_format, None),
+            ]),
+        ),
+        (
+            "uint".into(),
+            native_module(&[
+                ("parse", 1, native_uint_parse, None),
+                ("format", 1, native_uint_format, None),
+                ("from_int", 1, native_uint_from_int, None),
+                ("to_int", 1, native_uint_to_int, None),
+                ("wrapping_add", 2, native_uint_wrapping_add, None),
+                ("wrapping_sub", 2, native_uint_wrapping_sub, None),
+                ("wrapping_mul", 2, native_uint_wrapping_mul, None),
+                ("min", 0, native_uint_min, None),
+                ("max", 0, native_uint_max, None),
             ]),
         ),
         (
@@ -5032,7 +6319,7 @@ fn standard_library() -> Value {
                 ("sha256", 1, native_crypto_sha256, None),
                 ("hmac_sha256", 2, native_crypto_hmac_sha256, None),
                 (
-                    "verify_hmac_sha256",
+                    "hmac_sha256_verify",
                     3,
                     native_crypto_verify_hmac_sha256,
                     None,
@@ -5063,9 +6350,9 @@ fn standard_library() -> Value {
             "compression".into(),
             native_module(&[
                 ("gzip", 2, native_compression_gzip, None),
-                ("gunzip", 2, native_compression_gunzip, None),
+                ("gzip_decode", 2, native_compression_gunzip, None),
                 ("zlib", 2, native_compression_zlib, None),
-                ("unzlib", 2, native_compression_unzlib, None),
+                ("zlib_decode", 2, native_compression_unzlib, None),
             ]),
         ),
         (
@@ -5078,12 +6365,12 @@ fn standard_library() -> Value {
         (
             "encoding".into(),
             native_module(&[
-                ("hex", 1, native_encoding_hex, None),
-                ("unhex", 1, native_encoding_unhex, None),
-                ("base64", 1, native_encoding_base64, None),
-                ("unbase64", 1, native_encoding_unbase64, None),
-                ("base64url", 1, native_encoding_base64url, None),
-                ("unbase64url", 1, native_encoding_unbase64url, None),
+                ("hex_encode", 1, native_encoding_hex, None),
+                ("hex_decode", 1, native_encoding_unhex, None),
+                ("base64_encode", 1, native_encoding_base64, None),
+                ("base64_decode", 1, native_encoding_unbase64, None),
+                ("base64url_encode", 1, native_encoding_base64url, None),
+                ("base64url_decode", 1, native_encoding_unbase64url, None),
             ]),
         ),
         (
@@ -5168,9 +6455,27 @@ fn standard_library() -> Value {
             ),
         ),
         (
+            "u128".into(),
+            native_module(&[
+                ("parse", 1, native_u128_parse, None),
+                ("format", 1, native_u128_format, None),
+                ("from_int", 1, native_u128_from_int, None),
+                ("to_int", 1, native_u128_to_int, None),
+            ]),
+        ),
+        (
+            "i128".into(),
+            fixed_native_module(
+                native_i128_from_int,
+                native_i128_parse,
+                native_i128_format,
+                native_i128_to_int,
+            ),
+        ),
+        (
             "map".into(),
             native_module(&[
-                ("single", 2, native_map_single, None),
+                ("of", 2, native_map_single, None),
                 ("set", 3, native_map_set, None),
                 ("get", 2, native_map_get, None),
                 ("contains", 2, native_map_contains, None),
@@ -5183,7 +6488,7 @@ fn standard_library() -> Value {
         (
             "set".into(),
             native_module(&[
-                ("single", 1, native_set_single, None),
+                ("of", 1, native_set_single, None),
                 ("add", 2, native_set_add, None),
                 ("contains", 2, native_set_contains, None),
                 ("remove", 2, native_set_remove, None),
@@ -5252,8 +6557,8 @@ fn standard_library() -> Value {
                 ("read_line", 3, native_net_read_line, Some("Network")),
                 ("write", 2, native_net_write, Some("Network")),
                 ("write_some", 4, native_net_write_some, Some("Network")),
-                ("ready", 3, native_net_ready, Some("Network")),
-                ("ready_any", 3, native_net_ready_any, Some("Network")),
+                ("wait_ready", 3, native_net_ready, Some("Network")),
+                ("wait_ready_any", 3, native_net_ready_any, Some("Network")),
                 ("read_ready", 3, native_net_read_ready, Some("Network")),
                 ("write_ready", 4, native_net_write_ready, Some("Network")),
                 (
@@ -5277,10 +6582,6 @@ fn standard_library() -> Value {
                 ("tls_close", 1, native_net_tls_close, Some("Network")),
                 ("close", 1, native_net_close, Some("Network")),
             ]),
-        ),
-        (
-            "http".into(),
-            native_module(&[("get", 2, native_http_get, Some("Network"))]),
         ),
         (
             "web".into(),
@@ -5340,17 +6641,6 @@ fn standard_library() -> Value {
             ]),
         ),
         (
-            "task".into(),
-            native_module(&[
-                ("spawn", 1, native_intrinsic, Some("Task")),
-                ("await", 1, native_intrinsic, Some("Task")),
-                ("await_for", 2, native_intrinsic, Some("Task")),
-                ("cancel", 1, native_intrinsic, Some("Task")),
-                ("all", 1, native_intrinsic, Some("Task")),
-                ("race", 1, native_intrinsic, Some("Task")),
-            ]),
-        ),
-        (
             "tasks".into(),
             native_module(&[
                 ("spawn", 1, native_intrinsic, Some("Task")),
@@ -5359,14 +6649,6 @@ fn standard_library() -> Value {
                 ("cancel", 1, native_intrinsic, Some("Task")),
                 ("all", 1, native_intrinsic, Some("Task")),
                 ("race", 1, native_intrinsic, Some("Task")),
-            ]),
-        ),
-        (
-            "channel".into(),
-            native_module(&[
-                ("create", 1, native_intrinsic, Some("Channel")),
-                ("send", 3, native_intrinsic, Some("Channel")),
-                ("receive", 2, native_intrinsic, Some("Channel")),
             ]),
         ),
         (
@@ -5414,8 +6696,8 @@ fn standard_library() -> Value {
             "transactions".into(),
             named_native_module(&[
                 (
-                    "begin",
-                    "transactions.begin",
+                    "create",
+                    "transactions.create",
                     1,
                     native_transaction_begin,
                     None,
@@ -5493,6 +6775,33 @@ fn standard_library() -> Value {
                 ("kind", 1, native_reflect_kind, None),
                 ("fields", 1, native_reflect_fields, None),
                 ("schema", 1, native_reflect_schema, None),
+            ]),
+        ),
+        (
+            "plans".into(),
+            native_module(&[
+                ("encode", 1, native_plans_encode, None),
+                ("decode", 2, native_plans_decode, None),
+            ]),
+        ),
+        (
+            "gpu".into(),
+            native_module(&[
+                ("available", 0, native_gpu_available, Some("Gpu")),
+                ("open", 1, native_gpu_open, Some("Gpu")),
+            ]),
+        ),
+        (
+            "source".into(),
+            native_module(&[
+                ("shape", 3, native_source_shape, None),
+                ("choice", 2, native_source_choice, None),
+                ("binding", 2, native_source_binding, None),
+                ("function", 4, native_source_function, None),
+                ("give", 1, native_source_give, None),
+                ("call", 1, native_source_call, None),
+                ("when", 3, native_source_when, None),
+                ("each", 3, native_source_each, None),
             ]),
         ),
     ]);
@@ -5671,7 +6980,7 @@ fn native_library_close(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
 }
 
 fn native_fs_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let path = expect_string(&arguments[0], "std.fs.read", span)?;
+    let path = expect_string(&arguments[0], "std.files.read", span)?;
     Ok(match fs::read_to_string(path) {
         Ok(contents) => Value::Ok(Arc::new(Value::String(contents))),
         Err(error) => result_error(error),
@@ -5679,8 +6988,8 @@ fn native_fs_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> 
 }
 
 fn native_fs_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let path = expect_string(&arguments[0], "std.fs.write", span)?;
-    let contents = expect_string(&arguments[1], "std.fs.write", span)?;
+    let path = expect_string(&arguments[0], "std.files.write", span)?;
+    let contents = expect_string(&arguments[1], "std.files.write", span)?;
     Ok(match fs::write(path, contents) {
         Ok(()) => Value::Ok(Arc::new(Value::Null)),
         Err(error) => result_error(error),
@@ -5688,8 +6997,14 @@ fn native_fs_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivError>
 }
 
 fn native_fs_exists(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let path = expect_string(&arguments[0], "std.fs.exists", span)?;
-    Ok(Value::Bool(Path::new(path).exists()))
+    let path = expect_string(&arguments[0], "std.files.exists", span)?;
+    Ok(match std::fs::metadata(path) {
+        Ok(_) => Value::Ok(Arc::new(Value::Bool(true))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Value::Ok(Arc::new(Value::Bool(false)))
+        }
+        Err(error) => result_error(format!("cannot inspect '{path}': {error}")),
+    })
 }
 
 fn native_fs_open_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -5720,11 +7035,11 @@ fn native_fs_open_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
 }
 
 fn native_fs_read_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let file = expect_file(&arguments[0], "std.files.read_open", span)?;
-    let maximum = expect_nonnegative(&arguments[1], "std.files.read_open", span)?;
+    let file = expect_file(&arguments[0], "std.files.read_from", span)?;
+    let maximum = expect_nonnegative(&arguments[1], "std.files.read_from", span)?;
     if maximum > 16 * 1024 * 1024 {
         return Err(NivError::new(
-            "std.files.read_open byte limit must be at most 16777216",
+            "std.files.read_from byte limit must be at most 16777216",
             span.line,
             span.column,
         ));
@@ -5754,8 +7069,8 @@ fn native_fs_read_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivEr
 }
 
 fn native_fs_write_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let file = expect_file(&arguments[0], "std.files.write_open", span)?;
-    let contents = expect_string(&arguments[1], "std.files.write_open", span)?;
+    let file = expect_file(&arguments[0], "std.files.write_to", span)?;
+    let contents = expect_string(&arguments[1], "std.files.write_to", span)?;
     let mut slot = file.lock().unwrap();
     let Some(ManagedFile::Writer(file)) = slot.as_mut() else {
         if slot.is_none() {
@@ -5882,6 +7197,85 @@ fn native_time_add_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, N
                 value.time_zone().clone(),
             ))))),
             Err(error) => result_error(error),
+        },
+    )
+}
+
+fn native_time_monotonic(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    // A pinned deterministic test clock overrides the process origin so
+    // `niv test --time` stays reproducible.
+    let fixed = TEST_CLOCK_BITS.load(Ordering::SeqCst);
+    if fixed != LIVE_CLOCK {
+        return Ok(Value::Float(f64::from_bits(fixed)));
+    }
+    static ORIGIN: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
+    Ok(Value::Float(ORIGIN.elapsed().as_secs_f64()))
+}
+
+fn native_time_field(
+    arguments: &[Value],
+    operation: &str,
+    span: Span,
+    field: impl Fn(&jiff::Zoned) -> i64,
+) -> Result<Value, NivError> {
+    let value = expect_datetime(&arguments[0], operation, span)?;
+    Ok(Value::Int(field(value)))
+}
+
+fn native_time_year(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.year", span, |value| {
+        i64::from(value.year())
+    })
+}
+
+fn native_time_month(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.month", span, |value| {
+        i64::from(value.month())
+    })
+}
+
+fn native_time_day(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.day", span, |value| {
+        i64::from(value.day())
+    })
+}
+
+fn native_time_hour(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.hour", span, |value| {
+        i64::from(value.hour())
+    })
+}
+
+fn native_time_minute(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.minute", span, |value| {
+        i64::from(value.minute())
+    })
+}
+
+fn native_time_second(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.second", span, |value| {
+        i64::from(value.second())
+    })
+}
+
+fn native_time_weekday(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_time_field(&arguments, "std.time.weekday", span, |value| {
+        i64::from(value.weekday().to_monday_one_offset())
+    })
+}
+
+fn native_time_difference_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let left = expect_datetime(&arguments[0], "std.time.difference_seconds", span)?;
+    let right = expect_datetime(&arguments[1], "std.time.difference_seconds", span)?;
+    Ok(
+        match left
+            .timestamp()
+            .as_second()
+            .checked_sub(right.timestamp().as_second())
+        {
+            Some(difference) => Value::Ok(Arc::new(Value::Int(difference))),
+            None => result_error("date/time arithmetic overflow"),
         },
     )
 }
@@ -6852,6 +8246,213 @@ fn native_text_split_last(arguments: Vec<Value>, span: Span) -> Result<Value, Ni
     })
 }
 
+fn expect_needle<'a>(
+    arguments: &'a [Value],
+    operation: &str,
+    span: Span,
+) -> Result<(&'a str, &'a str), NivError> {
+    let value = expect_string(&arguments[0], operation, span)?;
+    let needle = expect_string(&arguments[1], operation, span)?;
+    if needle.is_empty() {
+        return Err(NivError::new(
+            format!("{operation} needle cannot be empty"),
+            span.line,
+            span.column,
+        ));
+    }
+    Ok((value, needle))
+}
+
+fn native_text_contains(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let (value, needle) = expect_needle(&arguments, "std.text.contains", span)?;
+    Ok(Value::Bool(value.contains(needle)))
+}
+
+fn native_text_ends_with(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.ends_with", span)?;
+    let suffix = expect_string(&arguments[1], "std.text.ends_with", span)?;
+    Ok(Value::Bool(value.ends_with(suffix)))
+}
+
+fn native_text_index_of(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let (value, needle) = expect_needle(&arguments, "std.text.index_of", span)?;
+    Ok(match value.find(needle) {
+        Some(byte_position) => {
+            let scalar_position = value[..byte_position].chars().count();
+            Value::Int(scalar_position as i64)
+        }
+        None => Value::Null,
+    })
+}
+
+fn native_text_slice(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.slice", span)?;
+    let start = expect_nonnegative(&arguments[1], "std.text.slice", span)?;
+    let end = expect_nonnegative(&arguments[2], "std.text.slice", span)?;
+    let length = value.chars().count();
+    if start > end || end > length {
+        return Ok(result_error(
+            "std.text.slice range must be start-inclusive, end-exclusive, and in bounds",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(
+        value.chars().skip(start).take(end - start).collect(),
+    ))))
+}
+
+fn native_text_replace(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let (value, needle) = expect_needle(&arguments[..2], "std.text.replace", span)?;
+    let replacement = expect_string(&arguments[2], "std.text.replace", span)?;
+    let maximum = expect_nonnegative(&arguments[3], "std.text.replace", span)?;
+    if maximum == 0 || maximum > 1_000_000 {
+        return Ok(result_error(
+            "std.text.replace maximum must be from 1 through 1000000",
+        ));
+    }
+    let output = value.replacen(needle, replacement, maximum);
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.replace exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_trim(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.trim", span)?;
+    Ok(Value::String(value.trim().to_string()))
+}
+
+fn native_text_trim_start(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.trim_start", span)?;
+    Ok(Value::String(value.trim_start().to_string()))
+}
+
+fn native_text_trim_end(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.trim_end", span)?;
+    Ok(Value::String(value.trim_end().to_string()))
+}
+
+fn native_text_to_upper(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.to_upper", span)?;
+    let output = value.to_uppercase();
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.to_upper exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_to_lower(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.to_lower", span)?;
+    let output = value.to_lowercase();
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.to_lower exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_join(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Array(parts) = &arguments[0] else {
+        return Err(NivError::new(
+            format!(
+                "std.text.join expects [String], found {}",
+                arguments[0].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    let separator = expect_string(&arguments[1], "std.text.join", span)?;
+    let mut pieces = Vec::with_capacity(parts.len());
+    for part in parts.iter() {
+        pieces.push(expect_string(part, "std.text.join", span)?);
+    }
+    let output = pieces.join(separator);
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.join exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_lines(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.lines", span)?;
+    let normalized = value.replace("\r\n", "\n");
+    let lines: Vec<Value> = normalized
+        .split('\n')
+        .map(|line| Value::String(line.to_string()))
+        .collect();
+    if lines.len() > 1_000_000 {
+        return Err(NivError::new(
+            "std.text.lines caps at 1000000 lines",
+            span.line,
+            span.column,
+        ));
+    }
+    Ok(Value::Array(Arc::new(lines)))
+}
+
+fn native_text_repeat(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], "std.text.repeat", span)?;
+    let count = expect_nonnegative(&arguments[1], "std.text.repeat", span)?;
+    let Some(length) = value.len().checked_mul(count) else {
+        return Ok(result_error(
+            "std.text.repeat exceeds the 16777216 byte limit",
+        ));
+    };
+    if length > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.text.repeat exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(value.repeat(count)))))
+}
+
+fn native_text_pad(
+    arguments: &[Value],
+    operation: &str,
+    at_start: bool,
+    span: Span,
+) -> Result<Value, NivError> {
+    let value = expect_string(&arguments[0], operation, span)?;
+    let width = expect_nonnegative(&arguments[1], operation, span)?;
+    let pad = expect_string(&arguments[2], operation, span)?;
+    if pad.chars().count() != 1 {
+        return Ok(result_error(
+            "a pad unit is exactly one Unicode scalar value",
+        ));
+    }
+    let current = value.chars().count();
+    if current >= width {
+        return Ok(Value::Ok(Arc::new(Value::String(value.to_string()))));
+    }
+    let padding: String = pad.chars().cycle().take(width - current).collect();
+    let output = if at_start {
+        format!("{padding}{value}")
+    } else {
+        format!("{value}{padding}")
+    };
+    if output.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(format!(
+            "{operation} exceeds the 16777216 byte limit"
+        )));
+    }
+    Ok(Value::Ok(Arc::new(Value::String(output))))
+}
+
+fn native_text_pad_start(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_text_pad(&arguments, "std.text.pad_start", true, span)
+}
+
+fn native_text_pad_end(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    native_text_pad(&arguments, "std.text.pad_end", false, span)
+}
+
 fn native_int_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let source = expect_string(&arguments[0], "std.int.parse", span)?;
     if source.len() > 20 {
@@ -7336,11 +8937,11 @@ fn decode_compressed(decoder: impl Read, limit: usize, format: &str) -> Result<V
 }
 
 fn native_compression_gunzip(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let bytes = expect_bytes(&arguments[0], "std.compression.gunzip", span)?;
+    let bytes = expect_bytes(&arguments[0], "std.compression.gzip_decode", span)?;
     if bytes.len() > 16 * 1024 * 1024 {
         return Ok(result_error("gzip input exceeds 16 MiB"));
     }
-    let limit = decompression_limit(&arguments[1], "std.compression.gunzip", span)?;
+    let limit = decompression_limit(&arguments[1], "std.compression.gzip_decode", span)?;
     decode_compressed(
         flate2::read::GzDecoder::new(bytes.as_slice()),
         limit,
@@ -7349,11 +8950,11 @@ fn native_compression_gunzip(arguments: Vec<Value>, span: Span) -> Result<Value,
 }
 
 fn native_compression_unzlib(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let bytes = expect_bytes(&arguments[0], "std.compression.unzlib", span)?;
+    let bytes = expect_bytes(&arguments[0], "std.compression.zlib_decode", span)?;
     if bytes.len() > 16 * 1024 * 1024 {
         return Ok(result_error("zlib input exceeds 16 MiB"));
     }
-    let limit = decompression_limit(&arguments[1], "std.compression.unzlib", span)?;
+    let limit = decompression_limit(&arguments[1], "std.compression.zlib_decode", span)?;
     decode_compressed(
         flate2::read::ZlibDecoder::new(bytes.as_slice()),
         limit,
@@ -7553,7 +9154,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 fn native_encoding_unhex(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let source = expect_string(&arguments[0], "std.encoding.unhex", span)?;
+    let source = expect_string(&arguments[0], "std.encoding.hex_decode", span)?;
     if source.len() > 16 * 1024 * 1024 {
         return Ok(result_error("hex input exceeds 16 MiB"));
     }
@@ -7609,7 +9210,7 @@ fn native_encoding_base64(arguments: Vec<Value>, span: Span) -> Result<Value, Ni
 }
 
 fn native_encoding_unbase64(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    decode_base64(&arguments[0], "std.encoding.unbase64", false, span)
+    decode_base64(&arguments[0], "std.encoding.base64_decode", false, span)
 }
 
 fn native_encoding_base64url(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -7617,7 +9218,7 @@ fn native_encoding_base64url(arguments: Vec<Value>, span: Span) -> Result<Value,
 }
 
 fn native_encoding_unbase64url(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    decode_base64(&arguments[0], "std.encoding.unbase64url", true, span)
+    decode_base64(&arguments[0], "std.encoding.base64url_decode", true, span)
 }
 
 fn bounded_crypto_input<'a>(
@@ -8001,13 +9602,13 @@ fn native_crypto_hmac_sha256(arguments: Vec<Value>, span: Span) -> Result<Value,
 
 fn native_crypto_verify_hmac_sha256(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let (key, message) =
-        match crypto_hmac_inputs(&arguments, "std.crypto.verify_hmac_sha256", span)? {
+        match crypto_hmac_inputs(&arguments, "std.crypto.hmac_sha256_verify", span)? {
             Ok(inputs) => inputs,
             Err(error) => return Ok(error),
         };
     let tag = match bounded_crypto_input(
         &arguments[2],
-        "std.crypto.verify_hmac_sha256",
+        "std.crypto.hmac_sha256_verify",
         "HMAC tag",
         32,
         span,
@@ -8236,6 +9837,14 @@ fixed_constructor!(
     native_u64_to_int,
     FixedKind::U64,
     "u64"
+);
+fixed_constructor!(
+    native_i128_from_int,
+    native_i128_parse,
+    native_i128_format,
+    native_i128_to_int,
+    FixedKind::I128,
+    "i128"
 );
 
 fn fixed_format(
@@ -8891,8 +10500,8 @@ fn native_net_accept(arguments: Vec<Value>, span: Span) -> Result<Value, NivErro
 }
 
 fn native_http_get(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let url = expect_string(&arguments[0], "std.http.get", span)?;
-    let timeout = expect_duration(&arguments[1], "std.http.get", span)?;
+    let url = expect_string(&arguments[0], "std.web.get", span)?;
+    let timeout = expect_duration(&arguments[1], "std.web.get", span)?;
     Ok(match http_get(url, timeout) {
         Ok(body) => Value::Ok(Arc::new(Value::String(body))),
         Err(error) => result_error(error),
@@ -8935,23 +10544,22 @@ fn native_web_request(arguments: Vec<Value>, span: Span) -> Result<Value, NivErr
     Ok(
         match http_request(method, url, &request_headers, body, timeout, maximum) {
             Ok(response) => {
-                let mut entries = vec![
-                    (
-                        Value::String("status".into()),
-                        Value::String(response.code.to_string()),
-                    ),
-                    (
-                        Value::String("body".into()),
-                        Value::String(String::from_utf8_lossy(&response.body).into_owned()),
-                    ),
-                ];
-                entries.extend(response.headers.into_iter().map(|(name, value)| {
-                    (
-                        Value::String(format!("header:{name}")),
-                        Value::String(value),
-                    )
-                }));
-                Value::Ok(Arc::new(Value::Map(Arc::new(entries))))
+                let headers = response
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| (Value::String(name), Value::String(value)))
+                    .collect::<Vec<_>>();
+                Value::Ok(Arc::new(builtin_record(
+                    "Response",
+                    vec![
+                        ("status", Value::Int(i64::from(response.code))),
+                        (
+                            "body",
+                            Value::String(String::from_utf8_lossy(&response.body).into_owned()),
+                        ),
+                        ("headers", Value::Map(Arc::new(headers))),
+                    ],
+                )))
             }
             Err(error) => result_error(error),
         },
@@ -9038,24 +10646,23 @@ fn native_web_read_request(arguments: Vec<Value>, span: Span) -> Result<Value, N
     Ok(
         match read_http_request(&mut stream.lock().unwrap(), maximum) {
             Ok(request) => {
-                let mut entries = vec![
-                    (
-                        Value::String("method".into()),
-                        Value::String(request.method),
-                    ),
-                    (Value::String("path".into()), Value::String(request.path)),
-                    (
-                        Value::String("body".into()),
-                        Value::String(String::from_utf8_lossy(&request.body).into_owned()),
-                    ),
-                ];
-                entries.extend(request.headers.into_iter().map(|(name, value)| {
-                    (
-                        Value::String(format!("header:{name}")),
-                        Value::String(value),
-                    )
-                }));
-                Value::Ok(Arc::new(Value::Map(Arc::new(entries))))
+                let headers = request
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| (Value::String(name), Value::String(value)))
+                    .collect::<Vec<_>>();
+                Value::Ok(Arc::new(builtin_record(
+                    "Request",
+                    vec![
+                        ("method", Value::String(request.method)),
+                        ("path", Value::String(request.path)),
+                        (
+                            "body",
+                            Value::String(String::from_utf8_lossy(&request.body).into_owned()),
+                        ),
+                        ("headers", Value::Map(Arc::new(headers))),
+                    ],
+                )))
             }
             Err(error) => result_error(error),
         },
@@ -9267,16 +10874,27 @@ fn native_tls_options(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivE
 #[cfg(feature = "host-runtime")]
 fn native_websocket_accept(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let stream = expect_stream(&arguments[0], "std.web.websocket_accept", span)?;
-    let entries = expect_map(&arguments[1], "std.web.websocket_accept", span)?;
+    let Value::Record(request) = &arguments[1] else {
+        return Err(NivError::new(
+            "std.web.websocket_accept takes the Request shape from std.web.read_request",
+            span.line,
+            span.column,
+        ));
+    };
     let mut method = None;
     let mut headers = BTreeMap::new();
-    for (key, value) in entries.iter() {
-        let key = expect_string(key, "std.web.websocket_accept request key", span)?;
-        let value = expect_string(value, "std.web.websocket_accept request value", span)?;
-        if key == "method" {
-            method = Some(value.to_string());
-        } else if let Some(name) = key.strip_prefix("header:") {
-            headers.insert(name.to_ascii_lowercase(), value.to_string());
+    for (name, value) in &request.fields {
+        match (name.as_str(), value) {
+            ("method", Value::String(value)) => method = Some(value.to_string()),
+            ("headers", Value::Map(entries)) => {
+                for (key, value) in entries.iter() {
+                    let key = expect_string(key, "std.web.websocket_accept header name", span)?;
+                    let value =
+                        expect_string(value, "std.web.websocket_accept header value", span)?;
+                    headers.insert(key.to_ascii_lowercase(), value.to_string());
+                }
+            }
+            _ => {}
         }
     }
     let Some(method) = method else {
@@ -9349,6 +10967,462 @@ portable_network_unavailable!(
     native_net_tls_close,
 );
 
+fn native_plans_encode(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Record(record) = &arguments[0] else {
+        return Err(NivError::new(
+            format!(
+                "std.plans.encode expects a prepared plan shape, found {}",
+                arguments[0].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    let mut fields = serde_json::Map::new();
+    for (name, field) in &record.fields {
+        match effect_value_to_json(field) {
+            Ok(json) => {
+                fields.insert(name.clone(), json);
+            }
+            Err(reason) => {
+                return Ok(result_error(format!(
+                    "this plan is not portable: field '{name}' holds {reason}"
+                )));
+            }
+        }
+    }
+    let envelope = serde_json::json!({
+        "schema": "org.nivren.portable-plan.v1",
+        "shape": record.type_name,
+        "fields": fields,
+    });
+    let bytes = serde_json::to_string(&envelope)
+        .expect("plan envelopes contain only serializable values")
+        .into_bytes();
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.plans.encode exceeds the 16777216 byte limit",
+        ));
+    }
+    Ok(Value::Ok(Arc::new(Value::Bytes(Arc::new(bytes)))))
+}
+
+fn native_plans_decode(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::RecordType(record_type) = &arguments[0] else {
+        return Err(NivError::new(
+            format!(
+                "std.plans.decode expects a plan shape constructor, found {}",
+                arguments[0].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    let Value::Bytes(bytes) = &arguments[1] else {
+        return Err(NivError::new(
+            format!(
+                "std.plans.decode expects plan Bytes, found {}",
+                arguments[1].type_name()
+            ),
+            span.line,
+            span.column,
+        ));
+    };
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Ok(result_error(
+            "std.plans.decode exceeds the 16777216 byte limit",
+        ));
+    }
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(result_error("these bytes are not a portable plan"));
+    };
+    if parsed.get("schema").and_then(serde_json::Value::as_str)
+        != Some("org.nivren.portable-plan.v1")
+    {
+        return Ok(result_error(
+            "these bytes carry an unknown plan format version",
+        ));
+    }
+    let shape = parsed.get("shape").and_then(serde_json::Value::as_str);
+    if shape != Some(record_type.name.as_str()) {
+        return Ok(result_error(format!(
+            "this plan carries shape '{}', expected '{}'",
+            shape.unwrap_or("<missing>"),
+            record_type.name
+        )));
+    }
+    let Some(serde_json::Value::Object(fields)) = parsed.get("fields") else {
+        return Ok(result_error("this plan is missing its fields"));
+    };
+    if fields.len() != record_type.fields.len() {
+        return Ok(result_error(format!(
+            "this plan carries {} field(s), '{}' declares {}",
+            fields.len(),
+            record_type.name,
+            record_type.fields.len()
+        )));
+    }
+    let mut decoded = Vec::with_capacity(record_type.fields.len());
+    for (name, _) in &record_type.fields {
+        let Some(field) = fields.get(name) else {
+            return Ok(result_error(format!("this plan is missing field '{name}'")));
+        };
+        match effect_json_to_value(field, span) {
+            Ok(value) => decoded.push((name.clone(), value)),
+            Err(error) => return Ok(result_error(error.message)),
+        }
+    }
+    Ok(Value::Ok(Arc::new(Value::Record(Arc::new(RecordValue {
+        type_name: record_type.name.clone(),
+        fields: decoded,
+        field_indices: record_type.field_indices.clone(),
+    })))))
+}
+
+fn validate_source_name(name: &str, span: Span) -> Result<Option<Value>, NivError> {
+    let valid = matches!(
+        crate::lexer::scan(name),
+        Ok(tokens)
+            if tokens.len() == 2
+                && matches!(tokens[0].kind, crate::lexer::TokenKind::Identifier(_))
+    );
+    let _ = span;
+    Ok(if valid {
+        None
+    } else {
+        Some(result_error(format!(
+            "'{name}' is not a single well-formed Nivren name"
+        )))
+    })
+}
+
+fn native_source_shape(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.shape", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let Value::Map(fields) = &arguments[1] else {
+        return Err(expected_value(
+            "std.source.shape",
+            "Map<String, String>",
+            &arguments[1],
+            span,
+        ));
+    };
+    if fields.is_empty() {
+        return Ok(result_error("a generated shape needs at least one field"));
+    }
+    let mut definitions = Vec::with_capacity(fields.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in fields.iter() {
+        let (Value::String(field), Value::String(type_text)) = (key, value) else {
+            return Ok(result_error(
+                "shape fields map field names to type text, both String",
+            ));
+        };
+        if let Some(invalid) = validate_source_name(field, span)? {
+            return Ok(invalid);
+        }
+        if !seen.insert(field.clone()) {
+            return Ok(result_error(format!(
+                "field '{field}' appears more than once"
+            )));
+        }
+        let ty = match crate::parser::parse_type(type_text) {
+            Ok(ty) => ty,
+            Err(error) => return Ok(result_error(error.message)),
+        };
+        definitions.push(crate::ast::FieldDef {
+            name: field.clone(),
+            ty,
+            span,
+        });
+    }
+    let Value::Array(derive_values) = &arguments[2] else {
+        return Err(expected_value(
+            "std.source.shape",
+            "[String]",
+            &arguments[2],
+            span,
+        ));
+    };
+    let mut derives = Vec::with_capacity(derive_values.len());
+    for derive in derive_values.iter() {
+        let Value::String(derive) = derive else {
+            return Ok(result_error("derives are named as String values"));
+        };
+        derives.push(derive.clone());
+    }
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Record {
+            name: name.to_string(),
+            type_params: vec![],
+            fields: definitions,
+            derives,
+            span,
+        },
+    )))))
+}
+
+fn native_source_choice(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.choice", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let Value::Map(cases) = &arguments[1] else {
+        return Err(expected_value(
+            "std.source.choice",
+            "Map<String, String>",
+            &arguments[1],
+            span,
+        ));
+    };
+    if cases.is_empty() {
+        return Ok(result_error("a generated choice needs at least one case"));
+    }
+    let mut variants = Vec::with_capacity(cases.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in cases.iter() {
+        let (Value::String(case), Value::String(payload_text)) = (key, value) else {
+            return Ok(result_error(
+                "choice cases map case names to payload type text (empty for none), both String",
+            ));
+        };
+        if let Some(invalid) = validate_source_name(case, span)? {
+            return Ok(invalid);
+        }
+        if !seen.insert(case.clone()) {
+            return Ok(result_error(format!(
+                "case '{case}' appears more than once"
+            )));
+        }
+        let payload = if payload_text.is_empty() {
+            None
+        } else {
+            match crate::parser::parse_type(payload_text) {
+                Ok(ty) => Some(ty),
+                Err(error) => return Ok(result_error(error.message)),
+            }
+        };
+        variants.push(crate::ast::VariantDef {
+            name: case.clone(),
+            payload,
+            span,
+        });
+    }
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Enum {
+            name: name.to_string(),
+            type_params: vec![],
+            variants,
+            span,
+        },
+    )))))
+}
+
+fn native_source_binding(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.binding", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let literal = match &arguments[1] {
+        Value::Int(value) => Literal::Int(*value),
+        Value::Float(value) => Literal::Float(*value),
+        Value::String(value) => Literal::String(value.clone()),
+        Value::Bool(value) => Literal::Bool(*value),
+        Value::Null => Literal::Null,
+        other => {
+            return Ok(result_error(format!(
+                "a generated binding holds literal data; found {}",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Let {
+            name: name.to_string(),
+            mutable: false,
+            annotation: None,
+            initializer: Expr::Literal(literal, span),
+            span,
+        },
+    )))))
+}
+
+/// Collects `[SourceStatement]` builder output into a statement body.
+fn source_statement_body(value: &Value, builder: &str, span: Span) -> Result<Vec<Stmt>, String> {
+    let Value::Array(items) = value else {
+        return Err(format!(
+            "{builder} takes a [SourceStatement] body, found {}",
+            value.type_name()
+        ));
+    };
+    let mut body = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let Value::SourceDeclaration(statement) = item else {
+            return Err(format!(
+                "{builder} bodies hold std.source statement values, found {}",
+                item.type_name()
+            ));
+        };
+        body.push(statement.as_ref().clone());
+    }
+    let _ = span;
+    Ok(body)
+}
+
+fn native_source_function(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.function", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let Value::Map(parameters) = &arguments[1] else {
+        return Err(expected_value(
+            "std.source.function",
+            "Map<String, String>",
+            &arguments[1],
+            span,
+        ));
+    };
+    let mut params = Vec::with_capacity(parameters.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in parameters.iter() {
+        let (Value::String(parameter), Value::String(type_text)) = (key, value) else {
+            return Ok(result_error(
+                "function parameters map names to type text, both String",
+            ));
+        };
+        if let Some(invalid) = validate_source_name(parameter, span)? {
+            return Ok(invalid);
+        }
+        if !seen.insert(parameter.clone()) {
+            return Ok(result_error(format!(
+                "parameter '{parameter}' appears more than once"
+            )));
+        }
+        let ty = match crate::parser::parse_type(type_text) {
+            Ok(ty) => ty,
+            Err(error) => return Ok(result_error(error.message)),
+        };
+        params.push(crate::ast::Param {
+            name: parameter.clone(),
+            ty: Some(ty),
+            span,
+        });
+    }
+    let gives = expect_string(&arguments[2], "std.source.function", span)?;
+    let return_type = if gives.is_empty() {
+        None
+    } else {
+        match crate::parser::parse_type(gives) {
+            Ok(ty) => Some(ty),
+            Err(error) => return Ok(result_error(error.message)),
+        }
+    };
+    let body = match source_statement_body(&arguments[3], "std.source.function", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Function {
+            name: name.to_string(),
+            type_params: vec![],
+            params,
+            return_type,
+            needs: vec![],
+            capability_needs: vec![],
+            body,
+            span,
+        },
+    )))))
+}
+
+fn native_source_give(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let text = expect_string(&arguments[0], "std.source.give", span)?;
+    let expression = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Return(Some(expression), span),
+    )))))
+}
+
+fn native_source_call(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let text = expect_string(&arguments[0], "std.source.call", span)?;
+    let expression = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Expression(expression),
+    )))))
+}
+
+fn native_source_when(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let text = expect_string(&arguments[0], "std.source.when", span)?;
+    let condition = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    let then_branch = match source_statement_body(&arguments[1], "std.source.when", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    let otherwise = match source_statement_body(&arguments[2], "std.source.when", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::If {
+            condition,
+            then_branch: Box::new(Stmt::Block(then_branch, span)),
+            else_branch: if otherwise.is_empty() {
+                None
+            } else {
+                Some(Box::new(Stmt::Block(otherwise, span)))
+            },
+            span,
+        },
+    )))))
+}
+
+fn native_source_each(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.each", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let text = expect_string(&arguments[1], "std.source.each", span)?;
+    let iterable = match crate::parser::parse_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => return Ok(result_error(error.message)),
+    };
+    let body = match source_statement_body(&arguments[2], "std.source.each", span) {
+        Ok(body) => body,
+        Err(message) => return Ok(result_error(message)),
+    };
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::For {
+            name: name.to_string(),
+            pattern: None,
+            iterable,
+            body: Box::new(Stmt::Block(body, span)),
+            span,
+        },
+    )))))
+}
+
+fn native_gpu_available(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    Ok(Value::Bool(false))
+}
+
+fn native_gpu_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let adapter = expect_string(&arguments[0], "std.gpu.open", span)?;
+    Ok(result_error(format!(
+        "no GPU adapter '{adapter}' is available on this host"
+    )))
+}
+
 fn native_reflect_kind(arguments: Vec<Value>, _: Span) -> Result<Value, NivError> {
     Ok(Value::String(arguments[0].type_name().to_string()))
 }
@@ -9387,9 +11461,28 @@ fn native_reflect_schema(arguments: Vec<Value>, _: Span) -> Result<Value, NivErr
                 .map(|(index, variant)| (variant.clone(), index.to_string()))
                 .collect(),
         ),
+        Value::Function(function) => (
+            "function",
+            &function.name,
+            function
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| (parameter.clone(), index.to_string()))
+                .collect(),
+        ),
+        Value::Native(native) => ("function", native.name, {
+            let mut entries: Vec<(String, String)> = (0..native.arity)
+                .map(|index| (format!("$parameter{index}"), index.to_string()))
+                .collect();
+            if let Some(capability) = native.capability {
+                entries.push(("$needs".into(), capability.into()));
+            }
+            entries
+        }),
         other => {
             return Ok(result_error(format!(
-                "std.reflect.schema expects a shape or choice constructor, found {}",
+                "std.reflect.schema expects a shape, choice, or function, found {}",
                 other.type_name()
             )));
         }
@@ -10200,9 +12293,9 @@ fn native_net_write_some(arguments: Vec<Value>, span: Span) -> Result<Value, Niv
 }
 
 fn native_net_ready(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let stream = expect_stream(&arguments[0], "std.net.ready", span)?;
-    let interest = net_interest(&arguments[1], "std.net.ready", span)?;
-    let timeout = expect_duration(&arguments[2], "std.net.ready", span)?;
+    let stream = expect_stream(&arguments[0], "std.net.wait_ready", span)?;
+    let interest = net_interest(&arguments[1], "std.net.wait_ready", span)?;
+    let timeout = expect_duration(&arguments[2], "std.net.wait_ready", span)?;
     Ok(
         match poll_streams(std::slice::from_ref(stream), interest, timeout) {
             Ok(index) => Value::Ok(Arc::new(Value::Bool(index.is_some()))),
@@ -10327,16 +12420,20 @@ fn native_net_write_ready(arguments: Vec<Value>, span: Span) -> Result<Value, Ni
 }
 
 fn net_interest(value: &Value, name: &str, span: Span) -> Result<NetInterest, NivError> {
-    match expect_string(value, name, span)? {
-        "read" => Ok(NetInterest::READABLE),
-        "write" => Ok(NetInterest::WRITABLE),
-        "read_write" => Ok(NetInterest::READABLE | NetInterest::WRITABLE),
-        _ => Err(NivError::new(
-            format!("{name} interest must be 'read', 'write', or 'read_write'"),
-            span.line,
-            span.column,
-        )),
+    if let Value::Enum(choice) = value
+        && choice.type_name == "Interest"
+    {
+        return Ok(match choice.variant.as_str() {
+            "Read" => NetInterest::READABLE,
+            "Write" => NetInterest::WRITABLE,
+            _ => NetInterest::READABLE | NetInterest::WRITABLE,
+        });
     }
+    Err(NivError::new(
+        format!("{name} interest must be Interest.Read, Interest.Write, or Interest.ReadWrite"),
+        span.line,
+        span.column,
+    ))
 }
 
 #[cfg(feature = "host-runtime")]
@@ -10592,10 +12689,10 @@ fn expect_transaction<'a>(
 }
 
 fn native_transaction_begin(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let values = expect_map(&arguments[0], "std.transactions.begin", span)?;
+    let values = expect_map(&arguments[0], "std.transactions.create", span)?;
     if values.len() > 1_000_000 {
         return Err(NivError::new(
-            "std.transactions.begin supports at most 1000000 entries",
+            "std.transactions.create supports at most 1000000 entries",
             span.line,
             span.column,
         ));
@@ -11111,6 +13208,8 @@ fn join_task(handle: TaskHandle) -> Value {
 fn transferable(value: &Value) -> bool {
     match value {
         Value::Int(_)
+        | Value::UInt(_)
+        | Value::U128(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -11121,6 +13220,7 @@ fn transferable(value: &Value) -> bool {
         | Value::Decimal(_)
         | Value::FixedInt(_) => true,
         Value::AtomicInt(_) => true,
+        Value::SourceDeclaration(_) => false,
         Value::Enum(value) => value.payload.as_ref().is_none_or(transferable),
         Value::Array(values) => values.iter().all(transferable),
         Value::Map(entries) => entries
@@ -11398,6 +13498,8 @@ fn process_scope_allows(scope: &str, command: &str, first_argument: Option<&str>
 fn stable_key(value: &Value) -> bool {
     match value {
         Value::Int(_)
+        | Value::UInt(_)
+        | Value::U128(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -11407,6 +13509,7 @@ fn stable_key(value: &Value) -> bool {
         | Value::BigInt(_)
         | Value::Decimal(_)
         | Value::FixedInt(_) => true,
+        Value::SourceDeclaration(_) => false,
         Value::Enum(value) => value.payload.as_ref().is_none_or(stable_key),
         Value::Array(values) | Value::Set(values) => values.iter().all(stable_key),
         Value::Map(entries) => entries
@@ -11446,7 +13549,13 @@ fn stable_key(value: &Value) -> bool {
 fn estimated_value_bytes(value: &Value) -> u64 {
     const HANDLE_BYTES: u64 = 64;
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => 16,
+        Value::Int(_)
+        | Value::UInt(_)
+        | Value::U128(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::Null => 16,
+        Value::SourceDeclaration(_) => HANDLE_BYTES,
         Value::Enum(value) => value.payload.as_ref().map_or(16, |payload| {
             16u64.saturating_add(estimated_value_bytes(payload))
         }),
@@ -11705,11 +13814,21 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
         Stmt::Prepare { span, .. }
+        | Stmt::Doc { span, .. }
         | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::IfCarries { span, .. }
+        | Stmt::LetPattern { span, .. }
+        | Stmt::Stop(span)
+        | Stmt::Skip(span)
+        | Stmt::Promise { span, .. }
+        | Stmt::Trusted { span, .. }
+        | Stmt::Sample { span, .. }
+        | Stmt::Generator { span, .. }
+        | Stmt::Expand { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }
@@ -11729,7 +13848,7 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex, mpsc};
 
     use super::{
-        BlockingExecutor, Value, decode_chunks, deterministic_clock, native_clock,
+        BlockingExecutor, Value, decode_chunks, deterministic_clock, native_time_monotonic,
         parse_http_response, parse_http_url, tls_client_stream, tls_server_config,
     };
 
@@ -11738,7 +13857,7 @@ mod tests {
         let span = crate::ast::Span { line: 1, column: 1 };
         let guard = deterministic_clock(1_700_000_000.25).unwrap();
         assert_eq!(
-            native_clock(Vec::new(), span).unwrap(),
+            native_time_monotonic(Vec::new(), span).unwrap(),
             Value::Float(1_700_000_000.25)
         );
         assert!(deterministic_clock(f64::NAN).is_err());

@@ -1,9 +1,9 @@
 define update
 gives Map<String, Int> or String
 {
-    keep original set std.map.single with { key set "count" value set 1 }
-    keep transaction set std.transactions.begin with { map set original }
-    using changes = transaction {
+    keep original set std.map.of with { key set "count" value set 1 }
+    keep transaction set std.transactions.create with { map set original }
+    using changes set transaction {
         keep written set std.transactions.set with {
             transaction set changes
             key set "count"

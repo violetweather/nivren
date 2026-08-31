@@ -14,12 +14,12 @@ needs Network
         private_key_pem set private_key_pem
         options set policy
     } or give
-    using listener = opened {
+    using listener set opened {
         keep accepted set std.web.websocket_secure_accept with {
             listener set listener
             timeout set 30.0
         } or give
-        using socket = accepted {
+        using socket set accepted {
             keep message set std.web.websocket_receive with {
                 websocket set socket
                 maximum set 65536
@@ -59,12 +59,12 @@ needs Network
         private_key_pem set private_key_pem
         options set policy
     } or give
-    using listener = opened {
+    using listener set opened {
         keep accepted set std.web.websocket_secure_accept with {
             listener set listener
             timeout set 30.0
         } or give
-        using socket = accepted {
+        using socket set accepted {
             give std.web.websocket_receive with { websocket set socket maximum set 65536 }
         }
     }

@@ -33,6 +33,8 @@ fn main() -> ExitCode {
         [command, flag] if command == "run" && flag == "--native" => run_native_file("."),
         [command, flag, path] if command == "run" && flag == "--native" => run_native_file(path),
         [command, path] if command == "run" => run_file(path),
+        [command, path, output] if command == "record" => record_file(path, output),
+        [command, path, trace] if command == "replay" => replay_file(path, trace),
         [command, flag, output, path] if command == "run" && flag == "--crash-report" => {
             run_with_crash_report(path, output)
         }
@@ -200,6 +202,9 @@ fn main() -> ExitCode {
         [command, path] if command == "explain" => explain_path(path, true),
         [command, flag, path] if command == "explain" && flag == "--no-optimize" => {
             explain_path(path, false)
+        }
+        [command, flag, path] if command == "explain" && flag == "--story" => {
+            explain_story_path(path)
         }
         [command, path, output] if command == "sourcemap" => source_map_path(path, output),
         [command, path] if command == "debug" => debug_path(path),
@@ -426,6 +431,122 @@ fn run_file(path: &str) -> ExitCode {
     }
 }
 
+fn record_file(path: &str, output: &str) -> ExitCode {
+    let source = match read_source(path) {
+        Ok(source) => source,
+        Err(code) => return code,
+    };
+    let mut interpreter = Interpreter::new();
+    let recorder = interpreter.record_effects();
+    match compile_file(Path::new(path)).and_then(|chunk| {
+        interpreter
+            .run_bytecode(&chunk)
+            .map_err(|error| vec![error])
+    }) {
+        Ok(_) => {
+            let entries = recorder.lock().unwrap();
+            let mut trace = String::from("{\"schema\":\"org.nivren.effects.v1\"}\n");
+            for entry in entries.iter() {
+                trace.push_str(
+                    &serde_json::json!({
+                        "operation": entry.operation,
+                        "capability": entry.capability,
+                        "arguments": entry.arguments,
+                        "result": entry.result,
+                    })
+                    .to_string(),
+                );
+                trace.push('\n');
+            }
+            if let Err(error) = write_atomic(Path::new(output), trace.as_bytes()) {
+                eprintln!("error: cannot write {output}: {error}");
+                return ExitCode::from(74);
+            }
+            println!("recorded {} effect(s) to {output}", entries.len());
+            ExitCode::SUCCESS
+        }
+        Err(errors) => {
+            report(path, &source, &errors);
+            ExitCode::from(70)
+        }
+    }
+}
+
+fn replay_file(path: &str, trace: &str) -> ExitCode {
+    let source = match read_source(path) {
+        Ok(source) => source,
+        Err(code) => return code,
+    };
+    let recorded = match fs::read_to_string(trace) {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            eprintln!("error: cannot read {trace}: {error}");
+            return ExitCode::from(66);
+        }
+    };
+    let mut lines = recorded.lines();
+    if lines.next().map(str::trim) != Some("{\"schema\":\"org.nivren.effects.v1\"}") {
+        eprintln!("error: {trace} is not an org.nivren.effects.v1 trace");
+        return ExitCode::from(65);
+    }
+    let mut entries = vec![];
+    for (index, line) in lines.enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                eprintln!("error: trace entry {} is not JSON: {error}", index + 1);
+                return ExitCode::from(65);
+            }
+        };
+        let text = |key: &str| {
+            parsed
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let (Some(operation), Some(capability), Some(arguments), Some(result)) = (
+            text("operation"),
+            text("capability"),
+            text("arguments"),
+            parsed.get("result").cloned(),
+        ) else {
+            eprintln!("error: trace entry {} is incomplete", index + 1);
+            return ExitCode::from(65);
+        };
+        entries.push(nivren::runtime::EffectRecord {
+            operation,
+            capability,
+            arguments,
+            result,
+        });
+    }
+    let mut interpreter = Interpreter::new();
+    interpreter.replay_effects(entries);
+    match compile_file(Path::new(path)).and_then(|chunk| {
+        interpreter
+            .run_bytecode(&chunk)
+            .map_err(|error| vec![error])
+    }) {
+        Ok(_) => {
+            let remaining = interpreter.replay_remaining();
+            if remaining > 0 {
+                eprintln!(
+                    "error: replay diverged: {remaining} trace entr(y/ies) were never performed"
+                );
+                return ExitCode::from(70);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(errors) => {
+            report(path, &source, &errors);
+            ExitCode::from(70)
+        }
+    }
+}
+
 fn run_native_file(path: &str) -> ExitCode {
     if is_project_path(Path::new(path)) {
         return run_native_project(path);
@@ -551,8 +672,13 @@ fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
     } else {
         interpreter
     };
-    if let Some(limit) = manifest.memory_limit {
+    let interpreter = if let Some(limit) = manifest.memory_limit {
         interpreter.with_memory_limit(limit)
+    } else {
+        interpreter
+    };
+    if let Some(limit) = manifest.payload_limit {
+        interpreter.with_payload_limit(limit)
     } else {
         interpreter
     }
@@ -699,8 +825,9 @@ fn authority_check(path: &str) -> ExitCode {
             println!("authority lock is current");
             ExitCode::SUCCESS
         }
-        Ok(_) => {
+        Ok(actual) => {
             eprintln!("error: authority lock is stale; review and run 'niv authority lock'");
+            eprint!("{}", nivren::package::authority_diff(&actual, &expected));
             ExitCode::FAILURE
         }
         Err(_) => {
@@ -721,6 +848,25 @@ fn authority_report(path: &str) -> ExitCode {
     match nivren::package::installed_authority_lockfile(&manifest) {
         Ok(contents) => {
             print!("{contents}");
+            println!("declared limits:");
+            println!(
+                "  instructions = {}",
+                manifest
+                    .instruction_limit
+                    .map_or("default".to_string(), |limit| limit.to_string())
+            );
+            println!(
+                "  memory_bytes = {}",
+                manifest
+                    .memory_limit
+                    .map_or("default".to_string(), |limit| limit.to_string())
+            );
+            println!(
+                "  payload_bytes = {}",
+                manifest
+                    .payload_limit
+                    .map_or("default (16777216)".to_string(), |limit| limit.to_string())
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -1069,7 +1215,7 @@ fn new_project(path: &str) -> ExitCode {
         fs::write(root.join("niv.toml"), manifest_source)?;
         fs::write(
             root.join("src/main.niv"),
-            "define main\ngives Null\n{\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain with {}\n",
+            "define main\ngives Nothing\n{\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain with {}\n",
         )?;
         fs::write(
             root.join("tests/niv/main_test.niv"),
@@ -2244,6 +2390,51 @@ fn inspect_path(path: &str, output: &str) -> ExitCode {
     }
 }
 
+fn explain_story_path(path: &str) -> ExitCode {
+    let program = if is_project_path(Path::new(path)) {
+        let manifest = match nivren::project::Manifest::load(Path::new(path)) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                report(path, "", &[error]);
+                return ExitCode::from(65);
+            }
+        };
+        match nivren::modules::load_project(&manifest.root, &manifest.entry_path()) {
+            Ok(program) => program,
+            Err(errors) => {
+                report(path, "", &errors);
+                return ExitCode::from(65);
+            }
+        }
+    } else {
+        let source = match read_source(path) {
+            Ok(source) => source,
+            Err(code) => return code,
+        };
+        match nivren::lexer::scan(&source)
+            .and_then(nivren::parser::parse)
+            .and_then(nivren::expand::expand_program)
+        {
+            Ok(program) => program,
+            Err(errors) => {
+                report(path, &source, &errors);
+                return ExitCode::from(65);
+            }
+        }
+    };
+    if let Err(errors) = nivren::typecheck::check(&program) {
+        report(path, "", &errors);
+        return ExitCode::from(65);
+    }
+    let graph = nivren::intent::analyze(&program, nivren::intent::Optimization::Enabled);
+    if let Err(message) = graph.validate() {
+        report(path, "", &[NivError::new(message, 1, 1)]);
+        return ExitCode::from(70);
+    }
+    print!("{}", graph.story());
+    ExitCode::SUCCESS
+}
+
 fn explain_path(path: &str, optimized: bool) -> ExitCode {
     let output = if is_project_path(Path::new(path)) {
         let manifest = match nivren::project::Manifest::load(Path::new(path)) {
@@ -2586,9 +2777,11 @@ fn test_path(path: &str, snapshots: Option<bool>, deterministic_time: Option<f64
             }
         };
         match compile_file(file).and_then(|chunk| {
-            manifest
+            let mut interpreter = manifest
                 .as_ref()
-                .map_or_else(Interpreter::new, project_interpreter)
+                .map_or_else(Interpreter::new, project_interpreter);
+            interpreter.enable_samples();
+            interpreter
                 .run_bytecode(&chunk)
                 .map_err(|error| vec![error])
         }) {
@@ -2709,7 +2902,7 @@ fn compile_project(
     let manifest = nivren::project::Manifest::load(path).map_err(|error| vec![error])?;
     verify_dependency_lock(&manifest).map_err(|error| vec![error])?;
     let program = nivren::modules::load_project(&manifest.root, &manifest.entry_path())?;
-    nivren::typecheck::check(&program)?;
+    nivren::typecheck::check_with_edition(&program, manifest.edition)?;
     let chunk = nivren::bytecode::compile(&program)?;
     Ok((manifest, chunk))
 }
@@ -2796,8 +2989,12 @@ fn lsp() -> ExitCode {
 fn report(path: &str, source: &str, errors: &[NivError]) {
     let lines: Vec<&str> = source.lines().collect();
     for error in errors {
+        let code = error
+            .code()
+            .map(|code| format!("[{code}]"))
+            .unwrap_or_default();
         eprintln!(
-            "{path}:{}:{}: error: {}",
+            "{path}:{}:{}: error{code}: {}",
             error.line, error.column, error.message
         );
         if let Some(line) = lines.get(error.line.saturating_sub(1)) {
@@ -2821,7 +3018,7 @@ fn report(path: &str, source: &str, errors: &[NivError]) {
 
 fn help() {
     println!(
-        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize] <file.niv|project>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages, authority, and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv cache <list|prune> [project]\n  niv authority <lock|check|report> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry sign-admin <yank|unyank> <name> <version> <generation> <issued> <expires> <reason-file> <root-secret-file> <output>\n  niv registry verify-admin <action> <root-key> <unix-time> <minimum-generation>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
+        "Nivren {}\n\nProject path:\n  niv new <project>\n  niv add <package> <version> [project]\n  niv dev [project]\n  niv test [--snapshots|--accept-snapshots] [path]\n  niv bench [--json <output.json>] [file.niv|file.nivb|project]\n  niv ship [project]\n  niv workspace <check|build|test|bench|ship> [workspace]\n\nBuild and inspect:\n  niv run [file.niv|file.nivb|project]\n  niv run --native [file.niv|file.nivb|project]\n  niv run --crash-report <output.json> <file|project>\n  niv check <file.niv|file.nivb|project>\n  niv build [project]\n  niv build --standalone [project]\n  niv build --standalone --native [project]\n  niv build --aot [project]\n  niv fmt [--check] <file|path>\n  niv doc [project]\n  niv package [project]\n  niv package verify <file.nivpkg>\n  niv disasm <file.niv|file.nivb|project>\n  niv explain [--no-optimize|--story] <file.niv|project>\n  niv record <file.niv> <trace.jsonl>\n  niv replay <file.niv> <trace.jsonl>\n  niv sourcemap <file.niv|file.nivb|project> <output.json>\n  niv debug <file.niv|file.nivb|project>\n  niv inspect <file.niv|file.nivb|project> <output.jsonl>\n  niv profile [--json <output.json>] <file.niv|file.nivb|project>\n  niv coverage [--json <output.json>] <file.niv|file.nivb|project>\n\nPackages, authority, and registry:\n  niv install <registry> [project]\n  niv install --trusted <https-registry> <root-key> [project]\n  niv install --offline [project]\n  niv cache <list|prune> [project]\n  niv authority <lock|check|report> [project]\n  niv registry search <query> <registry>\n  niv registry publish <file.nivpkg> <registry>\n  niv registry fetch <name> <version> <registry> <destination>\n  niv registry yank <name> <version> <registry>\n  niv registry unyank <name> <version> <registry>\n  niv registry envelope <package> <provenance> <authorization> <output>\n  niv registry sign-admin <yank|unyank> <name> <version> <generation> <issued> <expires> <reason-file> <root-secret-file> <output>\n  niv registry verify-admin <action> <root-key> <unix-time> <minimum-generation>\n  niv registry serve <registry> <bind-address> [minimum-generation]\n  niv registry verify-release <package> <provenance> <authorization> <status> <advisories> <root-key> <unix-time> <minimum-generation>\n  niv release check [repository]\n\nTools:\n  niv repl\n  niv lsp\n  niv dap\n  niv version\n  niv help",
         nivren::VERSION
     );
     println!(

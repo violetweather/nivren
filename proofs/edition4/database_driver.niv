@@ -5,7 +5,7 @@ gives Int or String
 needs Native within "database"
 {
     keep opened set perform main.open_driver with { configuration set "memory://product-proof" } or give
-    using handle = opened {
+    using handle set opened {
         keep request set main.DriverRequest with {
             operation set "query"
             statement set "SELECT name FROM users"

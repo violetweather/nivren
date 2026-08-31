@@ -117,10 +117,10 @@ fn main() {
     let file_suffix =
         " or give\nchange count to count + 1 }\ngive ok(count) }\nwork with { path set \"";
     let direct_file = format!(
-        "{file_prefix} keep contents set std.fs.read with {{ path set path }}{file_suffix}{path}\" }}"
+        "{file_prefix} keep contents set std.files.read with {{ path set path }}{file_suffix}{path}\" }}"
     );
     let intent_file = format!(
-        "{file_prefix} keep contents set perform std.fs.read with {{ path set path }}{file_suffix}{path}\" }}"
+        "{file_prefix} keep contents set perform std.files.read with {{ path set path }}{file_suffix}{path}\" }}"
     );
     let file_ratio = compare("files", &direct_file, &intent_file);
     fs::remove_file(&file).unwrap();
@@ -130,17 +130,17 @@ fn main() {
     let http_runs = HTTP_RUNS;
     let (direct_url, direct_server) = local_http_server(http_runs);
     let direct_http = format!(
-        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set std.http.get with {{ url set \"{direct_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nwork with {{}}"
+        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set std.web.get with {{ url set \"{direct_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nwork with {{}}"
     );
     let (intent_url, intent_server) = local_http_server(http_runs);
     let intent_http = format!(
-        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set perform std.http.get with {{ url set \"{intent_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nperform work with {{}}"
+        "define work takes {{}} gives Int or String needs Network {{ change count set 0\nrepeat while count < {HTTP_REQUESTS_PER_RUN} {{ keep body set perform std.web.get with {{ url set \"{intent_url}\" timeout set 2.0 }} or give\nchange count to count + 1 }}\ngive ok(count) }}\nperform work with {{}}"
     );
     let http_ratio = compare("http", &direct_http, &intent_http);
     direct_server.join().unwrap();
     intent_server.join().unwrap();
 
-    let database_body = "keep original set std.map.single with { key set \"count\" value set 1 }\nchange count set 0\nrepeat while count < 512 { keep transaction set std.transactions.begin with { map set original }\nkeep changed set std.transactions.set with { transaction set transaction key set \"count\" value set count } or give\nkeep committed set std.transactions.commit with { transaction set transaction } or give\nchange count to count + 1 }\ngive ok(count)";
+    let database_body = "keep original set std.map.of with { key set \"count\" value set 1 }\nchange count set 0\nrepeat while count < 512 { keep transaction set std.transactions.create with { map set original }\nkeep changed set std.transactions.set with { transaction set transaction key set \"count\" value set count } or give\nkeep committed set std.transactions.commit with { transaction set transaction } or give\nchange count to count + 1 }\ngive ok(count)";
     let direct_database =
         format!("define work takes {{}} gives Int or String {{ {database_body} }}\nwork with {{}}");
     let intent_database = format!(

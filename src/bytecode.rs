@@ -5,11 +5,11 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "host-runtime")]
 use nivren_jit::IntOp;
 
-use crate::ast::{Expr, Literal, MatchArm, Span, Stmt, TypeRef};
+use crate::ast::{Expr, Literal, MatchArm, Pattern, PromiseClause, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
-pub const BYTECODE_VERSION: u16 = 7;
+pub const BYTECODE_VERSION: u16 = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chunk {
@@ -42,6 +42,9 @@ pub enum Op {
     /// stack behavior as `Call` without a second dispatch in effect-heavy code.
     PerformCall(usize),
     MakeArray(usize),
+    /// Joins the top `n` values into one string: each value renders its
+    /// canonical text form, and the joined result is bounded at 16 MiB.
+    MakeText(usize),
     Index,
     Coalesce(usize),
     Propagate,
@@ -73,7 +76,44 @@ pub enum Op {
     },
     Iterate {
         name: String,
+        /// When present, each element destructures through this irrefutable
+        /// pattern instead of binding `name`.
+        pattern: Option<Pattern>,
         body: Chunk,
+    },
+    /// Destructures the value at the top of the stack through an irrefutable
+    /// pattern, declaring each bound name immutably in the current scope.
+    /// The value stays on the stack as the statement result.
+    DefinePattern {
+        pattern: Pattern,
+    },
+    /// A checked example: quiet unless the runtime executes samples, in
+    /// which case the body runs hermetically and the final value's display
+    /// output must equal `shows` when present. Pushes `none`.
+    Sample {
+        title: String,
+        body: Chunk,
+        shows: Option<String>,
+    },
+    /// A `repeat while` loop with its condition and body as nested chunks, so
+    /// loop-exit signals unwind scopes safely instead of jumping across them.
+    Repeat {
+        condition: Chunk,
+        body: Chunk,
+    },
+    /// `stop` (skip = false) or `skip` (skip = true); valid only inside a
+    /// loop body chunk, which the verifier enforces.
+    LoopExit {
+        skip: bool,
+    },
+    /// `when subject carries pattern`: consumes the subject; a matching
+    /// non-`none` value binds its pattern names and runs the then chunk,
+    /// anything else runs the else chunk. Both chunks are transparent to
+    /// loop-exit signals.
+    IfCarries {
+        patterns: Vec<Pattern>,
+        then_branch: Chunk,
+        else_branch: Option<Chunk>,
     },
     Using {
         name: String,
@@ -94,12 +134,17 @@ pub enum Op {
     /// Marks the visible execution boundary while leaving the result at the
     /// top of the stack.
     Perform,
+    /// Activates promise clauses for the rest of the running chunk's dynamic
+    /// extent, re-enforced at every capability gate.
+    Promise(Vec<PromiseClause>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BytecodeArm {
-    pub variant: String,
-    pub binding: Option<String>,
+    /// One or more `or`-joined pattern alternatives.
+    pub patterns: Vec<Pattern>,
+    /// An optional pure guard chunk evaluated with the arm's bindings.
+    pub guard: Option<Chunk>,
     pub body: Chunk,
     pub span: Span,
 }
@@ -241,19 +286,81 @@ impl Compiler {
                 body,
                 span,
             } => {
+                if contains_loop_exit(body) {
+                    // `stop`/`skip` thread through the chunk-signal machinery.
+                    self.emit(
+                        Op::Repeat {
+                            condition: compile_expression(condition),
+                            body: compile_statement(body),
+                        },
+                        *span,
+                    );
+                } else {
+                    // Exit-free loops take the jump-based fast path: no
+                    // per-iteration chunk entry, no signal plumbing.
+                    self.emit(Op::Constant(Literal::Null), *span);
+                    let start = self.code.len();
+                    self.expression(condition);
+                    let end = self.emit(Op::JumpIfFalse(usize::MAX), *span);
+                    self.emit(Op::Pop, *span);
+                    self.emit(Op::Pop, *span);
+                    self.statement(body);
+                    self.emit(Op::Jump(start), *span);
+                    self.patch(end, self.code.len());
+                    self.emit(Op::Pop, *span);
+                }
+            }
+            Stmt::IfCarries {
+                subject,
+                patterns,
+                then_branch,
+                else_branch,
+                span,
+            } => {
+                self.expression(subject);
+                self.emit(
+                    Op::IfCarries {
+                        patterns: patterns.clone(),
+                        then_branch: compile_statement(then_branch),
+                        else_branch: else_branch.as_ref().map(|branch| compile_statement(branch)),
+                    },
+                    *span,
+                );
+            }
+            Stmt::Stop(span) => {
+                self.emit(Op::LoopExit { skip: false }, *span);
+            }
+            Stmt::Skip(span) => {
+                self.emit(Op::LoopExit { skip: true }, *span);
+            }
+            Stmt::Promise { clauses, span } => {
+                self.emit(Op::Promise(clauses.clone()), *span);
                 self.emit(Op::Constant(Literal::Null), *span);
-                let start = self.code.len();
-                self.expression(condition);
-                let end = self.emit(Op::JumpIfFalse(usize::MAX), *span);
-                self.emit(Op::Pop, *span);
-                self.emit(Op::Pop, *span);
-                self.statement(body);
-                self.emit(Op::Jump(start), *span);
-                self.patch(end, self.code.len());
-                self.emit(Op::Pop, *span);
+            }
+            Stmt::Trusted { span, .. }
+            | Stmt::Doc { span, .. }
+            | Stmt::Generator { span, .. }
+            | Stmt::Expand { span, .. } => {
+                self.emit(Op::Constant(Literal::Null), *span);
+            }
+            Stmt::Sample {
+                title,
+                body,
+                shows,
+                span,
+            } => {
+                self.emit(
+                    Op::Sample {
+                        title: title.clone(),
+                        body: compile_statements(body),
+                        shows: shows.clone(),
+                    },
+                    *span,
+                );
             }
             Stmt::For {
                 name,
+                pattern,
                 iterable,
                 body,
                 span,
@@ -262,7 +369,21 @@ impl Compiler {
                 self.emit(
                     Op::Iterate {
                         name: name.clone(),
+                        pattern: pattern.clone(),
                         body: compile_statement(body),
+                    },
+                    *span,
+                );
+            }
+            Stmt::LetPattern {
+                pattern,
+                initializer,
+                span,
+            } => {
+                self.expression(initializer);
+                self.emit(
+                    Op::DefinePattern {
+                        pattern: pattern.clone(),
                     },
                     *span,
                 );
@@ -423,6 +544,17 @@ impl Compiler {
             Expr::Literal(value, span) => {
                 self.emit(Op::Constant(value.clone()), *span);
             }
+            Expr::Text(pieces, span) => {
+                for piece in pieces {
+                    match piece {
+                        TextPiece::Literal(part) => {
+                            self.emit(Op::Constant(Literal::String(part.clone())), *span);
+                        }
+                        TextPiece::Hole(hole) => self.expression(hole),
+                    }
+                }
+                self.emit(Op::MakeText(pieces.len()), *span);
+            }
             Expr::Variable(name, span) => {
                 self.emit(Op::Load(name.clone()), *span);
             }
@@ -556,12 +688,21 @@ fn compile_statement(statement: &Stmt) -> Chunk {
     compile_statements(std::slice::from_ref(statement))
 }
 
+fn compile_expression(expression: &Expr) -> Chunk {
+    let mut compiler = Compiler { code: vec![] };
+    compiler.expression(expression);
+    Chunk {
+        version: BYTECODE_VERSION,
+        code: compiler.code,
+    }
+}
+
 fn compile_arm(arm: &MatchArm) -> BytecodeArm {
     let mut compiler = Compiler { code: vec![] };
     compiler.expression(&arm.value);
     BytecodeArm {
-        variant: arm.variant.clone(),
-        binding: arm.binding.clone(),
+        patterns: arm.patterns.clone(),
+        guard: arm.guard.as_ref().map(compile_expression),
         body: Chunk {
             version: BYTECODE_VERSION,
             code: compiler.code,
@@ -571,6 +712,10 @@ fn compile_arm(arm: &MatchArm) -> BytecodeArm {
 }
 
 pub fn verify(chunk: &Chunk) -> Result<(), NivError> {
+    verify_in_context(chunk, false)
+}
+
+fn verify_in_context(chunk: &Chunk, in_loop: bool) -> Result<(), NivError> {
     if chunk.version != BYTECODE_VERSION {
         return Err(NivError::new(
             format!("unsupported bytecode version {}", chunk.version),
@@ -583,11 +728,39 @@ pub fn verify(chunk: &Chunk) -> Result<(), NivError> {
         match &instruction.op {
             Op::MakeFunction { body, .. }
             | Op::DefineModule { body, .. }
-            | Op::Iterate { body, .. }
-            | Op::Using { body, .. } => verify(body)?,
+            | Op::Sample { body, .. }
+            | Op::Using { body, .. } => verify_in_context(body, false)?,
+            Op::Iterate { body, .. } => verify_in_context(body, true)?,
+            Op::Repeat { condition, body } => {
+                verify_in_context(condition, false)?;
+                verify_in_context(body, true)?;
+            }
+            Op::IfCarries {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                verify_in_context(then_branch, in_loop)?;
+                if let Some(branch) = else_branch {
+                    verify_in_context(branch, in_loop)?;
+                }
+            }
+            Op::LoopExit { skip } => {
+                if !in_loop {
+                    let word = if *skip { "skip" } else { "stop" };
+                    return Err(NivError::new(
+                        format!("'{word}' bytecode outside a loop body"),
+                        instruction.span.line,
+                        instruction.span.column,
+                    ));
+                }
+            }
             Op::Match(arms) => {
                 for arm in arms {
-                    verify(&arm.body)?;
+                    if let Some(guard) = &arm.guard {
+                        verify_in_context(guard, false)?;
+                    }
+                    verify_in_context(&arm.body, false)?;
                 }
             }
             _ => {}
@@ -685,7 +858,7 @@ fn verify_stack(chunk: &Chunk) -> Result<(), NivError> {
                 queue.push_back((target, next_depth, next_scope));
                 queue.push_back((index + 1, next_depth, next_scope));
             }
-            Op::Return => {}
+            Op::Return | Op::LoopExit { .. } => {}
             _ => queue.push_back((index + 1, next_depth, next_scope)),
         }
     }
@@ -701,11 +874,13 @@ fn stack_effect(op: &Op) -> isize {
         | Op::DefineEnum { .. }
         | Op::DefineProtocol { .. }
         | Op::AdoptProtocol { .. }
-        | Op::DefineModule { .. } => 1,
+        | Op::DefineModule { .. }
+        | Op::Repeat { .. }
+        | Op::Sample { .. } => 1,
         Op::Pop => -1,
         Op::Binary(_) | Op::Index => -1,
         Op::Call(arguments) | Op::PerformCall(arguments) => -(*arguments as isize),
-        Op::MakeArray(values) => 1 - (*values as isize),
+        Op::MakeArray(values) | Op::MakeText(values) => 1 - (*values as isize),
         Op::Store(_)
         | Op::Define { .. }
         | Op::Unary(_)
@@ -720,8 +895,11 @@ fn stack_effect(op: &Op) -> isize {
         | Op::Return
         | Op::Match(_)
         | Op::Iterate { .. }
+        | Op::LoopExit { .. }
+        | Op::IfCarries { .. }
+        | Op::DefinePattern { .. }
         | Op::Using { .. } => 0,
-        Op::Prepare(_) | Op::Perform => 0,
+        Op::Prepare(_) | Op::Perform | Op::Promise(_) => 0,
     }
 }
 
@@ -747,6 +925,9 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Call(_) => "call",
             Op::PerformCall(_) => "perform_call",
             Op::MakeArray(_) => "make_array",
+            Op::MakeText(_) => "text",
+            Op::DefinePattern { .. } => "define_pattern",
+            Op::Sample { .. } => "sample",
             Op::Index => "index",
             Op::Coalesce(_) => "coalesce",
             Op::Propagate => "propagate",
@@ -761,11 +942,16 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::Match(_) => "choose",
             Op::DefineModule { .. } => "define_module",
             Op::Iterate { .. } => "iterate",
+            Op::Repeat { .. } => "repeat",
+            Op::LoopExit { skip: false } => "stop",
+            Op::LoopExit { skip: true } => "skip",
+            Op::IfCarries { .. } => "when_carries",
             Op::Using { .. } => "using",
             Op::DefineProtocol { .. } => "define_protocol",
             Op::AdoptProtocol { .. } => "adopt_protocol",
             Op::Prepare(_) => "prepare",
             Op::Perform => "perform",
+            Op::Promise(_) => "promise",
         }
     }
     fn walk(chunk: &Chunk, prefix: &str, mappings: &mut Vec<serde_json::Value>) {
@@ -786,8 +972,25 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
                 | Op::DefineModule { body, .. }
                 | Op::Iterate { body, .. }
                 | Op::Using { body, .. } => walk(body, &path, mappings),
+                Op::Repeat { condition, body } => {
+                    walk(condition, &format!("{path}.condition"), mappings);
+                    walk(body, &format!("{path}.body"), mappings);
+                }
+                Op::IfCarries {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    walk(then_branch, &format!("{path}.carries"), mappings);
+                    if let Some(branch) = else_branch {
+                        walk(branch, &format!("{path}.otherwise"), mappings);
+                    }
+                }
                 Op::Match(arms) => {
                     for (arm, value) in arms.iter().enumerate() {
+                        if let Some(guard) = &value.guard {
+                            walk(guard, &format!("{path}.arm{arm}.guard"), mappings);
+                        }
                         walk(&value.body, &format!("{path}.arm{arm}"), mappings);
                     }
                 }
@@ -834,23 +1037,58 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
                 disassemble_chunk(body, indent + 1, output);
                 output.push_str(&format!("{}END_MODULE\n", "  ".repeat(indent)));
             }
-            Op::Iterate { name, body } => {
-                output.push_str(&format!("{prefix}ITERATE {name}\n"));
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
+                let target = pattern
+                    .as_ref()
+                    .map(pattern_text)
+                    .unwrap_or_else(|| name.clone());
+                output.push_str(&format!("{prefix}ITERATE {target}\n"));
                 disassemble_chunk(body, indent + 1, output);
                 output.push_str(&format!("{}END_ITERATE\n", "  ".repeat(indent)));
+            }
+            Op::Repeat { condition, body } => {
+                output.push_str(&format!("{prefix}REPEAT\n"));
+                disassemble_chunk(condition, indent + 1, output);
+                output.push_str(&format!("{}DO\n", "  ".repeat(indent)));
+                disassemble_chunk(body, indent + 1, output);
+                output.push_str(&format!("{}END_REPEAT\n", "  ".repeat(indent)));
+            }
+            Op::IfCarries {
+                patterns,
+                then_branch,
+                else_branch,
+            } => {
+                let rendered = patterns
+                    .iter()
+                    .map(pattern_text)
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                output.push_str(&format!("{prefix}WHEN_CARRIES {rendered}\n"));
+                disassemble_chunk(then_branch, indent + 1, output);
+                if let Some(branch) = else_branch {
+                    output.push_str(&format!("{}OTHERWISE\n", "  ".repeat(indent)));
+                    disassemble_chunk(branch, indent + 1, output);
+                }
+                output.push_str(&format!("{}END_WHEN_CARRIES\n", "  ".repeat(indent)));
             }
             Op::Match(arms) => {
                 output.push_str(&format!("{prefix}MATCH\n"));
                 for arm in arms {
-                    output.push_str(&format!(
-                        "{}ARM {}{}\n",
-                        "  ".repeat(indent + 1),
-                        arm.variant,
-                        arm.binding
-                            .as_ref()
-                            .map(|binding| format!("({binding})"))
-                            .unwrap_or_default()
-                    ));
+                    let patterns = arm
+                        .patterns
+                        .iter()
+                        .map(pattern_text)
+                        .collect::<Vec<_>>()
+                        .join(" or ");
+                    output.push_str(&format!("{}ARM {patterns}\n", "  ".repeat(indent + 1)));
+                    if let Some(guard) = &arm.guard {
+                        output.push_str(&format!("{}GUARD\n", "  ".repeat(indent + 1)));
+                        disassemble_chunk(guard, indent + 2, output);
+                    }
                     disassemble_chunk(&arm.body, indent + 2, output);
                 }
                 output.push_str(&format!("{}END_MATCH\n", "  ".repeat(indent)));
@@ -860,14 +1098,67 @@ fn disassemble_chunk(chunk: &Chunk, indent: usize, output: &mut String) {
     }
 }
 
+fn pattern_text(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Any(_) => "any".into(),
+        Pattern::Literal(literal, _) => format!("{literal:?}"),
+        Pattern::Name(name, _) | Pattern::Binding(name, _) => name.clone(),
+        Pattern::Carries(name, inner, _) => format!("{name} carries {}", pattern_text(inner)),
+        Pattern::Shape(name, fields, _) => format!(
+            "{name} holds {{ {} }}",
+            fields
+                .iter()
+                .map(|(field, sub)| format!("{field} set {}", pattern_text(sub)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// True when the statement subtree holds a `stop` or `skip` that targets the
+/// enclosing loop. Nested loops own their exits, and function or generator
+/// bodies cannot legally reach an outer loop (the checker rejects that), so
+/// both cut the walk.
+fn contains_loop_exit(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Stop(_) | Stmt::Skip(_) => true,
+        Stmt::Block(statements, _) => statements.iter().any(contains_loop_exit),
+        Stmt::If {
+            then_branch,
+            else_branch,
+            ..
+        }
+        | Stmt::IfCarries {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            contains_loop_exit(then_branch)
+                || else_branch.as_deref().is_some_and(contains_loop_exit)
+        }
+        Stmt::Using { body, .. } => contains_loop_exit(body),
+        _ => false,
+    }
+}
+
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
         Stmt::Prepare { span, .. }
+        | Stmt::Doc { span, .. }
         | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::IfCarries { span, .. }
+        | Stmt::LetPattern { span, .. }
+        | Stmt::Stop(span)
+        | Stmt::Skip(span)
+        | Stmt::Promise { span, .. }
+        | Stmt::Trusted { span, .. }
+        | Stmt::Sample { span, .. }
+        | Stmt::Generator { span, .. }
+        | Stmt::Expand { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

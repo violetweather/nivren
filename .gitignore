@@ -6,3 +6,4 @@ node_modules/
 *.vsix
 *.swp
 .DS_Store
+__pycache__/

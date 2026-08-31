@@ -70,26 +70,17 @@ fn canonical_lines(source: &str) -> Vec<String> {
         if character == '/' && next == Some('*') {
             flush_line(&mut lines, &mut current);
             let mut comment = String::new();
-            let mut depth = 0usize;
+            comment.push_str("/*");
+            index += 2;
             while index < characters.len() {
                 let character = characters[index];
                 let next = characters.get(index + 1).copied();
-                comment.push(character);
-                if character == '/' && next == Some('*') {
-                    depth += 1;
-                    comment.push('*');
-                    index += 2;
-                    continue;
-                }
                 if character == '*' && next == Some('/') {
-                    depth = depth.saturating_sub(1);
-                    comment.push('/');
+                    comment.push_str("*/");
                     index += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                    continue;
+                    break;
                 }
+                comment.push(character);
                 index += 1;
             }
             for line in comment.lines() {
@@ -319,6 +310,9 @@ fn normalize_line(line: &str) -> String {
             }
             '(' | '[' => {
                 trim_spaces(&mut output);
+                if keyword_precedes_group(&output) {
+                    output.push(' ');
+                }
                 output.push(current);
                 pending_space = false;
             }
@@ -353,6 +347,40 @@ fn normalize_line(line: &str) -> String {
         output.push_str(comment);
     }
     output
+}
+
+/// Words after which a bracket or parenthesis begins a value rather than a
+/// call or index, so the canonical form keeps one separating space:
+/// `set [1, 2]`, `in [items]`, `repeat (not done)`. A preceding dot means the
+/// word is a member name such as `std.map.set` and takes no space.
+fn keyword_precedes_group(output: &str) -> bool {
+    let prefix = output.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    if prefix.ends_with('.') {
+        return false;
+    }
+    matches!(
+        &output[prefix.len()..],
+        "set"
+            | "to"
+            | "in"
+            | "within"
+            | "is"
+            | "gives"
+            | "give"
+            | "or"
+            | "and"
+            | "carries"
+            | "maybe"
+            | "when"
+            | "while"
+            | "repeat"
+            | "through"
+            | "together"
+            | "race"
+            | "perform"
+            | "start"
+            | "wait"
+    )
 }
 
 fn split_line_comment(line: &str) -> (&str, Option<&str>) {
@@ -407,11 +435,6 @@ fn braces(line: &str, block_depth: &mut usize) -> (usize, usize, bool) {
         let current = chars[index];
         let next = chars.get(index + 1).copied();
         if *block_depth > 0 {
-            if current == '/' && next == Some('*') {
-                *block_depth += 1;
-                index += 2;
-                continue;
-            }
             if current == '*' && next == Some('/') {
                 *block_depth -= 1;
                 index += 2;

@@ -5,7 +5,7 @@ gives Int or String
 needs Native within "database"
 {
     keep opened set perform main.open_driver with { configuration set "memory://product-proof" } or give
-    using handle = opened {
+    using handle set opened {
         keep created set perform main.execute_driver with {
             handle set handle
             request set main.DriverRequest with { operation set "execute" statement set "CREATE TABLE users (name TEXT NOT NULL)" parameters set [] maximum_rows set 0 timeout set 5.0 }

@@ -128,6 +128,8 @@ impl Compiler {
 fn parse_checked(source: &str) -> Result<Vec<crate::ast::Stmt>, Vec<Diagnostic>> {
     let tokens = crate::lexer::scan(source).map_err(diagnostics)?;
     let program = crate::parser::parse(tokens).map_err(diagnostics)?;
+    #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]
+    let program = crate::expand::expand_program(program).map_err(diagnostics)?;
     crate::typecheck::check(&program).map_err(diagnostics)?;
     Ok(program)
 }
@@ -148,8 +150,11 @@ mod tests {
     fn facade_checks_formats_compiles_runs_and_documents() {
         let compiler = Compiler::new();
         assert_eq!(API_VERSION, 3);
-        assert!(compiler.check("keep answer: Int = 42\nanswer").is_ok());
-        assert_eq!(compiler.format("keep answer=42"), "keep answer = 42\n");
+        assert!(compiler.check("keep answer is Int set 42\nanswer").is_ok());
+        assert_eq!(
+            compiler.format("keep  answer   set 42"),
+            "keep answer set 42\n"
+        );
         let artifact = compiler.compile("40 + 2").unwrap();
         assert_eq!(artifact.format, "nivren-bytecode");
         #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]
@@ -159,13 +164,15 @@ mod tests {
             .documentation(
                 "sample",
                 "1.0.0",
-                "keep answer: Int = 42\nexpose { answer }",
+                "keep answer is Int set 42\nexpose { answer }",
             )
             .unwrap();
         assert!(docs.contains("`keep answer: Int`"));
-        let bindings = compiler.c_bindings("shape Answer { value: Int }").unwrap();
+        let bindings = compiler
+            .c_bindings("shape Answer { value is Int }")
+            .unwrap();
         assert!(bindings.contains("struct Nivren_Answer"));
-        assert!(compiler.check("keep answer: Int = true").is_err());
+        assert!(compiler.check("keep answer is Int set true").is_err());
         let explained = compiler.explain("40 + 2", true).unwrap();
         assert!(explained.contains("org.nivren.intent.v1"));
         assert_eq!(explained, compiler.explain("40 + 2", true).unwrap());

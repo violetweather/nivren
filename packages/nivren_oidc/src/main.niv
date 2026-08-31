@@ -23,14 +23,14 @@ gives String or String
     keep encoded set std.web.encode_component with { value set verifier } or give
     when encoded != verifier { give err("PKCE verifier must use only RFC 3986 unreserved characters") }
     keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set verifier } } or give
-    give std.encoding.base64url with { bytes set digest }
+    give std.encoding.base64url_encode with { bytes set digest }
 }
 
 define authorization_url
 takes { endpoint is String client_id is String redirect_uri is String scope is String state is String nonce is String verifier is String }
 gives Authorization or String
 {
-    when !std.text.starts_with with { value set endpoint prefix set "https://" } { give err("OIDC authorization endpoint must use HTTPS") }
+    when not std.text.starts_with with { value set endpoint prefix set "https://" } { give err("OIDC authorization endpoint must use HTTPS") }
     when len(std.text.split with { value set endpoint separator set "?" maximum set 2 } or give) != 1 { give err("OIDC authorization endpoint must not contain a query") }
     when client_id == "" or redirect_uri == "" or scope == "" { give err("OIDC client, redirect URI, and scope must not be empty") }
     when len(state) < 16 or len(state) > 256 or len(nonce) < 16 or len(nonce) > 256 { give err("OIDC state and nonce must each contain 16 through 256 characters") }

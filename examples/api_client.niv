@@ -13,7 +13,7 @@ needs Network
         timeout set 5.0
         maximum set 1048576
     } or give
-    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+    give ok(text "{response.status}")
 }
 
 fetch_status with { url set "https://example.com" }

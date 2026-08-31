@@ -20,8 +20,8 @@ gives Int
 }
 
 keep source set std.iter.from with { values set [1, 2, 3, 4, 5] }
-keep mapped set std.iter.transform with { iterator set source transform set double }
-keep selected set std.iter.select with { iterator set mapped predicate set useful }
+keep mapped set std.iter.transform with { iterator set source by set double }
+keep selected set std.iter.select with { iterator set mapped by set useful }
 keep skipped set std.iter.skip with { iterator set selected count set 1 }
 keep page set std.iter.take with { iterator set skipped count set 2 }
 
@@ -30,7 +30,7 @@ keep combined set std.iter.chain with {
     left set std.iter.from with { values set collected }
     right set std.iter.from with { values set [12] }
 }
-keep total set std.iter.fold with { iterator set combined initial set 0 combine set add }
+keep total set std.iter.fold with { iterator set combined initial set 0 by set add }
 
 keep counted set std.iter.range with { start set 0 end set 10 step set 2 }
 keep ranged set choose counted {

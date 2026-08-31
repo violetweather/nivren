@@ -6,7 +6,7 @@ use crate::error::NivError;
 use crate::project::{MANIFEST_NAME, Manifest};
 
 pub fn load(entry: &Path) -> Result<Vec<Stmt>, Vec<NivError>> {
-    Loader::new(None).file(entry)
+    crate::expand::expand_program(Loader::new(None).file(entry)?)
 }
 
 pub fn load_project(root: &Path, entry: &Path) -> Result<Vec<Stmt>, Vec<NivError>> {
@@ -17,7 +17,7 @@ pub fn load_project(root: &Path, entry: &Path) -> Result<Vec<Stmt>, Vec<NivError
             1,
         )]
     })?;
-    Loader::new(Some(root)).file(entry)
+    crate::expand::expand_program(Loader::new(Some(root)).file(entry)?)
 }
 
 struct Loader {
@@ -93,7 +93,7 @@ impl Loader {
         let mut imported_paths = HashSet::new();
         let mut program = vec![];
         for statement in parsed {
-            if let Stmt::Import { path, span } = statement {
+            if let Stmt::Import { path, alias, span } = statement {
                 let (module_path, dependency_name) =
                     self.resolve_import(&canonical, &path, span)?;
                 let resolved = module_path.canonicalize().map_err(|error| {
@@ -118,7 +118,8 @@ impl Loader {
                     }
                     errors
                 })?;
-                let name = dependency_name
+                let name = alias
+                    .or(dependency_name)
                     .or_else(|| module_name(&resolved))
                     .ok_or_else(|| {
                         vec![NivError::new(

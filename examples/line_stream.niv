@@ -6,7 +6,7 @@ gives Int or String
 needs FileRead
 {
     keep opened set std.files.open_read with { path set path } or give
-    using file = opened {
+    using file set opened {
         keep lines set std.iter.lines with { file set file maximum_bytes set 65536 } or give
         change count set 0
         each line within lines {

@@ -431,7 +431,7 @@ pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usiz
 
     let lockfile = manifest.resolved_lockfile(&resolved);
     write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
-    write_authority_lock(manifest)?;
+    guard_authority_lock(manifest)?;
     Ok(resolved.len())
 }
 
@@ -439,7 +439,7 @@ pub fn install_offline_dependencies(manifest: &Manifest) -> Result<usize, NivErr
     let lockfile = installed_lockfile(manifest)?;
     let count = lockfile.matches("[[dependency]]").count();
     write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
-    write_authority_lock(manifest)?;
+    guard_authority_lock(manifest)?;
     Ok(count)
 }
 
@@ -555,7 +555,7 @@ fn install_trusted_with(
         &generation_path,
         format!("{}\n", status.generation).as_bytes(),
     )?;
-    write_authority_lock(manifest)?;
+    guard_authority_lock(manifest)?;
     Ok(resolved.len())
 }
 
@@ -774,6 +774,44 @@ pub fn write_authority_lock(manifest: &Manifest) -> Result<(), NivError> {
         &manifest.root.join(AUTHORITY_LOCKFILE_NAME),
         contents.as_bytes(),
     )
+}
+
+/// Refuses to change recorded authority silently. A first install writes the
+/// initial lock; an unchanged lock passes; any difference stops the command
+/// with a line diff until `niv authority lock` explicitly accepts it.
+pub fn guard_authority_lock(manifest: &Manifest) -> Result<(), NivError> {
+    let expected = installed_authority_lockfile(manifest)?;
+    let path = manifest.root.join(AUTHORITY_LOCKFILE_NAME);
+    match std::fs::read_to_string(&path) {
+        Ok(actual) if actual == expected => Ok(()),
+        Err(_) => write_atomic(&path, expected.as_bytes()),
+        Ok(actual) => Err(package_error(format!(
+            "dependency authority changed; review the difference and run 'niv authority lock' to accept it:\n{}",
+            authority_diff(&actual, &expected)
+        ))),
+    }
+}
+
+/// Deterministic line diff between two authority locks: removed lines carry
+/// '-', added lines carry '+'.
+pub fn authority_diff(actual: &str, expected: &str) -> String {
+    let old: std::collections::BTreeSet<&str> = actual.lines().collect();
+    let new: std::collections::BTreeSet<&str> = expected.lines().collect();
+    let mut output = String::new();
+    for line in actual.lines() {
+        if !new.contains(line) {
+            output.push_str(&format!("  - {line}\n"));
+        }
+    }
+    for line in expected.lines() {
+        if !old.contains(line) {
+            output.push_str(&format!("  + {line}\n"));
+        }
+    }
+    if output.is_empty() {
+        output.push_str("  (formatting-only difference)\n");
+    }
+    output
 }
 
 fn lock_string(value: &str) -> String {

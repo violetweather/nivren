@@ -72,7 +72,7 @@ fn runtime_metrics_observe_plan_allocation_and_perform_boundary() {
 
 #[test]
 fn runtime_effect_sequence_matches_source_and_excludes_unauthorized_calls() {
-    let source = "define inspect takes {} gives String needs FileRead, Environment { keep exists set perform std.fs.exists with { path set \"/definitely-not-a-nivren-file\" }\nkeep home set perform std.env.get with { name set \"NIVREN_INTENT_MISSING\" }\ngive \"done\" }\ninspect with {}";
+    let source = "define inspect takes {} gives String needs FileRead, Environment { keep exists set perform std.files.exists with { path set \"/definitely-not-a-nivren-file\" }\nkeep home set perform std.env.get with { name set \"NIVREN_INTENT_MISSING\" }\ngive \"done\" }\ninspect with {}";
     let chunk = compiled(source);
     let mut interpreter = Interpreter::new();
     interpreter.enable_metrics();
@@ -103,15 +103,15 @@ fn runtime_effect_sequence_matches_source_and_excludes_unauthorized_calls() {
 fn explain_reports_file_http_database_and_concurrency_resources() {
     let sources = [
         (
-            "define file takes {} gives Bool needs FileRead { give perform std.fs.exists with { path set \"/tmp/nivren-intent\" } }",
+            "define file takes {} gives Bool or String needs FileRead { give perform std.files.exists with { path set \"/tmp/nivren-intent\" } }",
             "filesystem",
         ),
         (
-            "define web takes {} gives String or String needs Network { give perform std.http.get with { url set \"http://127.0.0.1/\" timeout set 1.0 } }",
+            "define web takes {} gives String or String needs Network { give perform std.web.get with { url set \"http://127.0.0.1/\" timeout set 1.0 } }",
             "network-socket",
         ),
         (
-            "define database takes {} gives Transaction<String, Int> { give std.transactions.begin with { map set std.map.single with { key set \"id\" value set 1 } } }",
+            "define database takes {} gives Transaction<String, Int> { give std.transactions.create with { map set std.map.of with { key set \"id\" value set 1 } } }",
             "database-transaction",
         ),
         (
@@ -136,7 +136,7 @@ fn explain_reports_file_http_database_and_concurrency_resources() {
 
 #[test]
 fn through_batches_and_parallel_task_plans_remain_bounded() {
-    let batching = "define batches takes {} gives [[Int]] or String { give [1, 2, 3, 4, 5] through std.list.batch with { size set 2 } }\nbatches with {}";
+    let batching = "define batches takes {} gives [[Int]] or String { give [1, 2, 3, 4, 5] through std.list.batch with { count set 2 } }\nbatches with {}";
     let chunk = compiled(batching);
     assert_eq!(
         Interpreter::new().run_bytecode(&chunk).unwrap().to_string(),

@@ -186,7 +186,7 @@ fn c_named_type(name: &str, shapes: &BTreeSet<String>, choices: &BTreeSet<String
         "U64" => "uint64_t".into(),
         "String" | "BigInt" | "Decimal" | "DateTime" => "NivrenStringView".into(),
         "Bytes" => "NivrenBytesView".into(),
-        "Null" => "uint8_t".into(),
+        "Nothing" => "uint8_t".into(),
         _ if shapes.contains(name) => format!("const Nivren_{} *", c_name(name)),
         _ if choices.contains(name) => format!("Nivren_{}", c_name(name)),
         _ => "NivrenValueView".into(),
@@ -216,8 +216,8 @@ mod tests {
     fn c_bindings_are_deterministic_and_typed() {
         let source = r#"
 choice Role { Admin, Member }
-shape Address { city: String, postal: U32 }
-shape User { name: String, role: Role, address: Address?, tags: [String] }
+shape Address { city is String, postal is U32 }
+shape User { name is String, role is Role, address is Address?, tags is [String] }
 "#;
         let program = crate::parser::parse(crate::lexer::scan(source).unwrap()).unwrap();
         crate::typecheck::check(&program).unwrap();

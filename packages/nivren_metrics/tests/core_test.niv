@@ -4,7 +4,7 @@ define works
 takes { }
 gives Bool or String
 {
-    keep labels set std.map.single with { key set "route" value set "/health" }
+    keep labels set std.map.of with { key set "route" value set "/health" }
     keep value set main.sample with { name set "nivren_requests_total" help set "Handled requests" kind set "counter" value set 42.0 labels set labels } or give
     keep output set main.encode with { samples set [value] } or give
     assert with { condition set output == "# HELP nivren_requests_total Handled requests\n# TYPE nivren_requests_total counter\nnivren_requests_total{route=\"/health\"} 42\n" message set "Prometheus text encoding" }

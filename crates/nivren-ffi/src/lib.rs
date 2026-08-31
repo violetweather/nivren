@@ -610,7 +610,7 @@ mod tests {
         // SAFETY: This is the unchanged, not-yet-freed returned buffer.
         unsafe { nivren_buffer_free(compiled) };
 
-        let host_source = b"define call() gives Result<String, String> needs Native { give std.host.invoke(\"echo\", \"hello\") } call()";
+        let host_source = b"define call takes { } gives Result<String, String> needs Native { give std.host.invoke(\"echo\", \"hello\") } call()";
         let mut frees = 0usize;
         // SAFETY: Callback functions and the counter context remain live.
         let hosted = unsafe {
@@ -631,10 +631,10 @@ mod tests {
         unsafe { nivren_buffer_free(hosted) };
 
         let nested_source = br#"
-shape Reply { name: String, values: [Int] }
-define read() gives Result<String, String> needs Native {
-    keep response = std.host.invoke("nested", "request") or give
-    keep reply = std.json.decode(Reply, response) or give
+shape Reply { name is String, values is [Int] }
+define read takes { } gives Result<String, String> needs Native {
+    keep response set std.host.invoke("nested", "request") or give
+    keep reply set std.json.decode(Reply, response) or give
     give ok(reply.name)
 }
 read()
@@ -705,7 +705,7 @@ read()
             sender,
             wakes: AtomicUsize::new(0),
         });
-        let source = b"define spin() gives Null { repeat yes { none } give none } keep worker = start spin wait worker";
+        let source = b"define spin takes { } gives Nothing { repeat yes { none } give none } keep worker set start spin wait worker";
         // SAFETY: Source, callbacks, and boxed context remain live until join.
         let run = unsafe {
             nivren_run_async_utf8(

@@ -9,7 +9,7 @@ gives String or String
 needs Environment, Network
 {
     keep token set std.env.get with { name set "DISCORD_BOT_TOKEN" } ?? ""
-    keep authorized set std.map.single with {
+    keep authorized set std.map.of with {
         key set "Authorization"
         value set "Bot " + token
     }
@@ -27,7 +27,7 @@ needs Environment, Network
         timeout set 10.0
         maximum set 1048576
     } or give
-    give ok(std.map.get with { map set response key set "status" } ?? "missing status")
+    give ok(text "{response.status}")
 }
 
 send_message with { text set "Hello from Nivren" }
