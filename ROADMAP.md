@@ -2,6 +2,8 @@
 
 Nivren does not use the 1.0 label merely because programs execute. Each milestone must pass its tests, documentation review, and compatibility gate.
 
+The endgame is planned: Edition 5 froze the language, and `spec/EDITION-6-PLAN.md` defines Edition 6 — the runtime edition — which closes the remaining performance gaps with Node.js, completes the Product Proof, opens the hosted registry, passes an independent security audit, and ships as 1.0.
+
 ## 0.2 — Typed interpreter core (complete)
 
 - Lexer, parser, AST, lexical closures, control flow, immutable arrays, and source diagnostics
