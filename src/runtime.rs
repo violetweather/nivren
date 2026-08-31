@@ -489,6 +489,10 @@ struct FastFrame {
 }
 
 struct FastSlotPlan {
+    /// True when the body inserts environment bindings at plan level
+    /// (excluded defines, function/type declarations); callees then run in
+    /// a child scope of their closure instead of the closure itself.
+    needs_environment: bool,
     slots_by_name: HashMap<String, usize>,
     instruction_slots: Vec<Option<usize>>,
     slot_count: usize,
@@ -1295,8 +1299,9 @@ impl Interpreter {
         Ok(value)
     }
 
-    pub fn run_bytecode(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
-        crate::bytecode::verify(chunk)?;
+    /// Arms the fast root frame for a top-level chunk when the chunk plans
+    /// cleanly and none of its persistent names already exist.
+    fn push_root_frame(&mut self, chunk: &Chunk) -> Option<FastRootSlots> {
         let root_slots = (self.debug_hook.is_none() && self.metrics.is_none())
             .then(|| fast_root_slots(chunk))
             .flatten();
@@ -1318,23 +1323,37 @@ impl Interpreter {
                 .collect(),
             });
         }
+        root_slots
+    }
+
+    /// Persists a finished root frame's top-level bindings into the
+    /// environment so later chunks and inspection see them.
+    fn pop_root_frame(&mut self, plan: &FastRootSlots) {
+        let frame = self.fast_frames.pop().unwrap();
+        let mut environment = self.environment.lock().unwrap();
+        for name in &plan.persistent {
+            let Some(slot) = plan.plan.slots_by_name.get(name).copied() else {
+                continue;
+            };
+            let binding = &frame.slots[slot];
+            if binding.defined {
+                environment.values.insert(
+                    name.clone(),
+                    Binding {
+                        value: binding.value.clone(),
+                        mutable: binding.mutable,
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn run_bytecode(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
+        crate::bytecode::verify(chunk)?;
+        let root_slots = self.push_root_frame(chunk);
         let execution = self.execute_chunk(chunk);
         if let Some(plan) = &root_slots {
-            let frame = self.fast_frames.pop().unwrap();
-            let mut environment = self.environment.lock().unwrap();
-            for name in &plan.persistent {
-                let slot = plan.plan.slots_by_name[name];
-                let binding = &frame.slots[slot];
-                if binding.defined {
-                    environment.values.insert(
-                        name.clone(),
-                        Binding {
-                            value: binding.value.clone(),
-                            mutable: binding.mutable,
-                        },
-                    );
-                }
-            }
+            self.pop_root_frame(plan);
         }
         let result = match execution? {
             VmFlow::Continue(value) => Ok(value),
@@ -1363,7 +1382,11 @@ impl Interpreter {
             ));
         }
         self.native_execution_depth = 1;
+        let root_slots = self.push_root_frame(chunk);
         let execution = self.execute_chunk_native(chunk);
+        if let Some(plan) = &root_slots {
+            self.pop_root_frame(plan);
+        }
         self.native_execution_depth = 0;
         let result = match execution? {
             VmFlow::Continue(value) => Ok(value),
@@ -2846,19 +2869,42 @@ impl Interpreter {
                 })
                 .take(slot_plan.slot_count)
                 .collect::<Vec<_>>();
+                let mut environment_params = vec![];
                 for (name, value) in function.params.iter().zip(arguments) {
-                    let slot = slot_plan.slots_by_name[name];
-                    slots[slot] = FastBinding {
-                        value: value.clone(),
-                        mutable: false,
-                        defined: true,
-                    };
+                    if let Some(slot) = slot_plan.slots_by_name.get(name).copied() {
+                        slots[slot] = FastBinding {
+                            value: value.clone(),
+                            mutable: false,
+                            defined: true,
+                        };
+                    } else {
+                        environment_params.push((name.clone(), value.clone()));
+                    }
                 }
                 self.fast_frames.push(FastFrame {
                     plan: Some(slot_plan.clone()),
                     slots,
                 });
-                let previous = std::mem::replace(&mut self.environment, function.closure.clone());
+                let callee_environment =
+                    if environment_params.is_empty() && !slot_plan.needs_environment {
+                        function.closure.clone()
+                    } else {
+                        let child = self.child_scope(function.closure.clone());
+                        {
+                            let mut scope = child.lock().unwrap();
+                            for (name, value) in environment_params {
+                                scope.values.insert(
+                                    name,
+                                    Binding {
+                                        value,
+                                        mutable: false,
+                                    },
+                                );
+                            }
+                        }
+                        child
+                    };
+                let previous = std::mem::replace(&mut self.environment, callee_environment);
                 self.roots.push(previous.clone());
                 let execution = self.execute_chunk(body);
                 self.roots.pop();
@@ -3951,6 +3997,21 @@ impl Interpreter {
         }
     }
 
+    /// Runs a nested chunk (a loop body, match arm, guard, module body,
+    /// sample, or using body) with the enclosing chunk's fast-slot frame
+    /// masked, so the nested chunk's instruction indices can never collide
+    /// with the outer plan. Nested chunks resolve names through the
+    /// environment, and the slot planner keeps every name they touch there.
+    fn execute_nested_chunk(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
+        self.fast_frames.push(FastFrame {
+            plan: None,
+            slots: vec![],
+        });
+        let result = self.execute_chunk(chunk);
+        self.fast_frames.pop();
+        result
+    }
+
     fn execute_chunk(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
         #[cfg(feature = "host-runtime")]
         if self.native_execution_depth > 0 {
@@ -4422,7 +4483,7 @@ impl Interpreter {
                 };
                 let flow = match matched {
                     None => match else_branch {
-                        Some(branch) => self.execute_chunk(branch)?,
+                        Some(branch) => self.execute_nested_chunk(branch)?,
                         None => VmFlow::Continue(Value::Null),
                     },
                     Some(bindings) => {
@@ -4442,7 +4503,7 @@ impl Interpreter {
                             }
                         }
                         self.environment = child;
-                        let result = self.execute_chunk(then_branch);
+                        let result = self.execute_nested_chunk(then_branch);
                         self.roots.pop();
                         self.environment = previous;
                         result?
@@ -4461,7 +4522,7 @@ impl Interpreter {
                     self.roots.push(previous.clone());
                     let child = self.child_scope(previous.clone());
                     self.environment = child;
-                    let result = self.execute_chunk(body);
+                    let result = self.execute_nested_chunk(body);
                     self.roots.pop();
                     self.environment = previous;
                     match result? {
@@ -4591,7 +4652,7 @@ impl Interpreter {
             self.environment = child;
             let outcome = (|| {
                 if let Some(guard) = &arm.guard {
-                    match self.execute_chunk(guard)? {
+                    match self.execute_nested_chunk(guard)? {
                         VmFlow::Continue(decision) => {
                             if !expect_bool(decision, span)? {
                                 return Ok(None);
@@ -4603,7 +4664,7 @@ impl Interpreter {
                         }
                     }
                 }
-                self.execute_chunk(&arm.body).map(Some)
+                self.execute_nested_chunk(&arm.body).map(Some)
             })();
             self.roots.pop();
             self.environment = previous;
@@ -4630,7 +4691,7 @@ impl Interpreter {
         let previous = std::mem::replace(&mut self.environment, module_environment.clone());
         self.roots.push(previous.clone());
         self.namespace.push(name.to_string());
-        let execution = self.execute_chunk(body);
+        let execution = self.execute_nested_chunk(body);
         self.namespace.pop();
         self.roots.pop();
         self.environment = previous;
@@ -4731,7 +4792,7 @@ impl Interpreter {
                 }
             }
             self.environment = child;
-            let result = self.execute_chunk(body);
+            let result = self.execute_nested_chunk(body);
             self.roots.pop();
             self.environment = previous;
             match result? {
@@ -4752,7 +4813,7 @@ impl Interpreter {
     ) -> Result<VmFlow, NivError> {
         let mut last = Value::Null;
         loop {
-            let decision = match self.execute_chunk(condition)? {
+            let decision = match self.execute_nested_chunk(condition)? {
                 VmFlow::Continue(value) => value,
                 returned @ VmFlow::Return(_) => return Ok(returned),
                 VmFlow::Stop | VmFlow::Skip => return Err(loop_exit_escape_error(span)),
@@ -4760,7 +4821,7 @@ impl Interpreter {
             if !expect_bool(decision, span)? {
                 break;
             }
-            match self.execute_chunk(body)? {
+            match self.execute_nested_chunk(body)? {
                 VmFlow::Continue(value) => last = value,
                 returned @ VmFlow::Return(_) => return Ok(returned),
                 VmFlow::Stop => break,
@@ -4788,7 +4849,7 @@ impl Interpreter {
         );
         let previous = std::mem::replace(&mut self.environment, environment);
         self.roots.push(previous.clone());
-        let result = self.execute_chunk(body);
+        let result = self.execute_nested_chunk(body);
         self.roots.pop();
         self.environment = previous;
         let closed = close_resource(&resource, span);
@@ -5257,11 +5318,189 @@ fn record_field_indices<T>(fields: &[(String, T)]) -> Arc<HashMap<String, usize>
     )
 }
 
+/// Names bound by a pattern; used to keep pattern-bound and nested-chunk
+/// names in the environment rather than in fast slots.
+fn pattern_bound_names(pattern: &Pattern, names: &mut std::collections::HashSet<String>) {
+    match pattern {
+        Pattern::Any(_) | Pattern::Literal(_, _) => {}
+        Pattern::Name(name, _) | Pattern::Binding(name, _) => {
+            names.insert(name.clone());
+        }
+        Pattern::Carries(_, inner, _) => pattern_bound_names(inner, names),
+        Pattern::Shape(_, fields, _) => {
+            for (_, field) in fields {
+                pattern_bound_names(field, names);
+            }
+        }
+    }
+}
+
+/// Every name a chunk (and its nested chunks) loads, stores, defines, or
+/// binds. The slot planner excludes these names from slotting when they
+/// appear inside nested chunks, because nested chunks resolve names through
+/// the environment.
+fn chunk_referenced_names(chunk: &Chunk, names: &mut std::collections::HashSet<String>) {
+    for instruction in &chunk.code {
+        match &instruction.op {
+            Op::Load(name) | Op::Store(name) | Op::Prepare(name) => {
+                names.insert(name.clone());
+            }
+            Op::Define { name, .. } => {
+                names.insert(name.clone());
+            }
+            Op::MakeFunction { name, params, body } => {
+                names.insert(name.clone());
+                for parameter in params {
+                    names.insert(parameter.clone());
+                }
+                chunk_referenced_names(body, names);
+            }
+            Op::Match(arms) => {
+                for arm in arms {
+                    for pattern in &arm.patterns {
+                        pattern_bound_names(pattern, names);
+                    }
+                    if let Some(guard) = &arm.guard {
+                        chunk_referenced_names(guard, names);
+                    }
+                    chunk_referenced_names(&arm.body, names);
+                }
+            }
+            Op::DefineModule { name, body, .. } => {
+                names.insert(name.clone());
+                chunk_referenced_names(body, names);
+            }
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
+                names.insert(name.clone());
+                if let Some(pattern) = pattern {
+                    pattern_bound_names(pattern, names);
+                }
+                chunk_referenced_names(body, names);
+            }
+            Op::DefinePattern { pattern } => pattern_bound_names(pattern, names),
+            Op::Sample { body, .. } => chunk_referenced_names(body, names),
+            Op::Repeat { condition, body } => {
+                chunk_referenced_names(condition, names);
+                chunk_referenced_names(body, names);
+            }
+            Op::IfCarries {
+                patterns,
+                then_branch,
+                else_branch,
+            } => {
+                for pattern in patterns {
+                    pattern_bound_names(pattern, names);
+                }
+                chunk_referenced_names(then_branch, names);
+                if let Some(chunk) = else_branch {
+                    chunk_referenced_names(chunk, names);
+                }
+            }
+            Op::Using { name, body } => {
+                names.insert(name.clone());
+                chunk_referenced_names(body, names);
+            }
+            Op::DefineRecord { name, .. }
+            | Op::DefineEnum { name, .. }
+            | Op::DefineProtocol { name, .. } => {
+                names.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The set of names the current chunk level must keep in the environment:
+/// everything nested chunks touch, everything patterns bind, and every
+/// declaration the runtime defines through the environment directly.
+fn environment_resident_names(body: &Chunk) -> std::collections::HashSet<String> {
+    let mut excluded = std::collections::HashSet::new();
+    for instruction in &body.code {
+        match &instruction.op {
+            Op::MakeFunction { name, params, body } => {
+                excluded.insert(name.clone());
+                for parameter in params {
+                    excluded.insert(parameter.clone());
+                }
+                chunk_referenced_names(body, &mut excluded);
+            }
+            Op::Match(arms) => {
+                for arm in arms {
+                    for pattern in &arm.patterns {
+                        pattern_bound_names(pattern, &mut excluded);
+                    }
+                    if let Some(guard) = &arm.guard {
+                        chunk_referenced_names(guard, &mut excluded);
+                    }
+                    chunk_referenced_names(&arm.body, &mut excluded);
+                }
+            }
+            Op::DefineModule { name, body, .. } => {
+                excluded.insert(name.clone());
+                chunk_referenced_names(body, &mut excluded);
+            }
+            Op::Iterate {
+                name,
+                pattern,
+                body,
+            } => {
+                excluded.insert(name.clone());
+                if let Some(pattern) = pattern {
+                    pattern_bound_names(pattern, &mut excluded);
+                }
+                chunk_referenced_names(body, &mut excluded);
+            }
+            Op::DefinePattern { pattern } => pattern_bound_names(pattern, &mut excluded),
+            Op::Sample { body, .. } => chunk_referenced_names(body, &mut excluded),
+            Op::Repeat { condition, body } => {
+                chunk_referenced_names(condition, &mut excluded);
+                chunk_referenced_names(body, &mut excluded);
+            }
+            Op::IfCarries {
+                patterns,
+                then_branch,
+                else_branch,
+            } => {
+                for pattern in patterns {
+                    pattern_bound_names(pattern, &mut excluded);
+                }
+                chunk_referenced_names(then_branch, &mut excluded);
+                if let Some(chunk) = else_branch {
+                    chunk_referenced_names(chunk, &mut excluded);
+                }
+            }
+            Op::Using { name, body } => {
+                excluded.insert(name.clone());
+                chunk_referenced_names(body, &mut excluded);
+            }
+            Op::DefineRecord { name, .. }
+            | Op::DefineEnum { name, .. }
+            | Op::DefineProtocol { name, .. } => {
+                excluded.insert(name.clone());
+            }
+            Op::Prepare(name) => {
+                excluded.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+    excluded
+}
+
 fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotPlan>> {
+    let excluded = environment_resident_names(body);
+    let mut needs_environment = false;
     let mut slots_by_name = HashMap::new();
     let mut scopes = vec![HashMap::new()];
     let mut slot_count = 0usize;
     for parameter in parameters {
+        if excluded.contains(parameter) {
+            continue;
+        }
         if scopes[0].contains_key(parameter) {
             return None;
         }
@@ -5272,37 +5511,42 @@ fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotP
     let mut instruction_slots = Vec::with_capacity(body.code.len());
     for instruction in &body.code {
         let slot = match &instruction.op {
-            Op::Constant(_)
-            | Op::Pop
-            | Op::Jump(_)
-            | Op::JumpIfFalse(_)
-            | Op::Call(_)
-            | Op::PerformCall(_)
-            | Op::MakeArray(_)
-            | Op::Index
-            | Op::Coalesce(_)
-            | Op::Propagate
-            | Op::Get(_)
-            | Op::Print
-            | Op::Return => None,
-            Op::Prepare(_) | Op::Perform => None,
-            Op::Load(name) | Op::Store(name) => scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(name).copied()),
+            Op::Load(name) | Op::Store(name) => {
+                if excluded.contains(name) {
+                    None
+                } else {
+                    scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name).copied())
+                }
+            }
             Op::Define { name, .. } => {
-                let top_level = scopes.len() == 1;
-                let scope = scopes.last_mut()?;
-                if scope.contains_key(name) {
-                    return None;
+                if excluded.contains(name) {
+                    // Environment-resident defines are only safe at the
+                    // plan's own level: block scopes are not materialized
+                    // in the environment while a plan is active, so an
+                    // inner-scope environment define would collide on the
+                    // next pass. Give the whole chunk the slow path.
+                    if scopes.len() > 1 {
+                        return None;
+                    }
+                    needs_environment = true;
+                    None
+                } else {
+                    let top_level = scopes.len() == 1;
+                    let scope = scopes.last_mut()?;
+                    if scope.contains_key(name) {
+                        return None;
+                    }
+                    let slot = slot_count;
+                    scope.insert(name.clone(), slot);
+                    if top_level {
+                        slots_by_name.insert(name.clone(), slot);
+                    }
+                    slot_count += 1;
+                    Some(slot)
                 }
-                let slot = slot_count;
-                scope.insert(name.clone(), slot);
-                if top_level {
-                    slots_by_name.insert(name.clone(), slot);
-                }
-                slot_count += 1;
-                Some(slot)
             }
             Op::EnterScope => {
                 scopes.push(HashMap::new());
@@ -5315,21 +5559,28 @@ fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotP
                 scopes.pop();
                 None
             }
-            Op::Unary(TokenKind::Minus | TokenKind::Bang) => None,
-            Op::Binary(
-                TokenKind::Plus
-                | TokenKind::Minus
-                | TokenKind::Star
-                | TokenKind::Slash
-                | TokenKind::Percent
-                | TokenKind::EqualEqual
-                | TokenKind::BangEqual
-                | TokenKind::Greater
-                | TokenKind::GreaterEqual
-                | TokenKind::Less
-                | TokenKind::LessEqual,
-            ) => None,
-            _ => return None,
+            // Declaration ops insert environment bindings directly; they
+            // are only safe at the plan's own level, for the same reason
+            // as excluded defines.
+            Op::MakeFunction { .. }
+            | Op::DefineRecord { .. }
+            | Op::DefineEnum { .. }
+            | Op::DefineProtocol { .. }
+            | Op::DefineModule { .. }
+            | Op::AdoptProtocol { .. }
+            | Op::DefinePattern { .. }
+            | Op::Prepare(_) => {
+                if scopes.len() > 1 {
+                    return None;
+                }
+                needs_environment = true;
+                None
+            }
+            // Every other op either carries no name, resolves its names
+            // through the environment (the excluded set guarantees the
+            // fallback finds them), or executes nested chunks behind
+            // execute_nested_chunk, which masks this plan.
+            _ => None,
         };
         instruction_slots.push(slot);
     }
@@ -5337,6 +5588,7 @@ fn fast_local_slots(parameters: &[String], body: &Chunk) -> Option<Arc<FastSlotP
         return None;
     }
     Some(Arc::new(FastSlotPlan {
+        needs_environment,
         slots_by_name,
         instruction_slots,
         slot_count,
