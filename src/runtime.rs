@@ -6008,9 +6008,6 @@ fn check_arity(name: &str, expected: usize, actual: usize, span: Span) -> Result
         ))
     }
 }
-fn native_clock(_: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    unix_seconds(span).map(Value::Float)
-}
 fn native_len(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     match &arguments[0] {
         Value::String(value) => i64::try_from(value.chars().count())
@@ -13631,7 +13628,7 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex, mpsc};
 
     use super::{
-        BlockingExecutor, Value, decode_chunks, deterministic_clock, native_clock,
+        BlockingExecutor, Value, decode_chunks, deterministic_clock, native_time_monotonic,
         parse_http_response, parse_http_url, tls_client_stream, tls_server_config,
     };
 
@@ -13640,7 +13637,7 @@ mod tests {
         let span = crate::ast::Span { line: 1, column: 1 };
         let guard = deterministic_clock(1_700_000_000.25).unwrap();
         assert_eq!(
-            native_clock(Vec::new(), span).unwrap(),
+            native_time_monotonic(Vec::new(), span).unwrap(),
             Value::Float(1_700_000_000.25)
         );
         assert!(deterministic_clock(f64::NAN).is_err());

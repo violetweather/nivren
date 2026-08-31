@@ -42,13 +42,11 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "std.bytes",
         "from_string:value;from_values:values;to_string:bytes;length:bytes;get:bytes,index;slice:bytes,offset,length",
     );
-    for module in ["std.channels"] {
-        add(
-            &mut labels,
-            module,
-            "create:capacity;send:channel,value,timeout;receive:channel,timeout",
-        );
-    }
+    add(
+        &mut labels,
+        "std.channels",
+        "create:capacity;send:channel,value,timeout;receive:channel,timeout",
+    );
     add(
         &mut labels,
         "std.compression",
@@ -70,13 +68,11 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "hex:bytes;unhex:source;base64:bytes;unbase64:source;base64url:bytes;unbase64url:source",
     );
     add(&mut labels, "std.env", "get:name");
-    for module in ["std.files"] {
-        add(
-            &mut labels,
-            module,
-            "read:path;write:path,contents;exists:path;open_read:path;open_write:path;read_open:file,maximum;write_open:file,contents;close:file",
-        );
-    }
+    add(
+        &mut labels,
+        "std.files",
+        "read:path;write:path,contents;exists:path;open_read:path;open_write:path;read_open:file,maximum;write_open:file,contents;close:file",
+    );
     add(
         &mut labels,
         "std.files",
@@ -157,13 +153,11 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "std.set",
         "single:value;add:set,value;contains:set,value;remove:set,value;length:set;values:set",
     );
-    for module in ["std.tasks"] {
-        add(
-            &mut labels,
-            module,
-            "spawn:operation;await:task;await_for:task,timeout;cancel:task;all:tasks;race:tasks",
-        );
-    }
+    add(
+        &mut labels,
+        "std.tasks",
+        "spawn:operation;await:task;await_for:task,timeout;cancel:task;all:tasks;race:tasks",
+    );
     add(
         &mut labels,
         "std.text",

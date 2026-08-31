@@ -286,7 +286,6 @@ impl Checker {
         native("ok", vec![Type::Unknown], Type::Unknown);
         native("err", vec![Type::Unknown], Type::Unknown);
         let string_result = Type::Result(Box::new(Type::String), Box::new(Type::String));
-        let null_result = Type::Result(Box::new(Type::Null), Box::new(Type::String));
         let function = |params: Vec<Type>, result: Type| {
             Type::Function(vec![], vec![], params, Box::new(result), vec![])
         };
