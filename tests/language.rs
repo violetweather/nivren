@@ -7300,6 +7300,77 @@ flip with {}
 }
 
 #[test]
+fn generators_expand_into_checked_declarations() {
+    let source = r#"
+generate schemas {
+    keep fields set std.map.set(std.map.single("x", "Int"), "y", "Int")
+    keep point set choose std.source.shape("Point", fields, ["Compare"]) {
+        case Ok carries declaration => declaration
+        otherwise as problem => problem
+    }
+    give [point]
+}
+expand schemas
+keep origin set Point with { x set 1, y set 2 }
+show(origin.x + origin.y)
+"#;
+    assert_eq!(eval(source), Value::Null);
+    let misuse = source.replace("x set 1", "x set \"one\"");
+    assert!(nivren::check(&misuse).is_err());
+}
+
+#[test]
+fn generators_stay_pure_bounded_and_validated() {
+    let errors = nivren::check("expand missing").unwrap_err();
+    assert!(errors[0].to_string().contains("unknown generator"));
+    let effectful = r#"
+generate impure {
+    std.time.sleep(0.1)
+    give []
+}
+expand impure
+"#;
+    let errors = nivren::check(effectful).unwrap_err();
+    assert!(errors[0].to_string().contains("does not allow Time"));
+    let wrong_shape = r#"
+generate wrong {
+    give [42]
+}
+expand wrong
+"#;
+    let errors = nivren::check(wrong_shape).unwrap_err();
+    assert!(errors[0].to_string().contains("source.Declaration"));
+    let bad_label = r#"
+generate sized takes { limit is Int } {
+    give []
+}
+expand sized with { size set 3 }
+"#;
+    let errors = nivren::check(bad_label).unwrap_err();
+    assert!(errors[0].to_string().contains("canonical order"));
+}
+
+#[test]
+fn generated_choices_join_pattern_matching() {
+    let source = r#"
+generate signals {
+    keep cases set std.map.set(std.map.single("Go", ""), "Wait", "Int")
+    keep signal set choose std.source.choice("Signal", cases) {
+        case Ok carries declaration => declaration
+        otherwise as problem => problem
+    }
+    give [signal]
+}
+expand signals
+show(choose Signal.Wait(7) {
+    case Wait carries delay => delay
+    case Go => 0
+})
+"#;
+    assert_eq!(eval(source), Value::Null);
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

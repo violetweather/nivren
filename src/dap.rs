@@ -177,6 +177,7 @@ impl Session {
             .map_err(|error| dap_error(format!("cannot read debug program: {error}")))?;
         let tokens = crate::lexer::scan(&source).map_err(join_errors)?;
         let program = crate::parser::parse(tokens).map_err(join_errors)?;
+        let program = crate::expand::expand_program(program).map_err(join_errors)?;
         crate::typecheck::check(&program).map_err(join_errors)?;
         let chunk = crate::bytecode::compile(&program).map_err(join_errors)?;
         let captured = Arc::new(Mutex::new(None));

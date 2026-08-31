@@ -2386,7 +2386,10 @@ fn explain_story_path(path: &str) -> ExitCode {
             Ok(source) => source,
             Err(code) => return code,
         };
-        match nivren::lexer::scan(&source).and_then(nivren::parser::parse) {
+        match nivren::lexer::scan(&source)
+            .and_then(nivren::parser::parse)
+            .and_then(nivren::expand::expand_program)
+        {
             Ok(program) => program,
             Err(errors) => {
                 report(path, &source, &errors);

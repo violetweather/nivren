@@ -1724,6 +1724,32 @@ impl Checker {
                         ]),
                     ),
                     (
+                        "source",
+                        module(vec![
+                            (
+                                "shape",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                        Type::Array(Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "choice",
+                                function(
+                                    vec![
+                                        Type::String,
+                                        Type::Map(Box::new(Type::String), Box::new(Type::String)),
+                                    ],
+                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
                         "gpu",
                         module(vec![
                             ("available", effect(vec![], Type::Bool, "Gpu")),
@@ -2102,6 +2128,13 @@ impl Checker {
                 }
                 let _ = span;
                 self.active_promises.extend(clauses.iter().cloned());
+            }
+            Stmt::Generator { span, .. } | Stmt::Expand { span, .. } => {
+                self.errors.push(NivError::new(
+                    "generator expansion runs before checking; this build path does not expand generators",
+                    span.line,
+                    span.column,
+                ));
             }
             Stmt::Trusted { reason, span } => {
                 if reason.len() > 200 {

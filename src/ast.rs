@@ -281,6 +281,23 @@ pub enum Stmt {
         clauses: Vec<PromiseClause>,
         span: Span,
     },
+    /// `generate name takes { … } { … }`: a compile-time callable whose
+    /// body builds declaration values with `std.source`. Generators are
+    /// consumed by expansion and never reach checking or runtime.
+    Generator {
+        name: String,
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    /// `expand name with { … }`: evaluates a generator at module scope and
+    /// splices the produced declarations in place.
+    Expand {
+        name: String,
+        labels: Vec<String>,
+        arguments: Vec<Expr>,
+        span: Span,
+    },
     /// `trusted "reason"`: marks the enclosing scope as a systems escape
     /// hatch, unlocking `std.native` and `std.host` while the mandatory
     /// reason travels into audits and documentation.

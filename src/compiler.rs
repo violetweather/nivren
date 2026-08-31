@@ -128,6 +128,8 @@ impl Compiler {
 fn parse_checked(source: &str) -> Result<Vec<crate::ast::Stmt>, Vec<Diagnostic>> {
     let tokens = crate::lexer::scan(source).map_err(diagnostics)?;
     let program = crate::parser::parse(tokens).map_err(diagnostics)?;
+    #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]
+    let program = crate::expand::expand_program(program).map_err(diagnostics)?;
     crate::typecheck::check(&program).map_err(diagnostics)?;
     Ok(program)
 }

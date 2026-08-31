@@ -19,6 +19,30 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, Vec<NivError>> {
     .program()
 }
 
+/// Parses one complete type reference from builder-provided text, so
+/// generated declarations flow through the real grammar instead of pasting
+/// unchecked source.
+pub fn parse_type(source: &str) -> Result<TypeRef, NivError> {
+    let tokens = crate::lexer::scan(source).map_err(|mut errors| errors.remove(0))?;
+    let mut parser = Parser {
+        tokens,
+        current: 0,
+        errors: vec![],
+        depth: 0,
+        callables: HashMap::new(),
+    };
+    let reference = parser.type_ref()?;
+    if parser.is_at_end() {
+        Ok(reference)
+    } else {
+        Err(NivError::new(
+            format!("'{source}' is not a single type"),
+            1,
+            1,
+        ))
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     current: usize,
@@ -769,6 +793,63 @@ impl Parser {
         if let Some(statement) = self.sample_statement()? {
             return Ok(statement);
         }
+        if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "generate")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+        {
+            self.advance();
+            let span = self.previous_span();
+            let name = self.consume_identifier("expected a generator name")?;
+            let mut params = vec![];
+            if self.matches(&[TokenKind::Takes]) {
+                self.consume(&TokenKind::LeftBrace, "expected '{' after 'takes'")?;
+                while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+                    let param_span = Span {
+                        line: self.peek().line,
+                        column: self.peek().column,
+                    };
+                    let param_name = self.consume_identifier("expected an input name")?;
+                    self.consume(&TokenKind::Is, "an input states its type with 'is'")?;
+                    params.push(Param {
+                        name: param_name,
+                        ty: Some(self.type_ref()?),
+                        span: param_span,
+                    });
+                    self.matches(&[TokenKind::Comma, TokenKind::Semicolon]);
+                }
+                self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
+            }
+            self.consume(
+                &TokenKind::LeftBrace,
+                "expected '{' before the generator body",
+            )?;
+            let body = self.block_contents()?;
+            self.optional_semicolon();
+            return Ok(Stmt::Generator {
+                name,
+                params,
+                body,
+                span,
+            });
+        }
+        if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "expand")
+            && matches!(self.tokens[self.current + 1].kind, TokenKind::Identifier(_))
+        {
+            self.advance();
+            let span = self.previous_span();
+            let name = self.consume_identifier("expected a generator name after 'expand'")?;
+            let (labels, arguments) = if self.matches(&[TokenKind::With]) {
+                self.intent_arguments()?
+            } else {
+                (vec![], vec![])
+            };
+            self.optional_semicolon();
+            return Ok(Stmt::Expand {
+                name,
+                labels,
+                arguments,
+                span,
+            });
+        }
         if matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "trusted")
             && matches!(self.tokens[self.current + 1].kind, TokenKind::String(_))
         {
@@ -1340,13 +1421,21 @@ impl Parser {
                 expression = Expr::Index(Box::new(expression), Box::new(index), span);
             } else if self.matches(&[TokenKind::Dot]) {
                 let span = self.previous_span();
-                // Member names may spell word keywords such as `repeat`
-                // (`std.text.repeat`); after '.', a word is always a name.
-                let name = if matches!(self.peek().kind, TokenKind::While) {
-                    self.advance();
-                    "repeat".to_string()
-                } else {
-                    self.consume_identifier("expected field name after '.'")?
+                // Member names may spell word keywords such as `repeat`,
+                // `shape`, or `choice` (`std.text.repeat`, `std.source.shape`);
+                // after '.', a word is always a name.
+                let keyword_name = match self.peek().kind {
+                    TokenKind::While => Some("repeat"),
+                    TokenKind::Record => Some("shape"),
+                    TokenKind::Enum => Some("choice"),
+                    _ => None,
+                };
+                let name = match keyword_name {
+                    Some(name) => {
+                        self.advance();
+                        name.to_string()
+                    }
+                    None => self.consume_identifier("expected field name after '.'")?,
                 };
                 expression = Expr::Get(Box::new(expression), name, span);
             } else {

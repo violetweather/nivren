@@ -180,6 +180,9 @@ macro_rules! evaluate_part {
 pub enum Value {
     Int(i64),
     UInt(u64),
+    /// A checked declaration built by `std.source` inside a generator; the
+    /// expansion pass splices the carried statement into the module.
+    SourceDeclaration(Arc<Stmt>),
     Float(f64),
     String(String),
     Bytes(Arc<Vec<u8>>),
@@ -229,6 +232,7 @@ impl Value {
         match self {
             Self::Int(_) => "Int",
             Self::UInt(_) => "UInt",
+            Self::SourceDeclaration(_) => "source.Declaration",
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::Bytes(_) => "Bytes",
@@ -277,6 +281,7 @@ impl PartialEq for Value {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a == b,
             (Self::UInt(a), Self::UInt(b)) => a == b,
+            (Self::SourceDeclaration(a), Self::SourceDeclaration(b)) => Arc::ptr_eq(a, b),
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
@@ -338,6 +343,7 @@ impl Display for Value {
         match self {
             Self::Int(number) => write!(formatter, "{number}"),
             Self::UInt(number) => write!(formatter, "{number}"),
+            Self::SourceDeclaration(_) => write!(formatter, "<source declaration>"),
             Self::Float(number) => write!(formatter, "{number}"),
             Self::String(string) => write!(formatter, "{string}"),
             Self::Bytes(bytes) => write!(formatter, "<{} bytes>", bytes.len()),
@@ -1590,6 +1596,11 @@ impl Interpreter {
             Stmt::Stop(_) => Ok(Flow::Stop),
             Stmt::Skip(_) => Ok(Flow::Skip),
             Stmt::Promise { .. } | Stmt::Trusted { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Generator { span, .. } | Stmt::Expand { span, .. } => Err(NivError::new(
+                "generator expansion runs before execution",
+                span.line,
+                span.column,
+            )),
             Stmt::Sample {
                 title,
                 body,
@@ -4952,6 +4963,7 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
         Value::LockGuard(guard) => mark_value(&guard.lock.value.lock().unwrap(), marked),
         Value::Int(_)
         | Value::UInt(_)
+        | Value::SourceDeclaration(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -6529,6 +6541,13 @@ fn standard_library() -> Value {
             native_module(&[
                 ("available", 0, native_gpu_available, Some("Gpu")),
                 ("open", 1, native_gpu_open, Some("Gpu")),
+            ]),
+        ),
+        (
+            "source".into(),
+            native_module(&[
+                ("shape", 3, native_source_shape, None),
+                ("choice", 2, native_source_choice, None),
             ]),
         ),
     ]);
@@ -10777,6 +10796,147 @@ fn native_plans_decode(arguments: Vec<Value>, span: Span) -> Result<Value, NivEr
     })))))
 }
 
+fn validate_source_name(name: &str, span: Span) -> Result<Option<Value>, NivError> {
+    let valid = matches!(
+        crate::lexer::scan(name),
+        Ok(tokens)
+            if tokens.len() == 2
+                && matches!(tokens[0].kind, crate::lexer::TokenKind::Identifier(_))
+    );
+    let _ = span;
+    Ok(if valid {
+        None
+    } else {
+        Some(result_error(format!(
+            "'{name}' is not a single well-formed Nivren name"
+        )))
+    })
+}
+
+fn native_source_shape(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.shape", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let Value::Map(fields) = &arguments[1] else {
+        return Err(expected_value(
+            "std.source.shape",
+            "Map<String, String>",
+            &arguments[1],
+            span,
+        ));
+    };
+    if fields.is_empty() {
+        return Ok(result_error("a generated shape needs at least one field"));
+    }
+    let mut definitions = Vec::with_capacity(fields.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in fields.iter() {
+        let (Value::String(field), Value::String(type_text)) = (key, value) else {
+            return Ok(result_error(
+                "shape fields map field names to type text, both String",
+            ));
+        };
+        if let Some(invalid) = validate_source_name(field, span)? {
+            return Ok(invalid);
+        }
+        if !seen.insert(field.clone()) {
+            return Ok(result_error(format!(
+                "field '{field}' appears more than once"
+            )));
+        }
+        let ty = match crate::parser::parse_type(type_text) {
+            Ok(ty) => ty,
+            Err(error) => return Ok(result_error(error.message)),
+        };
+        definitions.push(crate::ast::FieldDef {
+            name: field.clone(),
+            ty,
+            span,
+        });
+    }
+    let Value::Array(derive_values) = &arguments[2] else {
+        return Err(expected_value(
+            "std.source.shape",
+            "[String]",
+            &arguments[2],
+            span,
+        ));
+    };
+    let mut derives = Vec::with_capacity(derive_values.len());
+    for derive in derive_values.iter() {
+        let Value::String(derive) = derive else {
+            return Ok(result_error("derives are named as String values"));
+        };
+        derives.push(derive.clone());
+    }
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Record {
+            name: name.to_string(),
+            type_params: vec![],
+            fields: definitions,
+            derives,
+            span,
+        },
+    )))))
+}
+
+fn native_source_choice(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let name = expect_string(&arguments[0], "std.source.choice", span)?;
+    if let Some(invalid) = validate_source_name(name, span)? {
+        return Ok(invalid);
+    }
+    let Value::Map(cases) = &arguments[1] else {
+        return Err(expected_value(
+            "std.source.choice",
+            "Map<String, String>",
+            &arguments[1],
+            span,
+        ));
+    };
+    if cases.is_empty() {
+        return Ok(result_error("a generated choice needs at least one case"));
+    }
+    let mut variants = Vec::with_capacity(cases.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in cases.iter() {
+        let (Value::String(case), Value::String(payload_text)) = (key, value) else {
+            return Ok(result_error(
+                "choice cases map case names to payload type text (empty for none), both String",
+            ));
+        };
+        if let Some(invalid) = validate_source_name(case, span)? {
+            return Ok(invalid);
+        }
+        if !seen.insert(case.clone()) {
+            return Ok(result_error(format!(
+                "case '{case}' appears more than once"
+            )));
+        }
+        let payload = if payload_text.is_empty() {
+            None
+        } else {
+            match crate::parser::parse_type(payload_text) {
+                Ok(ty) => Some(ty),
+                Err(error) => return Ok(result_error(error.message)),
+            }
+        };
+        variants.push(crate::ast::VariantDef {
+            name: case.clone(),
+            payload,
+            span,
+        });
+    }
+    Ok(Value::Ok(Arc::new(Value::SourceDeclaration(Arc::new(
+        Stmt::Enum {
+            name: name.to_string(),
+            type_params: vec![],
+            variants,
+            span,
+        },
+    )))))
+}
+
 fn native_gpu_available(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
     Ok(Value::Bool(false))
 }
@@ -12580,6 +12740,7 @@ fn transferable(value: &Value) -> bool {
         | Value::Decimal(_)
         | Value::FixedInt(_) => true,
         Value::AtomicInt(_) => true,
+        Value::SourceDeclaration(_) => false,
         Value::Enum(value) => value.payload.as_ref().is_none_or(transferable),
         Value::Array(values) => values.iter().all(transferable),
         Value::Map(entries) => entries
@@ -12867,6 +13028,7 @@ fn stable_key(value: &Value) -> bool {
         | Value::BigInt(_)
         | Value::Decimal(_)
         | Value::FixedInt(_) => true,
+        Value::SourceDeclaration(_) => false,
         Value::Enum(value) => value.payload.as_ref().is_none_or(stable_key),
         Value::Array(values) | Value::Set(values) => values.iter().all(stable_key),
         Value::Map(entries) => entries
@@ -12907,6 +13069,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
     const HANDLE_BYTES: u64 = 64;
     match value {
         Value::Int(_) | Value::UInt(_) | Value::Float(_) | Value::Bool(_) | Value::Null => 16,
+        Value::SourceDeclaration(_) => HANDLE_BYTES,
         Value::Enum(value) => value.payload.as_ref().map_or(16, |payload| {
             16u64.saturating_add(estimated_value_bytes(payload))
         }),
@@ -13177,6 +13340,8 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Promise { span, .. }
         | Stmt::Trusted { span, .. }
         | Stmt::Sample { span, .. }
+        | Stmt::Generator { span, .. }
+        | Stmt::Expand { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

@@ -128,5 +128,15 @@
     ],
     "status": 0,
     "stdout": "example.com\n"
+  },
+  {
+    "name": "generator-expansion",
+    "source": "generate schemas {\n    keep fields set std.map.set(std.map.single(\"x\", \"Int\"), \"y\", \"Int\")\n    keep point set choose std.source.shape(\"Point\", fields, [\"Compare\"]) {\n        case Ok carries declaration => declaration\n        otherwise as problem => problem\n    }\n    give [point]\n}\nexpand schemas\nkeep origin set Point with { x set 1, y set 2 }\nshow(origin.x + origin.y)",
+    "arguments": [
+      "run",
+      "{source}"
+    ],
+    "status": 0,
+    "stdout": "3\n"
   }
 ]

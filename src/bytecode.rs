@@ -314,7 +314,10 @@ impl Compiler {
             Stmt::Skip(span) => {
                 self.emit(Op::LoopExit { skip: true }, *span);
             }
-            Stmt::Promise { span, .. } | Stmt::Trusted { span, .. } => {
+            Stmt::Promise { span, .. }
+            | Stmt::Trusted { span, .. }
+            | Stmt::Generator { span, .. }
+            | Stmt::Expand { span, .. } => {
                 self.emit(Op::Constant(Literal::Null), *span);
             }
             Stmt::Sample {
@@ -1103,6 +1106,8 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::Promise { span, .. }
         | Stmt::Trusted { span, .. }
         | Stmt::Sample { span, .. }
+        | Stmt::Generator { span, .. }
+        | Stmt::Expand { span, .. }
         | Stmt::For { span, .. }
         | Stmt::Using { span, .. }
         | Stmt::Function { span, .. }

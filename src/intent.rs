@@ -359,7 +359,9 @@ impl Analyzer {
             | Stmt::Skip(_)
             | Stmt::Promise { .. }
             | Stmt::Trusted { .. }
-            | Stmt::Sample { .. } => {}
+            | Stmt::Sample { .. }
+            | Stmt::Generator { .. }
+            | Stmt::Expand { .. } => {}
             Stmt::IfCarries {
                 subject,
                 then_branch,

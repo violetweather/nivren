@@ -11,6 +11,8 @@ pub mod dap;
 mod derive_methods;
 pub mod documentation;
 pub mod error;
+#[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]
+pub mod expand;
 pub mod fixed;
 pub mod formatter;
 pub mod intent;
@@ -52,6 +54,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn check(source: &str) -> Result<(), Vec<NivError>> {
     let tokens = lexer::scan(source)?;
     let program = parser::parse(tokens)?;
+    #[cfg(any(feature = "host-runtime", feature = "portable-runtime"))]
+    let program = expand::expand_program(program)?;
     typecheck::check(&program)
 }
 
@@ -59,6 +63,7 @@ pub fn check(source: &str) -> Result<(), Vec<NivError>> {
 pub fn run(source: &str) -> Result<Value, Vec<NivError>> {
     let tokens = lexer::scan(source)?;
     let program = parser::parse(tokens)?;
+    let program = expand::expand_program(program)?;
     typecheck::check(&program)?;
     let chunk = bytecode::compile(&program)?;
     Interpreter::new()
