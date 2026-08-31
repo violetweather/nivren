@@ -1305,14 +1305,18 @@ impl Interpreter {
     /// in `show(value)` prints the produced integer.
     #[cfg(feature = "host-runtime")]
     fn try_root_native(&mut self, chunk: &Chunk) -> Result<Option<Value>, NivError> {
-        if self.jit_threshold == u32::MAX
-            || chunk.code.len() < 16
-            || self.debug_hook.is_some()
-            || self.metrics.is_some()
-        {
+        if self.jit_threshold == u32::MAX || self.debug_hook.is_some() || self.metrics.is_some() {
             return Ok(None);
         }
-        let Some(plan) = crate::bytecode::integer_root_plan(chunk) else {
+        enum Plan {
+            Chunk(crate::bytecode::IntegerRootPlan),
+            Program(crate::bytecode::IntegerProgramPlan),
+        }
+        let plan = if let Some(plan) = crate::bytecode::integer_program_plan(chunk) {
+            Plan::Program(plan)
+        } else if let Some(plan) = crate::bytecode::integer_root_plan(chunk) {
+            Plan::Chunk(plan)
+        } else {
             if std::env::var_os("NIVREN_ROOT_DEBUG").is_some() {
                 eprintln!("ROOT DEBUG: plan refused ({} ops)", chunk.code.len());
                 for (i, item) in chunk.code.iter().enumerate() {
@@ -1321,45 +1325,124 @@ impl Interpreter {
             }
             return Ok(None);
         };
+        // Trivial chunks stay interpreted: native compilation only pays for
+        // itself once the program holds enough work.
+        let total_operations = match &plan {
+            Plan::Chunk(plan) => plan.operations.len(),
+            Plan::Program(plan) => {
+                plan.root_operations.len()
+                    + plan
+                        .functions
+                        .iter()
+                        .map(|function| function.operations.len())
+                        .sum::<usize>()
+            }
+        };
+        if total_operations < 16 {
+            return Ok(None);
+        }
+        let (slot_count, persistent, prints_result, function_sites) = match &plan {
+            Plan::Chunk(plan) => (plan.slot_count, &plan.persistent, plan.prints_result, None),
+            Plan::Program(plan) => (
+                plan.root_slots,
+                &plan.persistent,
+                plan.prints_result,
+                Some(&plan.function_sites),
+            ),
+        };
         {
             let environment = self.environment.lock().unwrap();
-            if plan
-                .persistent
+            if persistent
                 .iter()
                 .any(|(name, _, _)| environment.values.contains_key(name))
             {
                 return Ok(None);
             }
         }
-        let compiled = match CompiledFunction::compile_root(plan.slot_count, &plan.operations) {
-            Ok(compiled) => compiled,
-            Err(reason) => {
-                if std::env::var_os("NIVREN_ROOT_DEBUG").is_some() {
-                    eprintln!("ROOT DEBUG: compile failed: {reason}");
+        enum Compiled {
+            Chunk(CompiledFunction),
+            Program(nivren_jit::CompiledProgram),
+        }
+        let compiled = match &plan {
+            Plan::Chunk(plan) => {
+                match CompiledFunction::compile_root(plan.slot_count, &plan.operations) {
+                    Ok(compiled) => Compiled::Chunk(compiled),
+                    Err(reason) => {
+                        if std::env::var_os("NIVREN_ROOT_DEBUG").is_some() {
+                            eprintln!("ROOT DEBUG: compile failed: {reason}");
+                        }
+                        return Ok(None);
+                    }
                 }
-                return Ok(None);
+            }
+            Plan::Program(plan) => {
+                let functions = plan
+                    .functions
+                    .iter()
+                    .map(|function| nivren_jit::PlanFunction {
+                        parameters: function.parameters,
+                        slots: function.slots,
+                        operations: function.operations.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let root = nivren_jit::PlanRoot {
+                    slots: plan.root_slots,
+                    operations: plan.root_operations.clone(),
+                };
+                let limit = i64::try_from(self.max_call_depth).unwrap_or(i64::MAX);
+                match nivren_jit::CompiledProgram::compile(&functions, &root, limit) {
+                    Ok(compiled) => Compiled::Program(compiled),
+                    Err(reason) => {
+                        if std::env::var_os("NIVREN_ROOT_DEBUG").is_some() {
+                            eprintln!("ROOT DEBUG: program compile failed: {reason}");
+                        }
+                        return Ok(None);
+                    }
+                }
             }
         };
         self.jit_compilations = self.jit_compilations.saturating_add(1);
-        let mut slots = vec![0i64; plan.slot_count];
+        let mut slots = vec![0i64; slot_count];
         let span = Span { line: 1, column: 1 };
-        let value = match compiled.call_with_slots(&mut slots) {
-            Ok(value) => value,
-            Err(JitCallError::Overflow) => {
-                return Err(NivError::new("integer overflow", span.line, span.column));
-            }
-            Err(JitCallError::DivisionByZero) => {
-                return Err(NivError::new("division by zero", span.line, span.column));
-            }
-            Err(JitCallError::RemainderByZero) => {
-                return Err(NivError::new("remainder by zero", span.line, span.column));
-            }
-            Err(JitCallError::Arity) => return Ok(None),
+        let outcome = match &compiled {
+            Compiled::Chunk(compiled) => compiled.call_with_slots(&mut slots),
+            Compiled::Program(compiled) => compiled.call_root(&mut slots),
+        };
+        let _ = span;
+        let Ok(value) = outcome else {
+            // Planned programs are pure, so a fault reruns through the
+            // interpreter to produce the exact spans and call frames.
+            return Ok(None);
         };
         self.jit_executions = self.jit_executions.saturating_add(1);
+        // Materialize top-level function values so later chunks in the same
+        // interpreter still see them.
+        if let Some(sites) = function_sites {
+            for site in sites {
+                if let Some(instruction) = chunk.code.get(*site)
+                    && let Op::MakeFunction { name, params, body } = &instruction.op
+                {
+                    let function = Value::Function(Arc::new(Function {
+                        name: name.clone(),
+                        params: params.clone(),
+                        body: FunctionBody::Bytecode(body.clone()),
+                        closure: self.environment.clone(),
+                        fast_slots: fast_local_slots(params, body),
+                        jit: JitState::default(),
+                    }));
+                    self.environment.lock().unwrap().values.insert(
+                        name.clone(),
+                        Binding {
+                            value: function,
+                            mutable: false,
+                        },
+                    );
+                }
+            }
+        }
         {
             let mut environment = self.environment.lock().unwrap();
-            for (name, slot, mutable) in &plan.persistent {
+            for (name, slot, mutable) in persistent {
                 environment.values.insert(
                     name.clone(),
                     Binding {
@@ -1369,7 +1452,7 @@ impl Interpreter {
                 );
             }
         }
-        if plan.prints_result {
+        if prints_result {
             println!("{}", Value::Int(value));
             return Ok(Some(Value::Null));
         }
@@ -1468,6 +1551,11 @@ impl Interpreter {
             ));
         }
         self.native_execution_depth = 1;
+        if let Some(value) = self.try_root_native(chunk)? {
+            self.native_execution_depth = 0;
+            self.collect(&[]);
+            return Ok(value);
+        }
         let root_slots = self.push_root_frame(chunk);
         let execution = self.execute_chunk_native(chunk);
         if let Some(plan) = &root_slots {
@@ -3284,6 +3372,11 @@ impl Interpreter {
             Err(JitCallError::RemainderByZero) => {
                 Err(NivError::new("remainder by zero", span.line, span.column))
             }
+            Err(JitCallError::CallDepth) => Err(NivError::new(
+                format!("call depth limit of {} exceeded", self.max_call_depth),
+                span.line,
+                span.column,
+            )),
             Err(JitCallError::Arity) => Ok(None),
         }
     }
