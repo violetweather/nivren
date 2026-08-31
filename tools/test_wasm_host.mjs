@@ -27,12 +27,12 @@ function invoke(name, source) {
   return { status, output };
 }
 
-assert.equal(invoke("nivren_wasm_check", "keep answer: Int = 42").status, 0);
-const invalid = invoke("nivren_wasm_check", "keep answer: Int = yes");
+assert.equal(invoke("nivren_wasm_check", "keep answer is Int set 42").status, 0);
+const invalid = invoke("nivren_wasm_check", "keep answer is Int set yes");
 assert.equal(invalid.status, 1);
 assert.match(new TextDecoder().decode(invalid.output), /expected Int, found Bool/);
-const formatted = invoke("nivren_wasm_format", "keep answer=42");
-assert.equal(new TextDecoder().decode(formatted.output), "keep answer = 42\n");
+const formatted = invoke("nivren_wasm_format", "keep  answer   set 42");
+assert.equal(new TextDecoder().decode(formatted.output), "keep answer set 42\n");
 const compiled = invoke("nivren_wasm_compile", "40 + 2");
 assert.equal(compiled.status, 0);
 assert.equal(new TextDecoder().decode(compiled.output.slice(0, 4)), "NIVB");
@@ -54,4 +54,4 @@ assert.equal(new TextDecoder().decode(executed.output), "42");
 
 assert.equal(api.nivren_wasm_alloc(16 * 1024 * 1024 + 1), 0);
 
-console.log("Nivren WASI host/guest: check, diagnostics, format, compile, and Edition 4 execution passed");
+console.log("Nivren WASI host/guest: check, diagnostics, format, compile, and Edition 5 execution passed");

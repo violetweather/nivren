@@ -5,8 +5,8 @@ import { Nivren, NivrenError } from "../sdk/browser/nivren.mjs";
 const path = process.argv[2] ?? "target/wasm32-unknown-unknown/release/nivren_wasm.wasm";
 const nivren = await Nivren.instantiate(await readFile(path));
 
-nivren.check("keep answer: Int = 42");
-assert.equal(nivren.format("keep answer=42"), "keep answer = 42\n");
+nivren.check("keep answer is Int set 42");
+assert.equal(nivren.format("keep  answer   set 42"), "keep answer set 42\n");
 assert.equal(new TextDecoder().decode(nivren.compile("40 + 2").slice(0, 4)), "NIVB");
 assert.equal(nivren.run(`
 shape NumberPlan holds { value is Int }
@@ -22,8 +22,8 @@ choose Calculation.Ready(perform plan) {
 }
 `), "42");
 assert.throws(
-  () => nivren.check("keep answer: Int = yes"),
+  () => nivren.check("keep answer is Int set yes"),
   error => error instanceof NivrenError && error.status === 1 && /expected Int, found Bool/.test(error.message),
 );
 
-console.log("Nivren browser host: check, diagnostics, format, compile, and Edition 4 execution passed");
+console.log("Nivren browser host: check, diagnostics, format, compile, and Edition 5 execution passed");
