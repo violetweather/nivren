@@ -15,7 +15,7 @@ define emit
 takes {
     value is String
 }
-gives Null
+gives Nothing
 {
     show(value)
     give none
