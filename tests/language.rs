@@ -2406,6 +2406,152 @@ fn vscode_extension_registers_the_nivren_debug_adapter() {
 }
 
 #[test]
+fn dap_pauses_at_breakpoints_steps_lines_and_forwards_program_output() {
+    use std::io::{BufRead, Write};
+
+    fn send(stdin: &mut impl Write, request: &serde_json::Value) {
+        let body = serde_json::to_vec(request).unwrap();
+        write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+        stdin.write_all(&body).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn receive(reader: &mut impl BufRead) -> serde_json::Value {
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "DAP stream ended");
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+        let mut body = vec![0; length.unwrap()];
+        reader.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn receive_until(
+        reader: &mut impl BufRead,
+        log: &mut Vec<serde_json::Value>,
+        matches: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        for _ in 0..64 {
+            let message = receive(reader);
+            log.push(message.clone());
+            if matches(&message) {
+                return message;
+            }
+        }
+        panic!("expected DAP message never arrived; log: {log:?}");
+    }
+
+    fn stopped_with(reason: &str) -> impl Fn(&serde_json::Value) -> bool + use<> {
+        let reason = reason.to_string();
+        move |message| message["event"] == "stopped" && message["body"]["reason"] == reason
+    }
+
+    let directory = module_fixture("dap-stepping");
+    let program = directory.join("program.niv");
+    fs::write(
+        &program,
+        "keep first set 1\nkeep second set 2\nkeep third set first + second\nshow(third)\n",
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .arg("dap")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut log = Vec::new();
+
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 1, "type": "request", "command": "initialize", "arguments": {} }),
+    );
+    receive_until(&mut reader, &mut log, |message| {
+        message["event"] == "initialized"
+    });
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 2, "type": "request", "command": "setBreakpoints", "arguments": { "breakpoints": [{ "line": 3 }] } }),
+    );
+    receive_until(&mut reader, &mut log, |message| {
+        message["command"] == "setBreakpoints" && message["success"] == true
+    });
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 3, "type": "request", "command": "launch", "arguments": { "program": program.to_str().unwrap() } }),
+    );
+    receive_until(&mut reader, &mut log, stopped_with("entry"));
+
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 4, "type": "request", "command": "continue", "arguments": { "threadId": 1 } }),
+    );
+    receive_until(&mut reader, &mut log, stopped_with("breakpoint"));
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 5, "type": "request", "command": "stackTrace", "arguments": { "threadId": 1 } }),
+    );
+    let stack = receive_until(&mut reader, &mut log, |message| {
+        message["command"] == "stackTrace"
+    });
+    assert_eq!(stack["body"]["stackFrames"][0]["line"], 3);
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 6, "type": "request", "command": "variables", "arguments": { "variablesReference": 1 } }),
+    );
+    let variables = receive_until(&mut reader, &mut log, |message| {
+        message["command"] == "variables"
+    });
+    let rendered = variables["body"]["variables"].to_string();
+    assert!(rendered.contains("first"), "missing local: {rendered}");
+
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 7, "type": "request", "command": "next", "arguments": { "threadId": 1 } }),
+    );
+    let step = receive_until(&mut reader, &mut log, stopped_with("step"));
+    assert_eq!(step["body"]["reason"], "step");
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 8, "type": "request", "command": "stackTrace", "arguments": { "threadId": 1 } }),
+    );
+    let stack = receive_until(&mut reader, &mut log, |message| {
+        message["command"] == "stackTrace"
+    });
+    assert_eq!(stack["body"]["stackFrames"][0]["line"], 4);
+
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 9, "type": "request", "command": "continue", "arguments": { "threadId": 1 } }),
+    );
+    let output = receive_until(&mut reader, &mut log, |message| {
+        message["event"] == "output" && message["body"]["category"] == "stdout"
+    });
+    assert_eq!(output["body"]["output"], "3\n");
+    receive_until(&mut reader, &mut log, |message| {
+        message["event"] == "terminated"
+    });
+    send(
+        &mut stdin,
+        &serde_json::json!({ "seq": 10, "type": "request", "command": "disconnect", "arguments": {} }),
+    );
+    receive_until(&mut reader, &mut log, |message| {
+        message["command"] == "disconnect"
+    });
+    assert!(child.wait().unwrap().success());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn workspace_commands_build_test_and_reuse_incremental_members() {
     let root = module_fixture("workspace-commands");
     for name in ["core", "app"] {

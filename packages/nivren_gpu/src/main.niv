@@ -17,6 +17,8 @@ shape ComputeArtifact holds {
     source is String
     workgroups is Int
     cpu_fallback is [Int]
+    buffers is [[Int]]
+    output_items is Int
 } derives Json, Display, Validate
 
 shape VectorResult holds {
@@ -122,6 +124,8 @@ gives ComputeArtifact or Problem
         source set add_wgsl with {}
         workgroups set workgroups
         cpu_fallback set fallback
+        buffers set [checked.left, checked.right]
+        output_items set len(checked.left)
     })
 }
 

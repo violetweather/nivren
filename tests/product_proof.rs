@@ -102,6 +102,47 @@ fn desktop_host_is_typed_scoped_and_equivalent_in_vm_and_native_control() {
 }
 
 #[test]
+fn real_webgpu_host_computes_or_reports_the_unavailable_matrix() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/gpu_host.niv");
+    let program = nivren::modules::load(&path).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let probe = nivren_gpu_host::GpuHost::new();
+    let adapter_present = probe
+        .dispatch("nivren.handle.open:gpu", "webgpu-wgsl")
+        .is_ok();
+    for native in [false, true] {
+        let host = nivren_gpu_host::GpuHost::new();
+        let mut interpreter = Interpreter::new()
+            .with_capabilities(["Native".to_string()])
+            .with_host_callback(host.callback());
+        let result = if native {
+            interpreter.run_native(&chunk)
+        } else {
+            interpreter.run_bytecode(&chunk)
+        };
+        let result = result.unwrap();
+        if adapter_present {
+            assert_eq!(
+                result,
+                Value::Ok(Arc::new(Value::Array(Arc::new(vec![
+                    Value::Int(11),
+                    Value::Int(22),
+                    Value::Int(33),
+                    Value::Int(44),
+                ]))))
+            );
+        } else {
+            let rendered = format!("{result:?}");
+            assert!(
+                rendered.contains("no GPU adapter is available on this host"),
+                "expected the clean unavailable report, got: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
 fn gpu_host_matches_checked_cpu_fallback_in_vm_and_native_control() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proofs/edition4/gpu_host.niv");
     let program = nivren::modules::load(&path).unwrap();
@@ -163,7 +204,7 @@ fn bundled_sqlite_host_executes_real_edition_four_driver_workflow() {
             "nivren-sqlite-host-{}-{native}",
             std::process::id()
         ));
-        let host = nivren_database_host::SqliteHost::new(&root).unwrap();
+        let host = nivren_database_host::DatabaseHost::new(&root).unwrap();
         let mut interpreter = Interpreter::new()
             .with_capabilities(["Native".to_string()])
             .with_host_callback(host.callback());
