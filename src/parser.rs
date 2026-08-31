@@ -79,6 +79,21 @@ impl Parser {
     }
 
     fn declaration(&mut self) -> Result<Stmt, NivError> {
+        if matches!(&self.peek().kind, TokenKind::DocComment(_)) {
+            let span = Span {
+                line: self.peek().line,
+                column: self.peek().column,
+            };
+            let mut lines = vec![];
+            while let TokenKind::DocComment(text) = &self.peek().kind {
+                lines.push(text.clone());
+                self.advance();
+            }
+            return Ok(Stmt::Doc {
+                text: lines.join("\n"),
+                span,
+            });
+        }
         if self.matches(&[TokenKind::Let]) {
             return self.binding(false);
         }

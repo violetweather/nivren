@@ -1895,6 +1895,7 @@ impl Checker {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Doc { .. } => {}
             Stmt::Prepare {
                 name,
                 initializer,

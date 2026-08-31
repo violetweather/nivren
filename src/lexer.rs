@@ -30,6 +30,7 @@ pub enum TokenKind {
     Less,
     LessEqual,
     Identifier(String),
+    DocComment(String),
     Int(i64),
     Float(f64),
     String(String),
@@ -198,8 +199,13 @@ impl Lexer {
                 self.add(kind);
             }
             '/' if self.matches('/') => {
+                let documentation = self.matches('/');
+                let mut text = String::new();
                 while self.peek() != '\n' && !self.is_at_end() {
-                    self.advance();
+                    text.push(self.advance());
+                }
+                if documentation {
+                    self.add(TokenKind::DocComment(text.trim().to_string()));
                 }
             }
             '/' if self.matches('*') => self.block_comment(),
@@ -223,11 +229,7 @@ impl Lexer {
     fn block_comment(&mut self) {
         let mut depth = 1;
         while depth > 0 && !self.is_at_end() {
-            if self.peek() == '/' && self.peek_next() == '*' {
-                self.advance();
-                self.advance();
-                depth += 1;
-            } else if self.peek() == '*' && self.peek_next() == '/' {
+            if self.peek() == '*' && self.peek_next() == '/' {
                 self.advance();
                 self.advance();
                 depth -= 1;

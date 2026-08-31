@@ -19,11 +19,26 @@ fn document_entry_exports(statements: &[Stmt], output: &mut String) {
     };
     output.push_str("\n## Public API\n\n");
     for export in exports {
-        if let Some(declaration) = statements
+        if let Some(position) = statements
             .iter()
-            .find(|item| declared_name(item) == Some(export))
+            .position(|item| declared_name(item) == Some(export))
         {
-            output.push_str(&format!("- {}\n", declaration_signature(declaration)));
+            output.push_str(&format!(
+                "- {}\n",
+                declaration_signature(&statements[position])
+            ));
+            push_doc_text(statements, position, output);
+        }
+    }
+}
+
+fn push_doc_text(statements: &[Stmt], position: usize, output: &mut String) {
+    if position == 0 {
+        return;
+    }
+    if let Stmt::Doc { text, .. } = &statements[position - 1] {
+        for line in text.lines() {
+            output.push_str(&format!("  {line}\n"));
         }
     }
 }
@@ -39,10 +54,12 @@ fn document_modules(statements: &[Stmt], output: &mut String) {
         {
             output.push_str(&format!("\n## Module `{name}`\n\n"));
             for export in exports {
-                if let Some(declaration) =
-                    body.iter().find(|item| declared_name(item) == Some(export))
+                if let Some(position) = body
+                    .iter()
+                    .position(|item| declared_name(item) == Some(export))
                 {
-                    output.push_str(&format!("- {}\n", declaration_signature(declaration)));
+                    output.push_str(&format!("- {}\n", declaration_signature(&body[position])));
+                    push_doc_text(body, position, output);
                 }
             }
             document_modules(body, output);

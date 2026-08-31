@@ -1474,8 +1474,9 @@ fn prototype_spellings_are_not_part_of_edition_two() {
 }
 
 #[test]
-fn nested_block_comments_work() {
-    assert_eq!(eval("/* one /* two */ three */ 42"), Value::Int(42));
+fn block_comments_do_not_nest() {
+    assert_eq!(eval("/* one /* two */ 42"), Value::Int(42));
+    assert!(nivren::check("/* open forever").is_err());
 }
 
 #[test]
@@ -2697,10 +2698,10 @@ fn project_modules_cannot_escape_the_root() {
 
 #[test]
 fn formatter_is_comment_safe_and_idempotent() {
-    let source = "define main takes { } {\nkeep text set \"{not a block}\" // }\n/* { nested /* } */ ok */\nwhen yes {\nshow(text)\n}\n}\n";
+    let source = "define main takes { } {\nkeep text set \"{not a block}\" // }\n/* { a block comment } */\nwhen yes {\nshow(text)\n}\n}\n";
     let formatted = nivren::formatter::format(source);
     assert!(formatted.contains("    keep text set \"{not a block}\" // }"));
-    assert!(formatted.contains("    /* { nested /* } */ ok */"));
+    assert!(formatted.contains("    /* { a block comment } */"));
     assert_eq!(nivren::formatter::format(&formatted), formatted);
 }
 
@@ -2796,6 +2797,19 @@ fn documentation_lists_entry_module_public_api() {
     assert!(docs.contains("## Public API"));
     assert!(docs.contains("define public takes { value is Int } gives Int"));
     assert!(!docs.contains("hidden"));
+}
+
+#[test]
+fn doc_comments_document_the_following_declaration_and_execution_ignores_them() {
+    let source = "/// Doubles a value.\n/// Overflow stops the program.\ndefine double takes { value is Int } gives Int { give value * 2 }\nexpose { double }\ndouble(21)";
+    assert_eq!(eval_tree(source), Value::Int(42));
+    assert_eq!(eval_vm(source), Value::Int(42));
+    let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let docs = nivren::documentation::generate("entry", "1.0.0", &parsed);
+    assert!(docs.contains("define double takes { value is Int } gives Int"));
+    assert!(docs.contains("  Doubles a value.\n  Overflow stops the program.\n"));
+    let plain = "// not documentation\n1 + 1";
+    assert_eq!(eval(plain), Value::Int(2));
 }
 
 #[test]

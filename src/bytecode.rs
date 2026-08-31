@@ -322,6 +322,7 @@ impl Compiler {
                 self.emit(Op::Constant(Literal::Null), *span);
             }
             Stmt::Trusted { span, .. }
+            | Stmt::Doc { span, .. }
             | Stmt::Generator { span, .. }
             | Stmt::Expand { span, .. } => {
                 self.emit(Op::Constant(Literal::Null), *span);
@@ -1101,6 +1102,7 @@ fn pattern_text(pattern: &Pattern) -> String {
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
         Stmt::Prepare { span, .. }
+        | Stmt::Doc { span, .. }
         | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)

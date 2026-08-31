@@ -88,7 +88,7 @@ Decision values: **Applied** (implemented on this branch), **Accepted** (decided
 | --- | --- | --- | --- | --- |
 | 39 | Literals are `yes`/`no` but the type is C's `Bool` | `spec/LANGUAGE-2.md:28` | Rename the type to match the word-first identity (e.g. `Truth`) — or record a deliberate keep | Rejected — `Bool` stays; renaming a core type name buys no safety for ecosystem-wide churn |
 | 40 | `STANDARD-LIBRARY-5.md` used the forbidden `Result<T, E>` spelling | draft §4 | Spell signatures `gives T or E` | Applied |
-| 41 | `//` + nested `/* */` comments; no doc-comment syntax although `niv doc` exists | `spec/LANGUAGE-2.md:22` | Keep `//`; drop block-comment nesting; add a doc-comment form as `niv doc` input | Accepted — per the recommendation, scheduled for the freeze pass behind the row 48 edition gate and its `niv fix` rewrites |
+| 41 | `//` + nested `/* */` comments; no doc-comment syntax although `niv doc` exists | `spec/LANGUAGE-2.md:22` | Keep `//`; drop block-comment nesting; add a doc-comment form as `niv doc` input | Applied — `//` stays; block comments no longer nest (first `*/` closes); `///` doc comments parse as documentation for the following declaration and `niv doc` renders them (LANGUAGE-5 §5.1) |
 | 42 | `std.files.exists` gives bare `Bool`, hiding permission errors | `docs/STANDARD_LIBRARY.md:39` | `gives Bool or Problem` | Applied — `std.files.exists` gives `Bool or Problem` |
 | 43 | `Null` doubles as the JSON variant name and the unit type | `proofs/edition4/cli_automation.niv:10` | Distinct unit type name (`Nothing`); `none` stays the absent value | Accepted — per the recommendation, scheduled for the freeze pass behind the row 48 edition gate and its `niv fix` rewrites |
 

@@ -381,4 +381,10 @@ pub enum Stmt {
         exports: Vec<String>,
         span: Span,
     },
+    /// A `///` doc-comment block. It documents the declaration that follows
+    /// it in the same body; `niv doc` renders it and execution ignores it.
+    Doc {
+        text: String,
+        span: Span,
+    },
 }

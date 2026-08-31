@@ -1613,6 +1613,7 @@ impl Interpreter {
                 Ok(Flow::Continue(Value::Null))
             }
             Stmt::Trusted { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Doc { .. } => Ok(Flow::Continue(Value::Null)),
             Stmt::Generator { span, .. } | Stmt::Expand { span, .. } => Err(NivError::new(
                 "generator expansion runs before execution",
                 span.line,
@@ -13601,6 +13602,7 @@ fn get_value(object: Value, name: &str, span: Span) -> Result<Value, NivError> {
 fn statement_span(statement: &Stmt) -> Span {
     match statement {
         Stmt::Prepare { span, .. }
+        | Stmt::Doc { span, .. }
         | Stmt::Let { span, .. }
         | Stmt::Print(_, span)
         | Stmt::Block(_, span)

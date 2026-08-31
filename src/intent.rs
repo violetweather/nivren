@@ -288,6 +288,7 @@ impl Analyzer {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Doc { .. } => {}
             Stmt::Prepare {
                 plan_type,
                 initializer,

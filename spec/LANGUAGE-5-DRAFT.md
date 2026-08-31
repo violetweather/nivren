@@ -146,6 +146,10 @@ keep greeting set text "Hello {name}, you have {len(items)} tasks"
 
 `text` before anything other than a string literal is an ordinary identifier.
 
+## 5.1 Comments and doc comments
+
+`//` starts a line comment. `/* … */` is a block comment ending at the first `*/`; block comments do not nest, and an unterminated block comment is an error. `///` starts a doc comment: consecutive `///` lines form one documentation block that documents the declaration immediately following it. Doc comments are part of the parse (so tooling sees them) but have no runtime effect; `niv doc` renders each block under its declaration's signature.
+
 ## 6. Loop control
 
 `stop` ends the nearest enclosing `each` or `repeat` immediately. `skip` ends the current pass of the nearest enclosing loop and continues with the next pass. Both are statements, are rejected outside a loop body, and are rejected when the nearest loop boundary is crossed by a function, generator, `start` task, or `using` scope — a diagnostic names the boundary.
