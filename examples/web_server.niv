@@ -2,7 +2,7 @@ define serve_once
 takes {
     listener is TcpListener
 }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     using server set listener {

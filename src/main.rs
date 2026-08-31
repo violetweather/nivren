@@ -1215,7 +1215,7 @@ fn new_project(path: &str) -> ExitCode {
         fs::write(root.join("niv.toml"), manifest_source)?;
         fs::write(
             root.join("src/main.niv"),
-            "define main\ngives Null\n{\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain with {}\n",
+            "define main\ngives Nothing\n{\n    show(\"Welcome to Nivren\")\n    give none\n}\n\nmain with {}\n",
         )?;
         fs::write(
             root.join("tests/niv/main_test.niv"),

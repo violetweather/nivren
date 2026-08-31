@@ -8,7 +8,7 @@ gives String or String
 
 define require_header
 takes { encoded is String expected is String }
-gives Null or String
+gives Nothing or String
 {
     keep bytes set std.encoding.base64url_decode with { source set encoded } or give
     keep text set std.bytes.to_string with { bytes set bytes } or give

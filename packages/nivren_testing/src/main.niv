@@ -1,6 +1,6 @@
 define expect_equal<Value is Equal>
 takes { actual is Value expected is Value label is String }
-gives Null or String
+gives Nothing or String
 {
     when actual == expected { give ok(none) }
     give err(label + ": values differ")
@@ -8,7 +8,7 @@ gives Null or String
 
 define expect_yes
 takes { condition is Bool label is String }
-gives Null or String
+gives Nothing or String
 {
     when condition { give ok(none) }
     give err(label + ": expected yes")
@@ -16,7 +16,7 @@ gives Null or String
 
 define expect_no
 takes { condition is Bool label is String }
-gives Null or String
+gives Nothing or String
 {
     when not condition { give ok(none) }
     give err(label + ": expected no")
@@ -31,13 +31,13 @@ needs Channel
 
 define open
 takes { value is Gate }
-gives Null or String
+gives Nothing or String
 needs Channel
 { give perform std.channels.send with { channel set value.signal value set none timeout set 5.0 } }
 
 define pass
 takes { value is Gate }
-gives Null or String
+gives Nothing or String
 needs Channel
 {
     keep signal set perform std.channels.receive with { channel set value.signal timeout set 5.0 } or give
@@ -46,7 +46,7 @@ needs Channel
 
 define checkpoint
 takes { events is Channel label is String }
-gives Null or String
+gives Nothing or String
 needs Channel
 { give perform std.channels.send with { channel set events value set label timeout set 5.0 } }
 

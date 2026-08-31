@@ -7,7 +7,7 @@ define copy_configuration
 takes {
     plan is CopyPlan
 }
-gives Null or String
+gives Nothing or String
 needs FileRead
 {
     keep contents set perform std.files.read with {

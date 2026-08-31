@@ -186,7 +186,7 @@ fn c_named_type(name: &str, shapes: &BTreeSet<String>, choices: &BTreeSet<String
         "U64" => "uint64_t".into(),
         "String" | "BigInt" | "Decimal" | "DateTime" => "NivrenStringView".into(),
         "Bytes" => "NivrenBytesView".into(),
-        "Null" => "uint8_t".into(),
+        "Nothing" => "uint8_t".into(),
         _ if shapes.contains(name) => format!("const Nivren_{} *", c_name(name)),
         _ if choices.contains(name) => format!("Nivren_{}", c_name(name)),
         _ => "NivrenValueView".into(),

@@ -634,7 +634,7 @@ fn scoped_locks_serialize_shared_updates_in_both_engines() {
     let source = r#"
 define count takes { } gives Result<Int, String> needs Task {
     keep counter set std.locks.create(0)
-    define increment takes { } gives Result<Null, String> needs Task {
+    define increment takes { } gives Result<Nothing, String> needs Task {
         keep acquired set std.locks.acquire(counter, 2.0) or give
         using guard set acquired {
             keep current set std.locks.read(guard) or give
@@ -686,7 +686,7 @@ fn atomic_integers_are_linearizable_transferable_and_checked_in_both_engines() {
     let source = r#"
 define count takes { } gives Result<Int, String> needs Task {
     keep counter set std.atomics.create(0)
-    define increment takes { } gives Result<Null, String> {
+    define increment takes { } gives Result<Nothing, String> {
         change index set 0
         repeat index < 250 {
             keep previous set std.atomics.add(counter, 1) or give
@@ -752,7 +752,7 @@ choose update() { case Ok carries value => value, case Err carries problem => 0 
     assert_eq!(eval_vm(rollback), Value::Int(1));
 
     let scoped = r#"
-define abandon takes { transaction is Transaction<String, Int> } gives Result<Null, String> {
+define abandon takes { transaction is Transaction<String, Int> } gives Result<Nothing, String> {
     using active set transaction {
         keep changed set std.transactions.set(active, "count", 7) or give
         give err("abandoned")
@@ -1227,7 +1227,7 @@ fn capability_needs_are_explicit_and_transitive() {
     assert!(transitive[0].message.contains("needs FileRead"));
 
     let spawned = nivren::check(
-        "define worker takes { } gives Null needs Channel { give none }\n\
+        "define worker takes { } gives Nothing needs Channel { give none }\n\
          define launch takes { } gives Task needs Task { give start worker }",
     )
     .unwrap_err();
@@ -1412,7 +1412,7 @@ present(User("Mira"))
             .is_err()
     );
     assert!(nivren::check(
-        "protocol Logged { define emit takes { value is Self } gives Null needs Log } shape Event { text is String } define emit_event takes { value is Event } gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit set emit_event } define hidden<Value is Logged> takes { value is Value } { Logged.emit(value) }"
+        "protocol Logged { define emit takes { value is Self } gives Nothing needs Log } shape Event { text is String } define emit_event takes { value is Event } gives Nothing needs Log { std.log.info(value.text) } adopt Logged for Event { emit set emit_event } define hidden<Value is Logged> takes { value is Value } { Logged.emit(value) }"
     )
     .is_err());
     assert!(nivren::check(
@@ -3171,7 +3171,7 @@ fn typed_standard_library_handles_files_paths_time_and_process_errors() {
     let file = directory.join("message.txt");
     let path = file.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
-        "keep writeResult is Result<Null, String> set std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ case Ok carries value => yes, case Err carries error => no }}, \"write\"); keep readResult is Result<String, String> set std.files.read(\"{path}\"); keep text set choose (readResult) {{ case Ok carries value => value, case Err carries error => error }}; assert(choose (std.files.exists(\"{path}\")) {{ case Ok carries present => present, case Err carries error => no }}, \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
+        "keep writeResult is Result<Nothing, String> set std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ case Ok carries value => yes, case Err carries error => no }}, \"write\"); keep readResult is Result<String, String> set std.files.read(\"{path}\"); keep text set choose (readResult) {{ case Ok carries value => value, case Err carries error => error }}; assert(choose (std.files.exists(\"{path}\")) {{ case Ok carries present => present, case Err carries error => no }}, \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
 
@@ -5123,7 +5123,7 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
 
     assert!(nivren::check("using value set 42 { value }").is_err());
     let missing = nivren::check(
-        "define finish takes { stream is TcpStream } gives Null { using socket set stream { none } }",
+        "define finish takes { stream is TcpStream } gives Nothing { using socket set stream { none } }",
     )
     .unwrap_err();
     assert!(
@@ -5379,7 +5379,7 @@ fn structured_log_events_are_machine_readable_and_capability_checked() {
     assert_eq!(event["fields"]["request"], "42");
 
     let missing = nivren::check(
-        "define emit takes { } gives Null { give std.log.event(\"info\", \"x\", std.map.of(\"key\", \"value\")) }",
+        "define emit takes { } gives Nothing { give std.log.event(\"info\", \"x\", std.map.of(\"key\", \"value\")) }",
     )
     .unwrap_err();
     assert!(

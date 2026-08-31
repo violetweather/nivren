@@ -29,7 +29,7 @@ needs FileRead
 
 define write
 takes { path is String rows is [Map<String, String>] headers is [String] }
-gives Null or String
+gives Nothing or String
 needs FileWrite
 {
     keep source set encode with { rows set rows headers set headers } or give

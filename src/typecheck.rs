@@ -93,7 +93,7 @@ impl Type {
             Self::Bytes => "Bytes".into(),
             Self::SecretKey => "SecretKey".into(),
             Self::Bool => "Bool".into(),
-            Self::Null => "Null".into(),
+            Self::Null => "Nothing".into(),
             Self::Generic(name) => name.clone(),
             Self::Function(_, _, _, _, _) => "Function".into(),
             Self::Array(element) => format!("[{}]", element.name()),
@@ -4032,7 +4032,7 @@ impl Checker {
                 "Bytes" => Type::Bytes,
                 "SecretKey" => Type::SecretKey,
                 "Bool" => Type::Bool,
-                "Null" => Type::Null,
+                "Nothing" => Type::Null,
                 "File" => Type::File,
                 "TcpListener" => Type::TcpListener,
                 "TcpStream" => Type::TcpStream,
@@ -4081,11 +4081,13 @@ impl Checker {
                             Type::Enum(qualified.clone(), vec![])
                         }
                     } else {
-                        self.errors.push(NivError::new(
-                            format!("unknown type '{name}'"),
-                            span.line,
-                            span.column,
-                        ));
+                        let message = if name == "Null" {
+                            "unknown type 'Null'; the unit type is 'Nothing'".to_string()
+                        } else {
+                            format!("unknown type '{name}'")
+                        };
+                        self.errors
+                            .push(NivError::new(message, span.line, span.column));
                         Type::Unknown
                     }
                 }

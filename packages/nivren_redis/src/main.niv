@@ -116,7 +116,7 @@ needs Network
 
 define write_connection
 takes { connection is Connection, encoded is String, timeout is Float }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     give choose connection {
@@ -149,7 +149,7 @@ needs Network
 
 define close
 takes { connection is Connection }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     give choose connection {
@@ -334,7 +334,7 @@ needs Network
 
 define auth_status
 takes { message is String }
-gives Null or String
+gives Nothing or String
 {
     when message == "OK" { give ok with { value set none } }
     give err with { problem set "Redis AUTH returned an unexpected status" }
@@ -342,7 +342,7 @@ gives Null or String
 
 define authenticate
 takes { connection is Connection, username is String, password is String, timeout is Float, maximum is Int }
-gives Null or String
+gives Nothing or String
 needs Network
 {
     change parts set ["AUTH", password]

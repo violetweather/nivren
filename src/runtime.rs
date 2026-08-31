@@ -240,7 +240,7 @@ impl Value {
             Self::Bytes(_) => "Bytes",
             Self::SecretKey(_) => "SecretKey",
             Self::Bool(_) => "Bool",
-            Self::Null => "Null",
+            Self::Null => "Nothing",
             Self::Function(_) | Self::Native(_) => "Function",
             Self::Array(_) => "Array",
             Self::Map(_) => "Map",

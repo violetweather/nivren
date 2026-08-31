@@ -74,7 +74,7 @@ needs FileRead
 }
 
 define main
-gives Null or String
+gives Nothing or String
 needs FileRead
 {
     keep text set perform load with { path set "message.txt" } or give

@@ -5,7 +5,7 @@ needs Task
     keep counter set std.atomics.create with { value set 0 }
 
     define increment
-    gives Null or String
+    gives Nothing or String
     {
         change index set 0
         repeat index < 100 {

@@ -12,14 +12,14 @@ needs Task, Channel
     keep second set perform main.gate with {}
     keep events set perform std.channels.create with { capacity set 2 }
     define one
-    gives Null or String
+    gives Nothing or String
     needs Channel
     {
         perform main.pass with { value set first } or give
         give perform main.checkpoint with { events set events label set "one" }
     }
     define two
-    gives Null or String
+    gives Nothing or String
     needs Channel
     {
         perform main.pass with { value set second } or give
