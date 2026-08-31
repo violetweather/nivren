@@ -417,8 +417,8 @@ verify with {}
 fn through_pipelines_values_into_readable_stages() {
     assert_eq!(
         eval(
-            "define add(value: Int, amount: Int) gives Int { give value + amount }\n\
-             define double(value: Int) gives Int { give value * 2 }\n\
+            "define add takes { value is Int, amount is Int } gives Int { give value + amount }\n\
+             define double takes { value is Int } gives Int { give value * 2 }\n\
              5 through add(3) through double"
         ),
         Value::Int(16)
@@ -515,7 +515,7 @@ fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
             "change count is Int set 0\nchange count to count + 1\ncount",
         ),
         (
-            "define add(left: Int, right: Int) gives Int { give left + right }\nadd(20, 22)",
+            "define add takes { left is Int, right is Int } gives Int { give left + right }\nadd(20, 22)",
             "define add takes { left is Int right is Int } gives Int { give left + right }\nadd with { left set 20 right set 22 }",
         ),
         (
@@ -539,11 +539,11 @@ fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
             "change count set 0\nrepeat while count < 3 { change count to count + 1 }\ncount",
         ),
         (
-            "define answer() gives Result<Int, String> { give ok(42) }\nanswer()",
+            "define answer takes { } gives Result<Int, String> { give ok(42) }\nanswer()",
             "define answer gives Int or String { give ok(42) }\nanswer with {}",
         ),
         (
-            "define double(value: Int) gives Int { give value * 2 }\n21 through double",
+            "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
             "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
         ),
         (
@@ -551,7 +551,7 @@ fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
             "shape Request holds { path is String timeout is Float }\nprepare request as Request with { path set \"/\" timeout set 5.0 }\n(perform request).path",
         ),
         (
-            "define greet(name: String) gives String { give \"hello \" + name }\ngreet(\"Nivren\")",
+            "define greet takes { name is String } gives String { give \"hello \" + name }\ngreet(\"Nivren\")",
             "define greet takes { name is String } gives String { give \"hello \" + name }\ngreet with { name set \"Nivren\" }",
         ),
     ];
@@ -611,8 +611,8 @@ fn edition_four_maintenance_corpus_reduces_ambiguous_choices() {
 #[test]
 fn intent_concurrency_starts_waits_joins_and_races_scoped_tasks() {
     let source = r#"
-define one() gives Int { give 1 }
-define two() gives Int { give 2 }
+define one takes { } gives Int { give 1 }
+define two takes { } gives Int { give 2 }
 keep joined = together [start one, start two]
 keep first = race [start one, start two]
 choose joined {
@@ -632,9 +632,9 @@ choose joined {
 #[test]
 fn scoped_locks_serialize_shared_updates_in_both_engines() {
     let source = r#"
-define count() gives Result<Int, String> needs Task {
+define count takes { } gives Result<Int, String> needs Task {
     keep counter = std.locks.create(0)
-    define increment() gives Result<Null, String> needs Task {
+    define increment takes { } gives Result<Null, String> needs Task {
         keep acquired = std.locks.acquire(counter, 2.0) or give
         using guard set acquired {
             keep current = std.locks.read(guard) or give
@@ -655,7 +655,7 @@ choose count() { Ok(value) => value, Err(problem) => -1 }
     assert_eq!(eval_vm(source), Value::Int(2));
 
     let closed = r#"
-define inspect() gives Result<Bool, String> needs Task {
+define inspect takes { } gives Result<Bool, String> needs Task {
     keep lock = std.locks.create("safe")
     keep guard = std.locks.acquire(lock, 1.0) or give
     keep first = std.locks.close(guard) or give
@@ -668,7 +668,7 @@ choose inspect() { Ok(value) => value, Err(problem) => no }
     assert_eq!(eval_vm(closed), Value::Bool(true));
 
     let timeout = r#"
-define blocked() gives Result<Bool, String> needs Task {
+define blocked takes { } gives Result<Bool, String> needs Task {
     keep lock = std.locks.create(1)
     keep first = std.locks.acquire(lock, 1.0) or give
     keep second = std.locks.acquire(lock, 0.01)
@@ -684,9 +684,9 @@ choose blocked() { Ok(value) => value, Err(problem) => no }
 #[test]
 fn atomic_integers_are_linearizable_transferable_and_checked_in_both_engines() {
     let source = r#"
-define count() gives Result<Int, String> needs Task {
+define count takes { } gives Result<Int, String> needs Task {
     keep counter = std.atomics.create(0)
-    define increment() gives Result<Null, String> {
+    define increment takes { } gives Result<Null, String> {
         change index = 0
         repeat index < 250 {
             keep previous = std.atomics.add(counter, 1) or give
@@ -726,7 +726,7 @@ choose failure { Ok(previous) => -1, Err(observed) => old + observed + std.atomi
 #[test]
 fn transactions_commit_or_rollback_and_close_deterministically() {
     let commit = r#"
-define update() gives Result<Int, String> {
+define update takes { } gives Result<Int, String> {
     keep original = std.map.of("count", 1)
     keep transaction: Transaction<String, Int> = std.transactions.create(original)
     keep changed = std.transactions.set(transaction, "count", 2) or give
@@ -739,7 +739,7 @@ choose update() { Ok(value) => value, Err(problem) => 0 }
     assert_eq!(eval_vm(commit), Value::Int(2));
 
     let rollback = r#"
-define update() gives Result<Int, String> {
+define update takes { } gives Result<Int, String> {
     keep original = std.map.of("count", 1)
     keep transaction = std.transactions.create(original)
     keep changed = std.transactions.set(transaction, "count", 9) or give
@@ -752,7 +752,7 @@ choose update() { Ok(value) => value, Err(problem) => 0 }
     assert_eq!(eval_vm(rollback), Value::Int(1));
 
     let scoped = r#"
-define abandon(transaction: Transaction<String, Int>) gives Result<Null, String> {
+define abandon takes { transaction is Transaction<String, Int> } gives Result<Null, String> {
     using active set transaction {
         keep changed = std.transactions.set(active, "count", 7) or give
         give err("abandoned")
@@ -779,7 +779,7 @@ choose closed { Ok(value) => no, Err(problem) => yes }
 #[test]
 fn native_handles_are_opaque_scoped_and_released_once_in_both_engines() {
     let source = r#"
-define operate() gives Result<String, String> needs Native {
+define operate takes { } gives Result<String, String> needs Native {
     keep opened = std.host.open("database", "configuration") or give
     using handle set opened {
         give std.host.call(handle, "query", "select 42")
@@ -855,7 +855,7 @@ operate()
             .replace('"', "\\\"");
         let integer = format!(
             r#"
-define calculate() gives Result<Int, String> needs Native {{
+define calculate takes {{ }} gives Result<Int, String> needs Native {{
     keep opened = std.native.open("{path}") or give
     using library set opened {{
         give std.native.call_int(library, "nivren_add", [20, 22])
@@ -866,7 +866,7 @@ choose calculate() {{ Ok(value) => value, Err(problem) => -1 }}
         );
         let float = format!(
             r#"
-define calculate() gives Result<Float, String> needs Native {{
+define calculate takes {{ }} gives Result<Float, String> needs Native {{
     keep opened = std.native.open("{path}") or give
     using library set opened {{
         give std.native.call_float(library, "nivren_mean", [1.5, 2.5])
@@ -877,7 +877,7 @@ choose calculate() {{ Ok(value) => value, Err(problem) => -1.0 }}
         );
         let closed = format!(
             r#"
-define verify() gives Result<Bool, String> needs Native {{
+define verify takes {{ }} gives Result<Bool, String> needs Native {{
     keep library = std.native.open("{path}") or give
     keep closed = std.native.close(library) or give
     give choose std.native.call_int(library, "nivren_add", [1, 2]) {{
@@ -890,7 +890,7 @@ choose verify() {{ Ok(value) => value, Err(problem) => no }}
         );
         let buffer = format!(
             r#"
-define transform() gives Result<String, String> needs Native {{
+define transform takes {{ }} gives Result<String, String> needs Native {{
     keep opened = std.native.open("{path}") or give
     using library set opened {{
         keep output = std.native.call_buffer(library, "nivren_upper", std.bytes.from_string("Nivren"), 64) or give
@@ -980,7 +980,7 @@ choose transform() {{ Ok(value) => value, Err(problem) => problem }}
 #[test]
 fn native_handle_cleanup_retries_failures_and_survives_stress() {
     let retry = r#"
-define close_retry() gives Result<Bool, String> needs Native {
+define close_retry takes { } gives Result<Bool, String> needs Native {
     keep handle = std.host.open("device", "configuration") or give
     keep first = std.host.close(handle)
     keep second = std.host.close(handle)
@@ -989,7 +989,7 @@ define close_retry() gives Result<Bool, String> needs Native {
 close_retry()
 "#;
     let stress = r#"
-define exercise() gives Result<Int, String> needs Native {
+define exercise takes { } gives Result<Int, String> needs Native {
     change index = 0
     repeat index < 1000 {
         keep opened = std.host.open("device", "configuration") or give
@@ -1057,7 +1057,7 @@ exercise()
 #[test]
 fn native_host_operations_join_as_bounded_structured_tasks_in_both_engines() {
     let source = r#"
-define query() gives Result<String, String> needs Native, Task {
+define query takes { } gives Result<String, String> needs Native, Task {
     keep queued = std.host.invoke_async("device.read", "{\"port\":7}") or give
     give wait queued
 }
@@ -1085,9 +1085,11 @@ query()
         );
     }
 
-    assert!(nivren::check(r#"define missing() { std.host.invoke_async("x", "y") }"#).is_err());
+    assert!(
+        nivren::check(r#"define missing takes { } { std.host.invoke_async("x", "y") }"#).is_err()
+    );
     let no_host = nivren::run(
-        r#"define missing() gives Result<Task, String> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
+        r#"define missing takes { } gives Result<Task, String> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
     )
     .unwrap();
     assert!(matches!(no_host, Value::Err(_)));
@@ -1096,7 +1098,7 @@ query()
 #[test]
 fn datetime_values_preserve_instants_and_iana_zones_in_both_engines() {
     let source = r#"
-define render() gives Result<String, String> {
+define render takes { } gives Result<String, String> {
     keep epoch = std.time.from_unix(0, "UTC") or give
     keep new_york = std.time.in_zone(epoch, "America/New_York") or give
     keep later = std.time.add_seconds(epoch, 3600) or give
@@ -1124,7 +1126,7 @@ choose render() { Ok(value) => value, Err(problem) => problem }
 #[test]
 fn bigint_and_decimal_arithmetic_is_exact_checked_and_typed() {
     let source = r#"
-define calculate() gives Result<String, String> {
+define calculate takes { } gives Result<String, String> {
     keep huge = std.bigint.parse("1000000000000000000000000000000") or give
     keep two = std.bigint.from_int(2)
     keep exact = std.decimal.parse("0.1") or give
@@ -1148,7 +1150,7 @@ choose calculate() { Ok(value) => value, Err(problem) => problem }
         .is_err()
     );
     let outside = r#"
-define inspect() gives Result<Bool, String> {
+define inspect takes { } gives Result<Bool, String> {
     keep huge = std.bigint.parse("999999999999999999999999") or give
     give choose std.bigint.to_int(huge) { Ok(value) => ok(no), Err(problem) => ok(yes) }
 }
@@ -1160,7 +1162,7 @@ choose inspect() { Ok(value) => value, Err(problem) => no }
 #[test]
 fn fixed_width_signed_and_unsigned_numbers_are_distinct_and_checked() {
     let source = r#"
-define render() gives Result<String, String> {
+define render takes { } gives Result<String, String> {
     keep first: U8 = std.u8.from_int(250) or give
     keep second: U8 = std.u8.from_int(5) or give
     keep maximum: U8 = first + second
@@ -1178,7 +1180,7 @@ choose render() { Ok(value) => value, Err(problem) => problem }
     assert_eq!(eval_vm(source), expected);
 
     let overflow = r#"
-define overflow() gives Result<U8, String> {
+define overflow takes { } gives Result<U8, String> {
     keep left = std.u8.from_int(250) or give
     keep right = std.u8.from_int(6) or give
     give ok(left + right)
@@ -1195,11 +1197,11 @@ overflow()
             .is_err()
     );
     assert!(nivren::check(
-        "define mixed() gives Result<U8, String> { keep left = std.u8.from_int(1) or give keep right = std.i8.from_int(1) or give give ok(left + right) }"
+        "define mixed takes { } gives Result<U8, String> { keep left = std.u8.from_int(1) or give keep right = std.i8.from_int(1) or give give ok(left + right) }"
     )
     .is_err());
     assert!(nivren::check(
-        "define negative() gives Result<U8, String> { keep value = std.u8.from_int(1) or give give ok(-value) }"
+        "define negative takes { } gives Result<U8, String> { keep value = std.u8.from_int(1) or give give ok(-value) }"
     )
     .is_err());
 }
@@ -1207,26 +1209,26 @@ overflow()
 #[test]
 fn capability_needs_are_explicit_and_transitive() {
     let direct = nivren::check(
-        "define load(path: String) gives Result<String, String> { give std.files.read(path) }",
+        "define load takes { path is String } gives Result<String, String> { give std.files.read(path) }",
     )
     .unwrap_err();
     assert!(direct[0].message.contains("needs FileRead"));
 
     nivren::check(
-        "define load(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) }",
+        "define load takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) }",
     )
     .unwrap();
 
     let transitive = nivren::check(
-        "define load(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) }\n\
-         define config() gives Result<String, String> { give load(\"app.json\") }",
+        "define load takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) }\n\
+         define config takes { } gives Result<String, String> { give load(\"app.json\") }",
     )
     .unwrap_err();
     assert!(transitive[0].message.contains("needs FileRead"));
 
     let spawned = nivren::check(
-        "define worker() gives Null needs Channel { give none }\n\
-         define launch() gives Task needs Task { give start worker }",
+        "define worker takes { } gives Null needs Channel { give none }\n\
+         define launch takes { } gives Task needs Task { give start worker }",
     )
     .unwrap_err();
     assert!(
@@ -1239,7 +1241,7 @@ fn capability_needs_are_explicit_and_transitive() {
 
 #[test]
 fn intent_wait_awaits_a_started_task() {
-    let source = "define answer() gives Int { give 42 } keep task = start answer keep result = wait task choose result { Ok(value) => value, Err(problem) => 0 }";
+    let source = "define answer takes { } gives Int { give 42 } keep task = start answer keep result = wait task choose result { Ok(value) => value, Err(problem) => 0 }";
     assert_eq!(eval_tree(source), Value::Int(42));
     assert_eq!(eval_vm(source), Value::Int(42));
 }
@@ -1261,22 +1263,22 @@ fn mutable_bindings_and_loops_work() {
 #[test]
 fn functions_return_values() {
     assert_eq!(
-        eval("define add(a, b) { give a + b; } add(20, 22)"),
+        eval("define add takes { a is Int , b is Int } { give a + b; } add(20, 22)"),
         Value::Int(42)
     );
 }
 
 #[test]
 fn generic_functions_infer_reuse_and_check_type_parameters() {
-    let source = "define identity<Value>(value: Value) gives Value { give value } keep number: Int = identity(42) keep text: String = identity(\"nivren\") number";
+    let source = "define identity<Value> takes { value is Value } gives Value { give value } keep number: Int = identity(42) keep text: String = identity(\"nivren\") number";
     assert_eq!(eval_tree(source), Value::Int(42));
     assert_eq!(eval_vm(source), Value::Int(42));
 
-    let arrays = "define first<Element>(values: [Element]) gives Element { give values[0] } keep answer: Int = first([42, 7]) answer";
+    let arrays = "define first<Element> takes { values is [Element] } gives Element { give values[0] } keep answer: Int = first([42, 7]) answer";
     assert_eq!(eval_vm(arrays), Value::Int(42));
 
     let mixed = nivren::check(
-        "define same<Value>(left: Value, right: Value) gives Value { give left } same(1, \"two\")",
+        "define same<Value> takes { left is Value, right is Value } gives Value { give left } same(1, \"two\")",
     )
     .unwrap_err();
     assert!(
@@ -1288,11 +1290,11 @@ fn generic_functions_infer_reuse_and_check_type_parameters() {
 
 #[test]
 fn generic_protocols_make_constraints_visible_and_checkable() {
-    let source = "define add<Value is Number>(left: Value, right: Value) gives Value { give left + right } keep integer: Int = add(20, 22) keep decimal: Float = add(1.5, 2.5) integer";
+    let source = "define add<Value is Number> takes { left is Value, right is Value } gives Value { give left + right } keep integer: Int = add(20, 22) keep decimal: Float = add(1.5, 2.5) integer";
     assert_eq!(eval_vm(source), Value::Int(42));
 
     let rejected = nivren::check(
-        "define add<Value is Number>(left: Value, right: Value) gives Value { give left + right } add(\"a\", \"b\")",
+        "define add<Value is Number> takes { left is Value, right is Value } gives Value { give left + right } add(\"a\", \"b\")",
     )
     .unwrap_err();
     assert!(
@@ -1302,16 +1304,18 @@ fn generic_protocols_make_constraints_visible_and_checkable() {
     );
 
     nivren::check(
-        "define entry<Key is Comparable, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.of(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
+        "define entry<Key is Comparable, Value> takes { key is Key, value is Value } gives Map<Key, Value> { give std.map.of(key, value) } keep item: Map<String, Int> = entry(\"answer\", 42)",
     )
     .unwrap();
     assert!(nivren::check(
-        "define entry<Key, Value>(key: Key, value: Value) gives Map<Key, Value> { give std.map.of(key, value) }",
+        "define entry<Key, Value> takes { key is Key, value is Value } gives Map<Key, Value> { give std.map.of(key, value) }",
     )
     .is_err());
     assert!(
-        nivren::check("define bad<Value is Magical>(value: Value) gives Value { give value }",)
-            .is_err()
+        nivren::check(
+            "define bad<Value is Magical> takes { value is Value } gives Value { give value }",
+        )
+        .is_err()
     );
 }
 
@@ -1322,7 +1326,7 @@ protocol Identified
 shape User { id: Int, name: String }
 adopt Identified for User
 
-define preserve<Value is Identified>(value: Value) gives Value {
+define preserve<Value is Identified> takes { value is Value } gives Value {
     give value
 }
 
@@ -1339,7 +1343,7 @@ protocol Identified
 shape User { id: Int }
 shape Project { id: Int }
 adopt Identified for User
-define preserve<Value is Identified>(value: Value) gives Value { give value }
+define preserve<Value is Identified> takes { value is Value } gives Value { give value }
 preserve(Project(2))
 "#,
     )
@@ -1372,13 +1376,13 @@ preserve(Project(2))
 fn protocol_members_are_required_and_dispatch_coherently_in_both_engines() {
     let source = r#"
 protocol Rendered {
-    define render(value: Self) gives String
+    define render takes { value is Self } gives String
 }
 shape User { name: String }
-define render_user(value: User) gives String { give value.name }
+define render_user takes { value is User } gives String { give value.name }
 adopt Rendered for User { render set render_user }
 
-define present<Value is Rendered>(value: Value) gives String {
+define present<Value is Rendered> takes { value is Value } gives String {
     give Rendered.render(value)
 }
 present(User("Mira"))
@@ -1396,16 +1400,19 @@ present(User("Mira"))
     );
 
     assert!(nivren::check(
-        "protocol Named { define name(value: Self) gives String } shape User { name: String } adopt Named for User"
+        "protocol Named { define name takes { value is Self } gives String } shape User { name: String } adopt Named for User"
     )
     .is_err());
     assert!(nivren::check(
-        "protocol Named { define name(value: Self) gives String } shape User { name: String } define wrong(value: User) gives Int { give 1 } adopt Named for User { name set wrong }"
+        "protocol Named { define name takes { value is Self } gives String } shape User { name: String } define wrong takes { value is User } gives Int { give 1 } adopt Named for User { name set wrong }"
     )
     .is_err());
-    assert!(nivren::check("protocol Named { define name(value: Int) gives String }").is_err());
+    assert!(
+        nivren::check("protocol Named { define name takes { value is Int } gives String }")
+            .is_err()
+    );
     assert!(nivren::check(
-        "protocol Logged { define emit(value: Self) gives Null needs Log } shape Event { text: String } define emit_event(value: Event) gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit set emit_event } define hidden<Value is Logged>(value: Value) { Logged.emit(value) }"
+        "protocol Logged { define emit takes { value is Self } gives Null needs Log } shape Event { text: String } define emit_event takes { value is Event } gives Null needs Log { std.log.info(value.text) } adopt Logged for Event { emit set emit_event } define hidden<Value is Logged> takes { value is Value } { Logged.emit(value) }"
     )
     .is_err());
     assert!(nivren::check(
@@ -1418,7 +1425,7 @@ present(User("Mira"))
 fn closures_capture_scope() {
     assert_eq!(
         eval(
-            "define outer(x) { define inner(y) { give x + y; } give inner; } keep add2 = outer(2); add2(40)"
+            "define outer takes { x is Int } { define inner takes { y is Int } { give x + y; } give inner; } keep add2 = outer(2); add2(40)"
         ),
         Value::Int(42)
     );
@@ -1489,7 +1496,8 @@ fn operator_misuse_fails_during_check() {
 
 #[test]
 fn arity_fails_during_check() {
-    let errors = nivren::check("define pair(a, b) { give a; } pair(1)").unwrap_err();
+    let errors =
+        nivren::check("define pair takes { a is Int , b is Int } { give a; } pair(1)").unwrap_err();
     assert!(errors[0].message.contains("expects 2"));
 }
 
@@ -1519,12 +1527,15 @@ fn mixed_array_types_fail_check() {
 
 #[test]
 fn annotations_check_bindings_arguments_and_returns() {
-    let source = "define add(a: Int, b: Int) gives Int { give a + b; } keep answer: Int = add(20, 22); answer";
+    let source = "define add takes { a is Int, b is Int } gives Int { give a + b; } keep answer: Int = add(20, 22); answer";
     assert_eq!(eval(source), Value::Int(42));
     assert!(nivren::check("keep value: String = 42").is_err());
-    assert!(nivren::check("define bad() gives Bool { give 1; }").is_err());
+    assert!(nivren::check("define bad takes { } gives Bool { give 1; }").is_err());
     assert!(
-        nivren::check("define onlyInt(value: Int) gives Int { give value; } onlyInt(yes)").is_err()
+        nivren::check(
+            "define onlyInt takes { value is Int } gives Int { give value; } onlyInt(yes)"
+        )
+        .is_err()
     );
 }
 
@@ -1571,7 +1582,7 @@ fn safe_reflection_inspects_shape_values_without_vm_internals() {
     let source = r#"
 choice Role { Admin, Member }
 shape User { name: String, active: Bool }
-define inspect() gives Result<String, String> {
+define inspect takes { } gives Result<String, String> {
     keep user = User("Mira", yes)
     keep fields = std.reflect.fields(user) or give
     keep shape_schema = std.reflect.schema(User) or give
@@ -1620,7 +1631,7 @@ choice Response {
     Array([Response]),
     Nil
 }
-define score(value: Response) gives Int {
+define score takes { value is Response } gives Int {
     give choose value {
         Text(text) => len(text),
         Number(number) => number,
@@ -1664,7 +1675,7 @@ fn shapes_and_choices_are_generic_nominal_and_inferred() {
 shape Pair<Left, Right> { left: Left, right: Right }
 choice Maybe<Value> { Some(Value), None }
 
-define unwrap(value: Maybe<Int>) gives Int {
+define unwrap takes { value is Maybe<Int> } gives Int {
     give choose value { Some(item) => item, None => 0 }
 }
 
@@ -1692,7 +1703,7 @@ unwrap(present) + unwrap(absent)
             .is_err()
     );
     assert!(nivren::check(
-        "shape Keyed<Key is Comparable> { key: Key } define invalid(value: Keyed<Iterator<Int>>) { show(value) }"
+        "shape Keyed<Key is Comparable> { key: Key } define invalid takes { value is Keyed<Iterator<Int>> } { show(value) }"
     )
     .is_err());
 }
@@ -1725,7 +1736,7 @@ fn integers_and_floats_are_distinct_and_overflow_is_trapped() {
 
 #[test]
 fn typed_results_require_exhaustive_payload_matching() {
-    let source = "define parse(valid: Bool) gives Result<Int, String> { when (valid) { give ok(42); } give err(\"invalid\"); } keep result: Result<Int, String> = parse(yes); choose (result) { Ok(value) => value, Err(message) => 0 }";
+    let source = "define parse takes { valid is Bool } gives Result<Int, String> { when (valid) { give ok(42); } give err(\"invalid\"); } keep result: Result<Int, String> = parse(yes); choose (result) { Ok(value) => value, Err(message) => 0 }";
     assert_eq!(eval(source), Value::Int(42));
     assert!(
         nivren::check(
@@ -1739,11 +1750,11 @@ fn typed_results_require_exhaustive_payload_matching() {
 #[test]
 fn or_give_propagates_typed_failures_through_nested_expressions() {
     let program = r#"
-define parse(valid: Bool) gives Result<Int, String> {
+define parse takes { valid is Bool } gives Result<Int, String> {
     when valid { give ok(41) }
     give err("invalid")
 }
-define answer(valid: Bool) gives Result<Int, String> {
+define answer takes { valid is Bool } gives Result<Int, String> {
     keep value: Int = parse(valid) or give
     give ok(value + 1)
 }
@@ -1770,14 +1781,14 @@ answer(yes)
     );
     assert_eq!(eval_vm(&failure), eval_tree(&failure));
 
-    let nested = "define value() gives Result<Int, String> { give ok(20) } define answer() gives Result<Int, String> { give ok((value() or give) * 2 + 2) } answer()";
+    let nested = "define value takes { } gives Result<Int, String> { give ok(20) } define answer takes { } gives Result<Int, String> { give ok((value() or give) * 2 + 2) } answer()";
     assert_eq!(eval_tree(nested), Value::Ok(Arc::new(Value::Int(42))));
     assert_eq!(eval_vm(nested), Value::Ok(Arc::new(Value::Int(42))));
 
     assert!(nivren::check("ok(1) or give").is_err());
-    assert!(nivren::check("define bad() gives Int { give ok(1) or give }").is_err());
+    assert!(nivren::check("define bad takes { } gives Int { give ok(1) or give }").is_err());
     assert!(nivren::check(
-        "define bad() gives Result<Int, Int> { keep value = err(\"wrong\") or give give ok(value) }",
+        "define bad takes { } gives Result<Int, Int> { keep value = err(\"wrong\") or give give ok(value) }",
     )
     .is_err());
 }
@@ -1797,7 +1808,7 @@ fn file_modules_resolve_relative_imports_once() {
     let directory = module_fixture("modules");
     fs::write(
         directory.join("math.niv"),
-        "define double(value: Int) gives Int { give value * 2; } keep private = 7; expose { double };",
+        "define double takes { value is Int } gives Int { give value * 2; } keep private = 7; expose { double };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -1843,7 +1854,7 @@ fn module_record_types_are_nominally_namespaced() {
     let directory = module_fixture("nominal-modules");
     fs::write(
         directory.join("numbers.niv"),
-        "shape Box { value: Int } define read(box: Box) gives Int { give box.value; } expose { Box, read };",
+        "shape Box { value: Int } define read takes { box is Box } gives Int { give box.value; } expose { Box, read };",
     )
     .unwrap();
     fs::write(
@@ -1871,7 +1882,7 @@ fn module_protocol_adoptions_follow_qualified_types_without_collisions() {
     let directory = module_fixture("protocol-modules");
     fs::write(
         directory.join("people.niv"),
-        "protocol Identified shape User { id: Int } adopt Identified for User define preserve<Value is Identified>(value: Value) gives Value { give value } expose { User, preserve }",
+        "protocol Identified shape User { id: Int } adopt Identified for User define preserve<Value is Identified> takes { value is Value } gives Value { give value } expose { User, preserve }",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -2191,7 +2202,8 @@ fn instruction_limits_stop_runaway_code_and_round_trip_in_projects() {
     assert!(vm_error.message.contains("instruction limit"));
 
     let recursive = nivren::parser::parse(
-        nivren::lexer::scan("define recurse() gives Int { give recurse() } recurse()").unwrap(),
+        nivren::lexer::scan("define recurse takes { } gives Int { give recurse() } recurse()")
+            .unwrap(),
     )
     .unwrap();
     nivren::typecheck::check(&recursive).unwrap();
@@ -2496,7 +2508,7 @@ fn registry_dependencies_install_lock_import_and_detect_tampering() {
     .unwrap();
     fs::write(
         dependency_root.join("main.niv"),
-        "define answer() gives Int { give 42; } expose { answer };",
+        "define answer takes { } gives Int { give 42; } expose { answer };",
     )
     .unwrap();
     let dependency = nivren::project::Manifest::load(&dependency_root).unwrap();
@@ -2682,7 +2694,7 @@ fn project_modules_cannot_escape_the_root() {
 
 #[test]
 fn formatter_is_comment_safe_and_idempotent() {
-    let source = "define main() {\nkeep text = \"{not a block}\" // }\n/* { nested /* } */ ok */\nwhen yes {\nshow(text)\n}\n}\n";
+    let source = "define main takes { } {\nkeep text = \"{not a block}\" // }\n/* { nested /* } */ ok */\nwhen yes {\nshow(text)\n}\n}\n";
     let formatted = nivren::formatter::format(source);
     assert!(formatted.contains("    keep text = \"{not a block}\" // }"));
     assert!(formatted.contains("    /* { nested /* } */ ok */"));
@@ -2760,8 +2772,7 @@ greet with {
 
 #[test]
 fn documentation_lists_only_explicit_module_exports() {
-    let source =
-        "define public(value: Int) gives Int { give value; } keep hidden = 1; expose { public };";
+    let source = "define public takes { value is Int } gives Int { give value; } keep hidden = 1; expose { public };";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "sample".into(),
@@ -2770,24 +2781,23 @@ fn documentation_lists_only_explicit_module_exports() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(docs.contains("define public(value: Int) gives Int"));
+    assert!(docs.contains("define public takes { value is Int } gives Int"));
     assert!(!docs.contains("hidden"));
 }
 
 #[test]
 fn documentation_lists_entry_module_public_api() {
-    let source =
-        "define public(value: Int) gives Int { give value } keep hidden = 1 expose { public }";
+    let source = "define public takes { value is Int } gives Int { give value } keep hidden = 1 expose { public }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let docs = nivren::documentation::generate("entry", "1.0.0", &parsed);
     assert!(docs.contains("## Public API"));
-    assert!(docs.contains("define public(value: Int) gives Int"));
+    assert!(docs.contains("define public takes { value is Int } gives Int"));
     assert!(!docs.contains("hidden"));
 }
 
 #[test]
 fn documentation_includes_declared_capabilities() {
-    let source = "define read(path: String) gives Result<String, String> needs FileRead { give std.files.read(path) } expose { read }";
+    let source = "define read takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) } expose { read }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "files".into(),
@@ -2801,7 +2811,7 @@ fn documentation_includes_declared_capabilities() {
 
 #[test]
 fn documentation_preserves_generic_function_signatures() {
-    let source = "define identity<Value is Comparable>(value: Value) gives Value { give value } expose { identity }";
+    let source = "define identity<Value is Comparable> takes { value is Value } gives Value { give value } expose { identity }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "generic".into(),
@@ -2810,12 +2820,14 @@ fn documentation_preserves_generic_function_signatures() {
         span: nivren::ast::Span { line: 1, column: 1 },
     };
     let docs = nivren::documentation::generate("package", "1.0.0", &[module]);
-    assert!(docs.contains("define identity<Value is Comparable>(value: Value) gives Value"));
+    assert!(
+        docs.contains("define identity<Value is Comparable> takes { value is Value } gives Value")
+    );
 }
 
 #[test]
 fn bytecode_is_versioned_verified_and_deterministic() {
-    let source = "define sum(limit: Int) gives Int { change total = 0; change index = 0; repeat (index < limit) { total = total + index; index = index + 1; } give total; } sum(5)";
+    let source = "define sum takes { limit is Int } gives Int { change total = 0; change index = 0; repeat (index < limit) { total = total + index; index = index + 1; } give total; } sum(5)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -2836,7 +2848,7 @@ fn bytecode_is_versioned_verified_and_deterministic() {
 
 #[test]
 fn source_maps_are_stable_nested_and_exportable() {
-    let source = "define answer() gives Int { give 42 }\nanswer()";
+    let source = "define answer takes { } gives Int { give 42 }\nanswer()";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -2939,7 +2951,7 @@ fn bytecode_verifier_rejects_invalid_operands_and_scopes() {
 
 #[test]
 fn binary_bundles_round_trip_and_execute() {
-    let source = "shape Pair { left: Int, right: Int } choice Choice { First, Second } define pick(value: Choice) gives Int { give choose value { First => 1, Second => 2 }; } change total = 0; each value within [10, 20] { total = total + value; } keep pair = Pair(total, pick(Choice.Second)); pair.left + pair.right";
+    let source = "shape Pair { left: Int, right: Int } choice Choice { First, Second } define pick takes { value is Choice } gives Int { give choose value { First => 1, Second => 2 }; } change total = 0; each value within [10, 20] { total = total + value; } keep pair = Pair(total, pick(Choice.Second)); pair.left + pair.right";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let compiled = nivren::bytecode::compile(&program).unwrap();
@@ -3123,7 +3135,7 @@ fn binary_bundle_decoder_rejects_hostile_input() {
 
 #[test]
 fn gc_stress_preserves_escaping_closures_and_collects_cycles() {
-    let source = "define make(base: Int) { define add(value: Int) gives Int { give base + value; } give add; } keep escaped = make(40); change index = 0; repeat (index < 100) { define temporary() gives Int { give index; } temporary(); index = index + 1; } escaped(2)";
+    let source = "define make takes { base is Int } { define add takes { value is Int } gives Int { give base + value; } give add; } keep escaped = make(40); change index = 0; repeat (index < 100) { define temporary takes { } gives Int { give index; } temporary(); index = index + 1; } escaped(2)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -3217,7 +3229,7 @@ shape User {
     role: Role,
 }
 
-define display_name(source: String) gives Result<String, String> {
+define display_name takes { source is String } gives Result<String, String> {
     keep user = std.json.decode(User, source) or give
     give ok(user.name)
 }
@@ -3264,7 +3276,7 @@ fn json_lines_stream_with_a_bounded_record_buffer() {
     let source = format!(
         r#"
 shape Item {{ id: Int }}
-define load(path: String) gives Result<String, String> needs FileRead {{
+define load takes {{ path is String }} gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path) or give
     using file set opened {{
         keep first = std.json.read_next_as(Item, file, 64) or give
@@ -3288,7 +3300,7 @@ load({:?})
     fs::write(&path, "{\"payload\":\"too long\"}\n{\"id\":3}\n").unwrap();
     let recovery = format!(
         r#"
-define recover(path: String) gives Result<String, String> needs FileRead {{
+define recover takes {{ path is String }} gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path) or give
     using file set opened {{
         keep rejected = std.json.read_next(file, 8)
@@ -3320,7 +3332,7 @@ fn file_line_iterators_are_lazy_bounded_and_recover_after_errors() {
     fs::write(&path, "alpha\nway-too-long\nomega\r\n").unwrap();
     let source = format!(
         r#"
-define load(path: String) gives Result<Bool, String> needs FileRead {{
+define load takes {{ path is String }} gives Result<Bool, String> needs FileRead {{
     keep opened = std.files.open_read(path) or give
     using file set opened {{
         keep lines = std.iter.lines(file, 8) or give
@@ -3391,7 +3403,7 @@ choose std.text.concat("Niv", "ren") {
 #[test]
 fn bounded_text_partition_and_float_conversion_are_dual_engine() {
     let source = r#"
-define inspect() gives Result<String, String> {
+define inspect takes { } gives Result<String, String> {
     keep parts = std.text.split("MOVED 42 [::1]:6379", " ", 4) or give
     keep address = std.text.split_last(parts[2], ":") or give
     keep number = std.float.parse("1.5") or give
@@ -3413,7 +3425,7 @@ inspect()
 #[test]
 fn int_text_conversion_is_explicit_checked_and_dual_engine() {
     let source = r#"
-define round_trip() gives Result<Int, String> {
+define round_trip takes { } gives Result<Int, String> {
     keep parsed = std.int.parse("-9223372036854775808") or give
     assert(std.int.format(parsed) == "-9223372036854775808", "Int format")
     give ok(parsed)
@@ -3434,7 +3446,7 @@ round_trip()
 #[test]
 fn binary_codecs_are_typed_bounded_and_endian_explicit() {
     let source = r#"
-define verify() gives Result<Int, String> {
+define verify takes { } gives Result<Int, String> {
     keep number = std.u16.from_int(4660) or give
     keep big = std.binary.u16_be(number)
     keep little = std.binary.u16_le(number)
@@ -3483,7 +3495,7 @@ choose bytes {
 #[test]
 fn cryptographic_hashes_and_hmacs_are_bounded_and_constant_time_verified() {
     let source = r#"
-define verify() gives Result<Int, String> {
+define verify takes { } gives Result<Int, String> {
     keep key = std.bytes.from_string("secret")
     keep message = std.bytes.from_string("Nivren")
     keep digest = std.crypto.sha256(message) or give
@@ -3520,7 +3532,7 @@ choose std.crypto.hmac_sha256_verify(key, message, tag) {
 #[test]
 fn secure_randomness_and_argon2id_are_capability_checked_and_bounded() {
     let source = r#"
-define passwords() gives Result<Bool, String> {
+define passwords takes { } gives Result<Bool, String> {
     keep salt = std.bytes.from_string("0123456789abcdef")
     keep encoded = std.crypto.password_hash("correct horse", salt, 8192, 1, 1) or give
     keep valid = std.crypto.password_verify("correct horse", encoded) or give
@@ -3535,14 +3547,14 @@ passwords()
     assert_eq!(eval_vm(source), expected);
 
     let entropy = r#"
-define entropy() gives Result<Int, String> needs Random {
+define entropy takes { } gives Result<Int, String> needs Random {
     keep bytes = std.crypto.random_bytes(32) or give
     give ok(std.bytes.length(bytes))
 }
 entropy()
 "#;
     assert_eq!(eval_tree(entropy), Value::Ok(Arc::new(Value::Int(32))));
-    assert!(nivren::check("define entropy() { std.crypto.random_bytes(32) }").is_err());
+    assert!(nivren::check("define entropy takes { } { std.crypto.random_bytes(32) }").is_err());
     let program = nivren::parser::parse(nivren::lexer::scan(entropy).unwrap()).unwrap();
     let denied = nivren::runtime::Interpreter::new()
         .with_capabilities(Vec::<String>::new())
@@ -3566,7 +3578,7 @@ entropy()
 #[test]
 fn authenticated_encryption_detects_tampering_and_enforces_key_nonce_and_size_bounds() {
     let source = r#"
-define protect() gives Result<Bool, String> {
+define protect takes { } gives Result<Bool, String> {
     keep key = std.crypto.key_import(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
     keep nonce = std.bytes.from_string("unique-nonce")
     keep context = std.bytes.from_string("account:42")
@@ -3598,9 +3610,10 @@ protect()
     )
     .is_err());
     assert!(
-        nivren::check("define compare(key: SecretKey) gives Bool { give key == key }").is_err()
+        nivren::check("define compare takes { key is SecretKey } gives Bool { give key == key }")
+            .is_err()
     );
-    assert!(nivren::check("define key() { std.crypto.key_generate() }").is_err());
+    assert!(nivren::check("define key takes { } { std.crypto.key_generate() }").is_err());
     let imported = eval_vm(
         "std.crypto.key_import(std.bytes.from_string(\"0123456789abcdef0123456789abcdef\"))",
     );
@@ -3616,7 +3629,7 @@ protect()
 #[test]
 fn ed25519_matches_rfc8032_and_rejects_tampering_in_both_engines() {
     let source = r#"
-define verify_vector() gives Result<Bool, String> {
+define verify_vector takes { } gives Result<Bool, String> {
     keep seed = std.encoding.hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
     keep key = std.crypto.key_import(seed) or give
     keep public = std.crypto.ed25519_public(key) or give
@@ -3645,7 +3658,7 @@ verify_vector()
 #[test]
 fn gzip_and_zlib_are_deterministic_bounded_and_portable_in_both_engines() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, String> {
     keep input = std.bytes.from_string("Nivren Nivren Nivren")
     keep first = std.compression.gzip(input, 6) or give
     keep second = std.compression.gzip(input, 6) or give
@@ -3685,7 +3698,7 @@ choose packed {
 #[test]
 fn hex_and_base64_encodings_are_canonical_bounded_and_portable() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, String> {
     keep bytes = std.bytes.from_string("Nivren?")
     keep hex = std.encoding.hex_encode(bytes) or give
     keep standard = std.encoding.base64_encode(bytes) or give
@@ -3719,7 +3732,7 @@ roundtrip()
 #[test]
 fn csv_tables_are_quoted_bounded_typed_and_portable_in_both_engines() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, String> {
     keep headers = ["name", "note"]
     keep rows = std.csv.decode("Ada,\"hello, Nivren\"\r\nLin,\"line one\nline two\"\r\n", headers, ",", 10) or give
     assert(len(rows) == 2, "two CSV records")
@@ -3769,7 +3782,7 @@ score + std.set.length(names)
     assert!(nivren::check("keep wrong: Map<String> = std.map.of(\"a\", 1)").is_err());
 
     let unstable = nivren::run(
-        "define identity<Value>(value: Value) gives Value { give value } std.map.of(identity, 1)",
+        "define identity<Value> takes { value is Value } gives Value { give value } std.map.of(identity, 1)",
     )
     .unwrap_err();
     assert!(
@@ -3783,10 +3796,10 @@ score + std.set.length(names)
 #[test]
 fn generic_list_algorithms_compose_through_readable_pipelines() {
     let source = r#"
-define double(value: Int) gives Int { give value * 2 }
-define even(value: Int) gives Bool { give value % 2 == 0 }
-define sum(total: Int, value: Int) gives Int { give total + value }
-define positive(value: Int) gives Bool { give value > 0 }
+define double takes { value is Int } gives Int { give value * 2 }
+define even takes { value is Int } gives Bool { give value % 2 == 0 }
+define sum takes { total is Int, value is Int } gives Int { give total + value }
+define positive takes { value is Int } gives Bool { give value > 0 }
 keep values: [Int] = [1, 2, 3] through std.list.transform(double) through std.list.select(even)
 assert(std.list.any(values, positive), "any")
 assert(std.list.every(values, positive), "every")
@@ -3797,13 +3810,13 @@ std.list.fold(values, 0, sum)
 
     assert!(
         nivren::check(
-            "define wrong(value: Int) gives Int { give value } std.list.select([1], wrong)",
+            "define wrong takes { value is Int } gives Int { give value } std.list.select([1], wrong)",
         )
         .is_err()
     );
 
     let hidden_effect = nivren::check(
-        "define note(value: Int) gives Int needs Log { std.log.info(\"value\") give value } define collect() gives [Int] { give std.list.transform([1], note) }",
+        "define note takes { value is Int } gives Int needs Log { std.log.info(\"value\") give value } define collect takes { } gives [Int] { give std.list.transform([1], note) }",
     )
     .unwrap_err();
     assert!(
@@ -3816,8 +3829,8 @@ std.list.fold(values, 0, sum)
 #[test]
 fn iterator_values_adapt_bound_and_consume_sequences() {
     let source = r#"
-define double(value: Int) gives Int { give value * 2 }
-define above_two(value: Int) gives Bool { give value > 2 }
+define double takes { value is Int } gives Int { give value * 2 }
+define above_two takes { value is Int } gives Bool { give value > 2 }
 keep source = std.iter.from([1, 2, 3, 4, 5])
 keep mapped = std.iter.transform(source, double)
 keep selected = std.iter.select(mapped, above_two)
@@ -3845,7 +3858,7 @@ std.iter.collect(stream)
     );
 
     let hidden_effect = nivren::check(
-        "define note(value: Int) gives Int needs Log { std.log.info(\"value\") give value } define collect() gives Iterator<Int> { give std.iter.transform(std.iter.from([1]), note) }",
+        "define note takes { value is Int } gives Int needs Log { std.log.info(\"value\") give value } define collect takes { } gives Iterator<Int> { give std.iter.transform(std.iter.from([1]), note) }",
     )
     .unwrap_err();
     assert!(
@@ -3859,11 +3872,11 @@ std.iter.collect(stream)
 fn iterator_callback_adapters_are_truly_lazy_and_share_one_cursor() {
     let source = r#"
 change calls = 0
-define observe(value: Int) gives Int {
+define observe takes { value is Int } gives Int {
     calls = calls + 1
     give value * 2
 }
-define above_four(value: Int) gives Bool { give value > 4 }
+define above_four takes { value is Int } gives Bool { give value > 4 }
 
 keep mapped = std.iter.transform(std.iter.from([1, 2, 3, 4]), observe)
 assert(calls == 0, "transform must not run eagerly")
@@ -3883,10 +3896,10 @@ first + chosen + remaining + calls
 #[test]
 fn iterator_terminals_chain_fold_query_and_short_circuit_in_both_engines() {
     let source = r#"
-define add(total: Int, value: Int) gives Int { give total + value }
-define even(value: Int) gives Bool { give value % 2 == 0 }
-define positive(value: Int) gives Bool { give value > 0 }
-define three(value: Int) gives Bool { give value == 3 }
+define add takes { total is Int, value is Int } gives Int { give total + value }
+define even takes { value is Int } gives Bool { give value % 2 == 0 }
+define positive takes { value is Int } gives Bool { give value > 0 }
+define three takes { value is Int } gives Bool { give value == 3 }
 
 keep joined = std.iter.chain(std.iter.from([1, 2]), std.iter.from([3, 4]))
 keep sum = std.iter.fold(joined, 0, add)
@@ -3906,8 +3919,8 @@ score
 #[test]
 fn lazy_range_sources_are_bounded_single_pass_and_dual_engine() {
     let source = r#"
-define add(total: Int, value: Int) gives Int { give total + value }
-define sample() gives Result<Int, String> {
+define add takes { total is Int, value is Int } gives Int { give total + value }
+define sample takes { } gives Result<Int, String> {
     keep source = std.iter.range(0, 1000000, 1) or give
     keep first = std.iter.next(source) ?? -1
     keep page = std.iter.take(source, 3)
@@ -3987,7 +4000,7 @@ fn tcp_framing_reads_exact_bytes_without_consuming_the_next_message() {
         });
         let source = format!(
             r#"
-define framed() gives Result<String, String> needs Network {{
+define framed takes {{ }} gives Result<String, String> needs Network {{
     using stream set std.net.connect("127.0.0.1", {port}, 2.0) or give {{
         keep line = std.net.read_line(stream, 64, 2.0) or give
         assert(line == "+OK", "line framing")
@@ -4031,7 +4044,7 @@ fn official_redis_decodes_recursive_arrays_without_frame_overread() {
         });
         let source = format!(
             r#"{redis}
-define probe() gives Result<Int, String> needs Network {{
+define probe takes {{ }} gives Result<Int, String> needs Network {{
     using stream set connect("127.0.0.1", {port}, 2.0) or give {{
         keep first = receive(stream, 2.0, 1024) or give
         keep count = choose first {{
@@ -4114,7 +4127,7 @@ fn official_redis_authenticates_and_pipelines_without_frame_loss() {
         });
         let source = format!(
             r#"{redis}
-define probe() gives Result<String, String> needs Network {{
+define probe takes {{ }} gives Result<String, String> needs Network {{
     keep opened = open("127.0.0.1", {port}, 2.0) or give
     keep empty = pool(2) or give
     keep stored = pool_add(empty, opened) or give
@@ -4212,7 +4225,7 @@ fn official_redis_secure_connection_verifies_certificates() {
         let root = serde_json::to_string(&certificate_pem).unwrap();
         let source = format!(
             r#"{redis}
-define probe() gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
     keep options = std.map.set(std.web.tls_options(), "additional_root_pem", {root})
     keep opened = open_secure("localhost", {port}, 3.0, options) or give
     keep responses = pipeline(opened, [["PING"]], 3.0, 1024) or give
@@ -4289,7 +4302,7 @@ fn official_redis_follows_bounded_moved_and_ask_redirects() {
             });
             let source = format!(
                 r#"{redis}
-define probe() gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
     keep configured = client("127.0.0.1", {first_port}, "", "", no, std.web.tls_options(), 2.0, 1024, 2) or give
     keep outcome = execute(configured, ["PING"]) or give
     give ok(choose outcome.response {{
@@ -4345,7 +4358,7 @@ fn official_redis_decodes_bounded_resp3_aggregates() {
         });
         let source = format!(
             r#"{redis}
-define probe() gives Result<Int, String> needs Network {{
+define probe takes {{ }} gives Result<Int, String> needs Network {{
     keep opened = open("127.0.0.1", {port}, 2.0) or give
     keep first = receive_connection(opened, 2.0, 4096) or give
     keep count = choose first {{
@@ -4390,7 +4403,7 @@ fn official_redis_live_release_matrix() {
     let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
     let source = format!(
         r#"{redis}
-define probe() gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
     keep configured = client("127.0.0.1", {port}, "", "", no, std.web.tls_options(), 3.0, 65536, 2) or give
     keep hello = execute(configured, ["HELLO", "3"]) or give
     keep hello_ok = choose hello.response {{
@@ -4434,7 +4447,7 @@ fn tcp_partial_writes_make_backpressure_and_progress_explicit() {
         });
         let source = format!(
             r#"
-define send() gives Result<Int, String> needs Network {{
+define send takes {{ }} gives Result<Int, String> needs Network {{
     keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set stream {{
         give std.net.write_some(connection, "abcdefgh", 4, 2.0)
@@ -4467,7 +4480,7 @@ fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
         });
         let source = format!(
             r#"
-define probe() gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, String> needs Network {{
     keep stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set stream {{
         give std.net.wait_ready(connection, "read", 2.0)
@@ -4511,7 +4524,7 @@ fn tcp_reactor_selects_many_streams_and_drives_bounded_adapters() {
         });
         let source = format!(
             r#"
-define exchange() gives Result<Int, String> needs Network {{
+define exchange takes {{ }} gives Result<Int, String> needs Network {{
     keep first_opened = std.net.connect("127.0.0.1", {first_port}, 2.0) or give
     using first set first_opened {{
         keep second_opened = std.net.connect("127.0.0.1", {second_port}, 2.0) or give
@@ -4622,7 +4635,7 @@ fn official_trace_exports_bounded_otlp_http_json_in_both_engines() {
         });
         let source = format!(
             r#"{trace}
-define send() gives Result<String, String> needs Network {{
+define send takes {{ }} gives Result<String, String> needs Network {{
     keep value = context("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", yes) or give
     keep attribute = otlp_attribute("service.name", "nivren") or give
     keep span = otlp_span(value, "request", "100", "250", [attribute]) or give
@@ -4649,7 +4662,7 @@ choose send() {{ Ok(status) => status, Err(problem) => problem }}
 #[test]
 fn url_components_are_strict_bounded_and_unicode_safe_in_both_engines() {
     let source = r#"
-define roundtrip() gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, String> {
     keep encoded = std.web.encode_component("Nivren / 🜁 +") or give
     assert(encoded == "Nivren%20%2F%20%F0%9F%9C%81%20%2B", "RFC 3986 component")
     keep decoded = std.web.decode_component(encoded) or give
@@ -4704,7 +4717,7 @@ fn websocket_standard_library_exchanges_bounded_text_in_both_engines() {
         });
         let source = format!(
             r#"
-define exchange() gives Result<String, String> needs Network {{
+define exchange takes {{ }} gives Result<String, String> needs Network {{
     keep opened = std.web.websocket_connect("127.0.0.1", {port}, "/echo", 2.0) or give
     using socket set opened {{
         keep sent = std.web.websocket_send(socket, "hello") or give
@@ -4785,7 +4798,7 @@ fn secure_websocket_listeners_serve_verified_tls_in_both_engines() {
         let client_ca_literal = serde_json::to_string(&client_ca_pem).unwrap();
         let source = format!(
             r#"
-define serve() gives Result<String, String> needs Network {{
+define serve takes {{ }} gives Result<String, String> needs Network {{
     keep auth_policy = std.map.set(std.web.tls_options(), "client_auth", "required")
     keep options = std.map.set(auth_policy, "client_ca_pem", {client_ca_literal})
     keep opened = std.web.websocket_secure_listen("127.0.0.1", {port}, {certificate_literal}, {key_literal}, options) or give
@@ -4863,7 +4876,7 @@ fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
         let client_key_literal = serde_json::to_string(&client_private_key_pem).unwrap();
         let source = format!(
             r#"
-define exchange() gives Result<String, String> needs Network {{
+define exchange takes {{ }} gives Result<String, String> needs Network {{
     keep roots = std.map.set(std.web.tls_options(), "additional_root_pem", {server_root_literal})
     keep identity = std.map.set(roots, "client_certificate_pem", {client_certificate_literal})
     keep policy = std.map.set(identity, "client_private_key_pem", {client_key_literal})
@@ -4916,7 +4929,7 @@ fn tcp_listeners_accept_bounded_connections_and_close_with_scope() {
         });
         let source = format!(
             r#"
-define serve(listener: TcpListener) gives Result<Int, String> needs Network {{
+define serve takes {{ listener is TcpListener }} gives Result<Int, String> needs Network {{
     using server set listener {{
         keep accepted = std.net.accept(server, 2.0)
         using connection set accepted or give {{
@@ -4957,7 +4970,7 @@ fn tcp_line_iterators_are_lazy_bounded_and_recover_after_oversized_frames() {
         });
         let source = format!(
             r#"
-define consume() gives Result<Bool, String> needs Network {{
+define consume takes {{ }} gives Result<Bool, String> needs Network {{
     keep opened = std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set opened {{
         keep lines = std.iter.tcp_lines(connection, 5, 2.0) or give
@@ -5018,7 +5031,7 @@ fn web_servers_parse_bounded_requests_and_write_managed_responses() {
         });
         let source = format!(
             r#"
-define serve(listener: TcpListener) gives Result<String, String> needs Network {{
+define serve takes {{ listener is TcpListener }} gives Result<String, String> needs Network {{
     using server set listener {{
         keep accepted = std.net.accept(server, 2.0)
         using connection set accepted or give {{
@@ -5072,9 +5085,9 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
             received
         });
         let function = if early_return {
-            "define finish(stream: TcpStream) gives Int needs Network { using socket set stream { give 7 } }"
+            "define finish takes { stream is TcpStream } gives Int needs Network { using socket set stream { give 7 } }"
         } else {
-            "define finish(stream: TcpStream) gives Int needs Network { using socket set stream { keep sent = std.net.write(socket, \"closed\") none } give 7 }"
+            "define finish takes { stream is TcpStream } gives Int needs Network { using socket set stream { keep sent = std.net.write(socket, \"closed\") none } give 7 }"
         };
         let source = format!(
             "{function} keep opened = std.net.connect(\"127.0.0.1\", {port}, 2.0) choose opened {{ Ok(stream) => finish(stream), Err(problem) => 0 }}"
@@ -5093,7 +5106,7 @@ fn using_scopes_close_resources_on_normal_and_early_return_paths() {
 
     assert!(nivren::check("using value set 42 { value }").is_err());
     let missing = nivren::check(
-        "define finish(stream: TcpStream) gives Null { using socket set stream { none } }",
+        "define finish takes { stream is TcpStream } gives Null { using socket set stream { none } }",
     )
     .unwrap_err();
     assert!(
@@ -5110,7 +5123,7 @@ fn using_scopes_close_bounded_file_handles_in_both_engines() {
         let path = directory.join(name);
         let source = format!(
             r#"
-define save(path: String) gives Result<Int, String> needs FileWrite {{
+define save takes {{ path is String }} gives Result<Int, String> needs FileWrite {{
     keep opened = std.files.open_write(path)
     using file set opened or give {{
         keep written = std.files.write_to(file, "nivren") or give
@@ -5134,7 +5147,7 @@ save("{}")
     fs::write(&readable, "bounded").unwrap();
     let source = format!(
         r#"
-define load(path: String) gives Result<String, String> needs FileRead {{
+define load takes {{ path is String }} gives Result<String, String> needs FileRead {{
     keep opened = std.files.open_read(path)
     using file set opened or give {{
         give std.files.read_from(file, 64)
@@ -5171,7 +5184,7 @@ fn cross_resource_failure_stress_closes_files_and_tcp_streams_in_both_engines() 
         });
         let source = format!(
             r#"
-define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
+define stress takes {{ path is String }} gives Result<Int, String> needs FileRead, Network {{
     change index = 0
     repeat index < 64 {{
         keep opened_file = std.files.open_read(path) or give
@@ -5215,7 +5228,7 @@ fn async_files_use_bounded_executor_tasks_in_both_engines() {
         .replace('"', "\\\"");
     let source = format!(
         r#"
-define roundtrip() gives Result<String, String> needs FileRead, FileWrite, Task {{
+define roundtrip takes {{ }} gives Result<String, String> needs FileRead, FileWrite, Task {{
     keep writing = std.files.write_async("{path}", "async nivren") or give
     keep written = wait writing or give
     keep reading = std.files.read_async("{path}", 1024) or give
@@ -5232,10 +5245,10 @@ choose roundtrip() {{ Ok(contents) => contents, Err(problem) => problem }}
 
 #[test]
 fn structured_tasks_cancel_and_exchange_channel_values() {
-    let source = "keep channel = std.channels.create(1); define producer() gives Int needs Channel { keep sent = std.channels.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.tasks.spawn(producer); keep received = std.channels.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.tasks.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
+    let source = "keep channel = std.channels.create(1); define producer takes { } gives Int needs Channel { keep sent = std.channels.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.tasks.spawn(producer); keep received = std.channels.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.tasks.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
     assert_eq!(eval_vm(source), Value::Int(42));
 
-    let cancellation = "define forever() gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.tasks.spawn(forever); std.tasks.cancel(task); keep result = std.tasks.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
+    let cancellation = "define forever takes { } gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.tasks.spawn(forever); std.tasks.cancel(task); keep result = std.tasks.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
     assert_eq!(eval_vm(cancellation), Value::Bool(true));
     assert!(nivren::check("std.tasks.spawn(42)").is_err());
     assert!(nivren::run("std.tasks.spawn(42)").is_err());
@@ -5247,14 +5260,14 @@ fn bytecode_vm_matches_the_tree_interpreter() {
         "2 + 3 * 4",
         "change n = 0; repeat (n < 5) { n = n + 1; } n",
         "when yes and not no { 42 } otherwise { 0 }",
-        "define outer(x: Int) { define inner(y: Int) { give x + y; } give inner; } outer(2)(40)",
+        "define outer takes { x is Int } { define inner takes { y is Int } { give x + y; } give inner; } outer(2)(40)",
         "keep values = append([1, 2], 3); values[2]",
         "keep missing: String? = none; missing ?? \"fallback\"",
         "shape Person { name: String, age: Int } keep person = Person(\"Ada\", 37); person.age",
         "choice State { Idle, Ready } keep state = State.Ready; choose (state) { Idle => 0, Ready => 42 }",
         "keep result: Result<Int, String> = ok(42); choose (result) { Ok(value) => value, Err(message) => 0 }",
         "change total = 0; each (value within [10, 20, 12]) { total = total + value; } total",
-        "define first() gives Int { each (value within [42, 0]) { give value; } give 0; } first()",
+        "define first takes { } gives Int { each (value within [42, 0]) { give value; } give 0; } first()",
     ];
     for source in programs {
         assert_eq!(
@@ -5270,7 +5283,7 @@ fn bytecode_vm_executes_namespaced_modules() {
     let directory = module_fixture("bytecode-modules");
     fs::write(
         directory.join("answer.niv"),
-        "define value() gives Int { give 42; } expose { value };",
+        "define value takes { } gives Int { give 42; } expose { value };",
     )
     .unwrap();
     let entry = directory.join("main.niv");
@@ -5290,7 +5303,7 @@ fn bytecode_vm_executes_namespaced_modules() {
 #[test]
 fn bytecode_runtime_errors_include_call_frames() {
     let errors = nivren::run(
-        "define inner() gives Int { give 1 / 0; } define outer() gives Int { give inner(); } outer()",
+        "define inner takes { } gives Int { give 1 / 0; } define outer takes { } gives Int { give inner(); } outer()",
     )
     .unwrap_err();
     let functions: Vec<&str> = errors[0]
@@ -5303,8 +5316,7 @@ fn bytecode_runtime_errors_include_call_frames() {
 
 #[test]
 fn runtime_metrics_cover_nested_bytecode_and_operations() {
-    let source =
-        "define twice(value: Int) gives Int { give value * 2; }\nkeep answer = twice(21);\nanswer";
+    let source = "define twice takes { value is Int } gives Int { give value * 2; }\nkeep answer = twice(21);\nanswer";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5350,7 +5362,7 @@ fn structured_log_events_are_machine_readable_and_capability_checked() {
     assert_eq!(event["fields"]["request"], "42");
 
     let missing = nivren::check(
-        "define emit() gives Null { give std.log.event(\"info\", \"x\", std.map.of(\"key\", \"value\")) }",
+        "define emit takes { } gives Null { give std.log.event(\"info\", \"x\", std.map.of(\"key\", \"value\")) }",
     )
     .unwrap_err();
     assert!(
@@ -5381,7 +5393,7 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     .unwrap();
     fs::write(
         &failing,
-        "define secret() gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
+        "define secret takes { } gives Int { give 1 / 0 } secret() // PRIVATE-SOURCE",
     )
     .unwrap();
     let niv = env!("CARGO_BIN_EXE_niv");
@@ -5822,7 +5834,7 @@ fn official_image_codec_is_bounded_in_both_engines() {
 
 #[test]
 fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
-    let source = "define twice_sum(a: Int, b: Int) gives Int { keep sum = a + b; give sum * 2; } twice_sum(1, 2); twice_sum(20, 1)";
+    let source = "define twice_sum takes { a is Int, b is Int } gives Int { keep sum = a + b; give sum * 2; } twice_sum(1, 2); twice_sum(20, 1)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5837,8 +5849,7 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
         }
     );
 
-    let overflow =
-        "define add(a: Int, b: Int) gives Int { give a + b; } add(9223372036854775807, 1)";
+    let overflow = "define add takes { a is Int, b is Int } gives Int { give a + b; } add(9223372036854775807, 1)";
     let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5850,7 +5861,7 @@ fn hot_integer_functions_tier_to_native_code_with_checked_overflow() {
 
 #[test]
 fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
-    let source = "define sum9(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int) gives Int { give a + b + c + d + e + f + g + h + i; } sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)";
+    let source = "define sum9 takes { a is Int, b is Int, c is Int, d is Int, e is Int, f is Int, g is Int, h is Int, i is Int } gives Int { give a + b + c + d + e + f + g + h + i; } sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5862,7 +5873,7 @@ fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
 
 #[test]
 fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
-    let source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust(value: Int) gives Int { change result = value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
+    let source = "define fibonacci takes { value is Int } gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust takes { value is Int } gives Int { change result = value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     nivren::typecheck::check(&program).unwrap();
     let chunk = nivren::bytecode::compile(&program).unwrap();
@@ -5877,7 +5888,7 @@ fn general_call_frames_preserve_values_and_lexical_shadowing() {
     let source = r#"
 shape Sample { label: String, enabled: Bool }
 keep label = "outer"
-define inspect(sample: Sample) gives String {
+define inspect takes { sample is Sample } gives String {
     when sample.enabled {
         keep label = "inner"
         assert(label == "inner", "nested slot")
@@ -5900,13 +5911,13 @@ inspect(Sample("!", yes)) + inspect(Sample("?", no))
 #[test]
 fn fast_frames_do_not_leak_into_general_callees() {
     let source = r#"
-define unwrap(value: Result<Int, String>) gives Int {
+define unwrap takes { value is Result<Int, String> } gives Int {
     give choose value {
         Ok(number) => number,
         Err(problem) => 0
     }
 }
-define wrapper(value: Int) gives Int {
+define wrapper takes { value is Int } gives Int {
     keep adjusted = value + 2
     give unwrap(ok(adjusted))
 }
@@ -5952,7 +5963,7 @@ fn cli_emits_linkable_native_aot_objects_for_safe_integer_functions() {
     .unwrap();
     fs::write(
         directory.join("src/main.niv"),
-        "define double(value: Int) gives Int { give value * 2 }\ndouble(21)",
+        "define double takes { value is Int } gives Int { give value * 2 }\ndouble(21)",
     )
     .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
@@ -7561,7 +7572,7 @@ define counter_advance takes { state is Counter } gives CounterStep? {
         next set Counter with { current set state.current + 1, limit set state.limit }
     }
 }
-protocol Iterate { define advance(state: Self) gives CounterStep? }
+protocol Iterate { define advance takes { state is Self } gives CounterStep? }
 adopt Iterate for Counter { advance set counter_advance }
 change total set 0
 each value in Counter with { current set 1, limit set 4 } {

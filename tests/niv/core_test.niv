@@ -1,4 +1,4 @@
-define sum(values: [Int]) gives Int {
+define sum takes { values is [Int] } gives Int {
     change total: Int = 0
     change index: Int = 0
     repeat index < len(values) {
@@ -33,7 +33,7 @@ each value within [2, 4, 6] {
 assert(iteratedTotal == 12, "each should iterate array elements")
 assert(1.5 + 2.5 == 4.0, "Float arithmetic should remain distinct from Int arithmetic")
 
-define checkedValue(valid: Bool) gives Result<Int, String> {
+define checkedValue takes { valid is Bool } gives Result<Int, String> {
     when valid { give ok(42) }
     give err("invalid")
 }

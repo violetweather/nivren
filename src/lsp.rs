@@ -690,7 +690,7 @@ mod tests {
     fn language_server_publishes_diagnostics_formats_and_completes() {
         let messages = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///main.niv","text":"define main() {\nkeep value: String = 42\n}"}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///main.niv","text":"define main takes { } {\nkeep value: String = 42\n}"}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///main.niv"}}}),
             json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{}}),
             json!({"jsonrpc":"2.0","id":5,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///main.niv"},"position":{"line":1,"character":6}}}),
@@ -759,7 +759,7 @@ mod tests {
     fn rename_updates_an_exposed_symbol_across_open_modules_only() {
         let messages = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/greetings.niv","text":"define message(name: String) gives String { give name }\nexpose { message }"}}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/greetings.niv","text":"define message takes { name is String } gives String { give name }\nexpose { message }"}}}),
             json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/main.niv","text":"use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))\nkeep message = \"local\""}}}),
             json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///project/other.niv","text":"keep message = \"unrelated\""}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///project/main.niv"},"position":{"line":1,"character":18},"newName":"welcome"}}),
@@ -809,7 +809,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("greetings.niv"),
-            "define message(name: String) gives String { give name }\nexpose { message }",
+            "define message takes { name is String } gives String { give name }\nexpose { message }",
         )
         .unwrap();
         let main_source = "use \"greetings.niv\"\nshow(greetings.message(\"Nivren\"))";

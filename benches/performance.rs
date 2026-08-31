@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use nivren::runtime::{Interpreter, Value};
 
 fn main() {
-    let source = "define kernel(a: Int, b: Int) gives Int { give (a + b) * 2; } change index = 0; change result = 0; repeat (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
+    let source = "define kernel takes { a is Int, b is Int } gives Int { give (a + b) * 2; } change index = 0; change result = 0; repeat (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
     let tokens = nivren::lexer::scan(source).unwrap();
     let program = nivren::parser::parse(tokens).unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -48,7 +48,7 @@ fn main() {
     );
     println!("nivren_benchmark_complete_native_ratio {complete_native_ratio:.3}");
 
-    let recursive_source = "define fibonacci(value: Int) gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } fibonacci(16)";
+    let recursive_source = "define fibonacci takes { value is Int } gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } fibonacci(16)";
     let recursive_tokens = nivren::lexer::scan(recursive_source).unwrap();
     let recursive_program = nivren::parser::parse(recursive_tokens).unwrap();
     nivren::typecheck::check(&recursive_program).unwrap();
@@ -82,7 +82,7 @@ fn main() {
     );
     println!("nivren_benchmark_recursive_speedup {recursive_speedup:.3}");
 
-    let record_source = "shape Sample { alpha: Int, beta: Int, gamma: Int, delta: Int, epsilon: Int, zeta: Int, eta: Int, theta: Int } define checksum(sample: Sample) gives Int { give sample.theta + sample.alpha; } change index = 0; change result = 0; repeat (index < 100000) { result = checksum(Sample(index, 2, 3, 4, 5, 6, 7, 8)); index = index + 1; } result";
+    let record_source = "shape Sample { alpha: Int, beta: Int, gamma: Int, delta: Int, epsilon: Int, zeta: Int, eta: Int, theta: Int } define checksum takes { sample is Sample } gives Int { give sample.theta + sample.alpha; } change index = 0; change result = 0; repeat (index < 100000) { result = checksum(Sample(index, 2, 3, 4, 5, 6, 7, 8)); index = index + 1; } result";
     let record_tokens = nivren::lexer::scan(record_source).unwrap();
     let record_program = nivren::parser::parse(record_tokens).unwrap();
     nivren::typecheck::check(&record_program).unwrap();

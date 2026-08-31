@@ -41,20 +41,20 @@ fn edition_four_proof_programs_have_vm_native_equivalence() {
 fn native_tier_covers_choices_collections_closures_and_protocols() {
     let source = r#"
 protocol Named {
-    define name(value: Self) gives String
+    define name takes { value is Self } gives String
 }
 
 shape Person { name: String }
-define person_name(value: Person) gives String {
+define person_name takes { value is Person } gives String {
     give value.name
 }
 adopt Named for Person { name set person_name }
 
-define present<Value is Named>(value: Value) gives String {
+define present<Value is Named> takes { value is Value } gives String {
     give Named.name(value)
 }
-define outer(value: Int) {
-    define multiply(item: Int) gives Int { give value * item }
+define outer takes { value is Int } {
+    define multiply takes { item is Int } gives Int { give value * item }
     give multiply
 }
 
@@ -84,7 +84,7 @@ fn checked_failures_are_identical_without_native_fallback() {
 #[test]
 fn native_capabilities_limits_and_cancellation_match_the_vm() {
     let denied = compile(
-        "define effect() gives Result<String, String> needs Native { give std.host.invoke(\"device\", \"read\") } effect()",
+        "define effect takes { } gives Result<String, String> needs Native { give std.host.invoke(\"device\", \"read\") } effect()",
     );
     let vm = Interpreter::new()
         .with_capabilities(Vec::<String>::new())
@@ -130,7 +130,7 @@ fn native_capabilities_limits_and_cancellation_match_the_vm() {
 fn native_using_cleanup_closes_owned_foreign_handles_once() {
     let chunk = compile(
         r#"
-define query() gives Result<String, String> needs Native {
+define query takes { } gives Result<String, String> needs Native {
     keep opened = std.host.open("database", "configuration") or give
     using handle set opened {
         give std.host.call(handle, "query", "select 42")

@@ -116,7 +116,7 @@ fn declaration_signature(statement: &Stmt) -> String {
             } else {
                 format!(" needs {}", needs.join(", "))
             };
-            format!("`define {name}{generics}({parameters}){result}{capabilities}`")
+            format!("`define {name}{generics} takes {{ {parameters} }}{result}{capabilities}`")
         }
         Stmt::Record {
             name,
@@ -130,7 +130,7 @@ fn declaration_signature(statement: &Stmt) -> String {
             let derives = if derives.is_empty() {
                 String::new()
             } else {
-                format!(" with {}", derives.join(", "))
+                format!(" derives {}", derives.join(", "))
             };
             format!("`shape {name}{generics} {{ {fields} }}{derives}`")
         }
@@ -208,12 +208,12 @@ fn generic_parameters(parameters: &[crate::ast::TypeParam]) -> String {
 fn param_name(param: &Param) -> String {
     param.ty.as_ref().map_or_else(
         || param.name.clone(),
-        |ty| format!("{}: {}", param.name, type_name(ty)),
+        |ty| format!("{} is {}", param.name, type_name(ty)),
     )
 }
 
 fn field_name(field: &FieldDef) -> String {
-    format!("{}: {}", field.name, type_name(&field.ty))
+    format!("{} is {}", field.name, type_name(&field.ty))
 }
 
 fn type_name(reference: &TypeRef) -> String {

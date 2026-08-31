@@ -1,5 +1,5 @@
 protocol Named {
-    define name(value: Self) gives String
+    define name takes { value is Self } gives String
 }
 
 shape User holds {

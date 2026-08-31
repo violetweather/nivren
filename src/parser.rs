@@ -212,37 +212,6 @@ impl Parser {
                 self.matches(&[TokenKind::Comma]);
             }
             self.consume(&TokenKind::RightBrace, "expected '}' after inputs")?;
-        } else if self.check(&TokenKind::LeftParen) {
-            self.consume(
-                &TokenKind::LeftParen,
-                "expected 'takes' or '(' after function name",
-            )?;
-            if !self.check(&TokenKind::RightParen) {
-                loop {
-                    if params.len() >= 255 {
-                        return Err(self.error_here("functions may have at most 255 parameters"));
-                    }
-                    let param_span = Span {
-                        line: self.peek().line,
-                        column: self.peek().column,
-                    };
-                    let param_name = self.consume_identifier("expected parameter name")?;
-                    let ty = if self.matches(&[TokenKind::Colon]) {
-                        Some(self.type_ref()?)
-                    } else {
-                        None
-                    };
-                    params.push(Param {
-                        name: param_name,
-                        ty,
-                        span: param_span,
-                    });
-                    if !self.matches(&[TokenKind::Comma]) {
-                        break;
-                    }
-                }
-            }
-            self.consume(&TokenKind::RightParen, "expected ')' after parameters")?;
         }
         let return_type = if self.matches(&[TokenKind::Arrow]) {
             let value = self.type_ref()?;
@@ -554,37 +523,6 @@ impl Parser {
                         self.matches(&[TokenKind::Comma]);
                     }
                     self.consume(&TokenKind::RightBrace, "expected '}' after protocol inputs")?;
-                } else {
-                    self.consume(
-                        &TokenKind::LeftParen,
-                        "expected 'takes' or '(' after protocol member name",
-                    )?;
-                    if !self.check(&TokenKind::RightParen) {
-                        loop {
-                            let parameter_span = Span {
-                                line: self.peek().line,
-                                column: self.peek().column,
-                            };
-                            let parameter_name =
-                                self.consume_identifier("expected protocol parameter name")?;
-                            self.consume(
-                                &TokenKind::Colon,
-                                "protocol parameters require an explicit type",
-                            )?;
-                            params.push(Param {
-                                name: parameter_name,
-                                ty: Some(self.type_ref()?),
-                                span: parameter_span,
-                            });
-                            if !self.matches(&[TokenKind::Comma]) {
-                                break;
-                            }
-                        }
-                    }
-                    self.consume(
-                        &TokenKind::RightParen,
-                        "expected ')' after protocol parameters",
-                    )?;
                 }
                 self.consume(&TokenKind::Arrow, "protocol members require a 'gives' type")?;
                 let value_type = self.type_ref()?;
