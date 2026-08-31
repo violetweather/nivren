@@ -34,6 +34,7 @@ jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-fa
 num-bigint = "0.5.1"
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 mio = { version = "1.2.2", features = ["os-poll", "net"], optional = true }
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 proptest = "1.11.0"
