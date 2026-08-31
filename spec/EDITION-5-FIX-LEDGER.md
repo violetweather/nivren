@@ -101,6 +101,7 @@ Decision values: **Pending** (no decision yet), **Applied** (folded into the Edi
 | 46 | Text-literal holes cannot contain string literals: the plain lexer ends the outer `text "…"` string at the first inner quote | `src/parser.rs` text_literal | Lex `text` literals in the lexer with hole-aware quoting (or spec that holes hold quote-free expressions) | Pending |
 | 47 | `U128` does not fit `FixedInt`'s i128 payload; `I128` shipped, `U128` needs widened fixed-width storage | `src/fixed.rs` | Split `FixedInt.value` into signed/unsigned payloads (or store `U128` as `u128` beside `i128`) in a dedicated numeric pass | Pending |
 | 48 | No edition marker exists in manifests or sources, which blocks the Edition 5 removals, `niv fix` rewrites, and extending the trusted-module gate to scripts | whole pipeline | Add `edition = 5` to `niv.toml` (PACKAGE-2) and an edition pragma for single files; gate removals and strict rules on it | Pending |
+| 49 | `std.source` covers shapes, choices, and literal bindings; generated functions need a statement/expression builder vocabulary that must be designed, not grown ad hoc | `src/runtime.rs` std.source | Decide the builder set mirroring grammar productions (call, give, when, each) before adding function generation | Pending |
 
 ## Cross-cutting fixes already proposed in earlier planning
 
