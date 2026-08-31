@@ -34,6 +34,62 @@ impl NivError {
         self
     }
 
+    /// The stable `org.nivren.diagnostic.v1` identifier for this diagnostic,
+    /// when it belongs to the published catalog (`docs/DIAGNOSTICS.md`).
+    /// Identifiers are never reused or renumbered; new ones append.
+    #[must_use]
+    pub fn code(&self) -> Option<&'static str> {
+        let message = self.message.as_str();
+        let table: [(&[&str], &'static str); 20] = [
+            (&["no 'repeat' or 'each' loop"], "NIV5001"),
+            (&["attempted to end a loop across"], "NIV5002"),
+            (&["non-exhaustive choose"], "NIV5003"),
+            (&["unreachable", "already exhaustive"], "NIV5004"),
+            (&["duplicate choose arm"], "NIV5005"),
+            (&["same names at the same types"], "NIV5006"),
+            (&["stays pure", "guards stay pure"], "NIV5007"),
+            (&["safe selector"], "NIV5008"),
+            (
+                &[
+                    "a text hole renders",
+                    "no canonical text",
+                    "does not derive Display",
+                ],
+                "NIV5009",
+            ),
+            (&["payload limit"], "NIV5010"),
+            (&["promise never"], "NIV5011"),
+            (
+                &["outside the promised boundaries", "without a scope inside"],
+                "NIV5012",
+            ),
+            (&["is not a capability"], "NIV5013"),
+            (
+                &[
+                    "sample title",
+                    "ends with one expression to display",
+                    "sample '",
+                ],
+                "NIV5014",
+            ),
+            (&["crosses the systems boundary"], "NIV5015"),
+            (&["unknown generator", "generator '"], "NIV5016"),
+            (&["binding pattern never fails"], "NIV5017"),
+            (&["replay diverged"], "NIV5018"),
+            (&["dependency authority changed"], "NIV5019"),
+            (
+                &["unsigned integer overflow", "have no negation"],
+                "NIV5020",
+            ),
+        ];
+        for (needles, code) in table {
+            if needles.iter().any(|needle| message.contains(needle)) {
+                return Some(code);
+            }
+        }
+        None
+    }
+
     #[must_use]
     pub fn suggestion(&self) -> Option<&'static str> {
         let message = self.message.as_str();

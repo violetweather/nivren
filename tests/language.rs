@@ -7493,6 +7493,34 @@ fn authority_diffs_show_added_and_removed_grants() {
 }
 
 #[test]
+fn published_diagnostics_carry_stable_catalog_codes() {
+    let cases = [
+        ("stop", "NIV5001"),
+        ("choose 5 { case 1 => \"one\" }", "NIV5003"),
+        (
+            "choose 5 {\n    otherwise => 1\n    case 2 => 2\n}",
+            "NIV5004",
+        ),
+        ("promise never Magic", "NIV5013"),
+        ("promise never Time\nstd.time.sleep(0.1)", "NIV5011"),
+        ("expand missing", "NIV5016"),
+        (
+            "shape Point holds {\n    x is Int\n    y is Int\n}\nkeep Point holds { x set 0 } set Point with { x set 1, y set 2 }",
+            "NIV5017",
+        ),
+    ];
+    for (source, expected) in cases {
+        let errors = nivren::check(source).unwrap_err();
+        assert_eq!(
+            errors[0].code(),
+            Some(expected),
+            "for source: {source} ({})",
+            errors[0].message
+        );
+    }
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

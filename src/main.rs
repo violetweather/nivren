@@ -2989,8 +2989,12 @@ fn lsp() -> ExitCode {
 fn report(path: &str, source: &str, errors: &[NivError]) {
     let lines: Vec<&str> = source.lines().collect();
     for error in errors {
+        let code = error
+            .code()
+            .map(|code| format!("[{code}]"))
+            .unwrap_or_default();
         eprintln!(
-            "{path}:{}:{}: error: {}",
+            "{path}:{}:{}: error{code}: {}",
             error.line, error.column, error.message
         );
         if let Some(line) = lines.get(error.line.saturating_sub(1)) {
