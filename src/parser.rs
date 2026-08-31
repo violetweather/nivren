@@ -15,6 +15,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, Vec<NivError>> {
         errors: vec![],
         depth: 0,
         callables: HashMap::new(),
+        pending: vec![],
     }
     .program()
 }
@@ -30,6 +31,7 @@ pub fn parse_type(source: &str) -> Result<TypeRef, NivError> {
         errors: vec![],
         depth: 0,
         callables: HashMap::new(),
+        pending: vec![],
     };
     let reference = parser.type_ref()?;
     if parser.is_at_end() {
@@ -49,6 +51,9 @@ struct Parser {
     errors: Vec<NivError>,
     depth: usize,
     callables: HashMap<String, Vec<String>>,
+    /// Statements queued behind the one being returned (the `expose`
+    /// declaration modifier emits its export marker here).
+    pending: Vec<Stmt>,
 }
 
 impl Parser {
@@ -56,7 +61,10 @@ impl Parser {
         let mut statements = vec![];
         while !self.is_at_end() {
             match self.declaration() {
-                Ok(statement) => statements.push(statement),
+                Ok(statement) => {
+                    statements.push(statement);
+                    statements.append(&mut self.pending);
+                }
                 Err(error) => {
                     self.errors.push(error);
                     self.synchronize();
@@ -626,6 +634,24 @@ impl Parser {
 
     fn export_declaration(&mut self) -> Result<Stmt, NivError> {
         let span = self.previous_span();
+        // Modifier form: `expose define f …` exposes the declaration it
+        // precedes (ledger row 19); the block list stays for re-exporting
+        // generated declarations.
+        if !self.check(&TokenKind::LeftBrace) {
+            let declaration = self.declaration()?;
+            let name = declared_statement_name(&declaration).ok_or_else(|| {
+                NivError::new(
+                    "expose marks a named declaration or lists names in braces",
+                    span.line,
+                    span.column,
+                )
+            })?;
+            self.pending.push(Stmt::Export {
+                names: vec![name],
+                span,
+            });
+            return Ok(declaration);
+        }
         self.consume(&TokenKind::LeftBrace, "expected '{' after expose")?;
         let mut names = vec![];
         if !self.check(&TokenKind::RightBrace) {
@@ -1933,4 +1959,15 @@ fn expression_continues(kind: &TokenKind) -> bool {
             | TokenKind::Colon
             | TokenKind::Arrow
     )
+}
+
+fn declared_statement_name(statement: &Stmt) -> Option<String> {
+    match statement {
+        Stmt::Function { name, .. }
+        | Stmt::Record { name, .. }
+        | Stmt::Enum { name, .. }
+        | Stmt::Protocol { name, .. }
+        | Stmt::Let { name, .. } => Some(name.clone()),
+        _ => None,
+    }
 }

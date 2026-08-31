@@ -7717,6 +7717,30 @@ lucky with { value set 1 }
 }
 
 #[test]
+fn expose_marks_declarations_in_place() {
+    let directory = module_fixture("expose-modifier");
+    fs::write(
+        directory.join("helper.niv"),
+        "expose define triple takes { value is Int } gives Int { give value * 3 }\ndefine hidden takes { } gives Int { give 0 }",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("main.niv"),
+        "use \"helper.niv\" as tools\nshow(tools.triple with { value set 14 })",
+    )
+    .unwrap();
+    let program = nivren::modules::load(&directory.join("main.niv")).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let hidden = fs::read_to_string(directory.join("main.niv"))
+        .unwrap()
+        .replace("triple with { value set 14 }", "hidden with { }");
+    fs::write(directory.join("main.niv"), hidden).unwrap();
+    let program = nivren::modules::load(&directory.join("main.niv")).unwrap();
+    assert!(nivren::typecheck::check(&program).is_err());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
