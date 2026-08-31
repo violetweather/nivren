@@ -6202,6 +6202,15 @@ fn standard_library() -> Value {
             ),
         ),
         (
+            "i128".into(),
+            fixed_native_module(
+                native_i128_from_int,
+                native_i128_parse,
+                native_i128_format,
+                native_i128_to_int,
+            ),
+        ),
+        (
             "map".into(),
             native_module(&[
                 ("single", 2, native_map_single, None),
@@ -9571,6 +9580,14 @@ fixed_constructor!(
     native_u64_to_int,
     FixedKind::U64,
     "u64"
+);
+fixed_constructor!(
+    native_i128_from_int,
+    native_i128_parse,
+    native_i128_format,
+    native_i128_to_int,
+    FixedKind::I128,
+    "i128"
 );
 
 fn fixed_format(

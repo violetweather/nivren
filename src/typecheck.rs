@@ -1040,6 +1040,7 @@ impl Checker {
                     ("u16", fixed_type_module(FixedKind::U16)),
                     ("u32", fixed_type_module(FixedKind::U32)),
                     ("u64", fixed_type_module(FixedKind::U64)),
+                    ("i128", fixed_type_module(FixedKind::I128)),
                     ("map", module(map_functions())),
                     ("set", module(set_functions())),
                     ("list", module(list_functions())),
@@ -4085,6 +4086,7 @@ impl Checker {
                 "U16" => Type::Fixed(FixedKind::U16),
                 "U32" => Type::Fixed(FixedKind::U32),
                 "U64" => Type::Fixed(FixedKind::U64),
+                "I128" => Type::Fixed(FixedKind::I128),
                 "Task" => Type::Task,
                 "Channel" => Type::Channel,
                 _ => {

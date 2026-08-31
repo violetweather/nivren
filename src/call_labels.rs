@@ -23,6 +23,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "std.u16",
         "std.u32",
         "std.u64",
+        "std.i128",
     ] {
         add(
             &mut labels,

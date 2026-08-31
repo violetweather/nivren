@@ -99,6 +99,8 @@ Decision values: **Pending** (no decision yet), **Applied** (folded into the Edi
 | 44 | `Iterate.advance` "takes no arguments and gives maybe Item" cannot thread iterator state through immutable values — the signature is unimplementable as specified | `spec/STANDARD-LIBRARY-5.md` §6, `LANGUAGE-5-DRAFT.md` §11 | Persistent unfold shape: `advance takes { state is Self } gives maybe Step` where the standard shape `Step<State, Item> holds { item, next }`; `each` threads `next` | Pending |
 | 45 | Variables named `start`/`wait`/`race`/`together` are rejected because the task words are globally reserved, unlike `set`/`from` | `src/lexer.rs` keyword table | Decide: keep reserved (document in spec §2) or make contextual like `set` | Pending |
 | 46 | Text-literal holes cannot contain string literals: the plain lexer ends the outer `text "…"` string at the first inner quote | `src/parser.rs` text_literal | Lex `text` literals in the lexer with hole-aware quoting (or spec that holes hold quote-free expressions) | Pending |
+| 47 | `U128` does not fit `FixedInt`'s i128 payload; `I128` shipped, `U128` needs widened fixed-width storage | `src/fixed.rs` | Split `FixedInt.value` into signed/unsigned payloads (or store `U128` as `u128` beside `i128`) in a dedicated numeric pass | Pending |
+| 48 | No edition marker exists in manifests or sources, which blocks the Edition 5 removals, `niv fix` rewrites, and extending the trusted-module gate to scripts | whole pipeline | Add `edition = 5` to `niv.toml` (PACKAGE-2) and an edition pragma for single files; gate removals and strict rules on it | Pending |
 
 ## Cross-cutting fixes already proposed in earlier planning
 

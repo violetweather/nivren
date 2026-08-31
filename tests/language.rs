@@ -7371,6 +7371,25 @@ show(choose Signal.Wait(7) {
 }
 
 #[test]
+fn i128_joins_the_fixed_width_family_in_both_engines() {
+    let source = r#"
+define compute takes { } gives String or String {
+    keep big set std.i128.parse("170141183460469231731687303715884105727") or give
+    keep one set std.i128.from_int(1) or give
+    keep smaller set big - one
+    give ok(std.i128.format(smaller))
+}
+choose compute with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("170141183460469231731687303715884105726".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
