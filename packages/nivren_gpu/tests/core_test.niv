@@ -16,6 +16,8 @@ keep artifact set main.compile_add with { plan set plan } or give
 assert(artifact.cpu_fallback == [11, 22, 33, 44, 55], "four-lane CPU fallback")
 assert(artifact.target == "webgpu-wgsl", "portable GPU target")
 assert(artifact.workgroups == 1, "bounded workgroups")
+assert(artifact.buffers == [[1, 2, 3, 4, 5], [10, 20, 30, 40, 50]], "input buffers travel with the artifact")
+assert(artifact.output_items == 5, "output length travels with the artifact")
 
 keep mismatched set main.AddPlan with {
     left set [1]

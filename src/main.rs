@@ -655,17 +655,50 @@ fn run_native_project(path: &str) -> ExitCode {
     }
 }
 
+/// Routes one host request between the bundled hosts: GPU opens by kind,
+/// and later calls and closes by the handle's backend prefix.
+fn host_request_targets_gpu(operation: &str, request: &str) -> bool {
+    if operation == "nivren.handle.open:gpu" {
+        return true;
+    }
+    if operation == "nivren.handle.close" {
+        return request.starts_with("gpu-");
+    }
+    if operation.starts_with("nivren.handle.call:") {
+        return serde_json::from_str::<serde_json::Value>(request)
+            .ok()
+            .and_then(|envelope| {
+                envelope
+                    .get("handle")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|handle| handle.starts_with("gpu-"))
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
 fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
     let interpreter = Interpreter::new()
         .with_capabilities(manifest.capabilities.iter().cloned())
         .with_capability_scopes(manifest.capability_scopes.clone());
     let interpreter = if manifest.capabilities.contains("Native") {
         let database_root = manifest.root.join(".nivren").join("database");
-        match nivren_database_host::SqliteHost::new(database_root) {
-            Ok(host) => interpreter.with_host_callback(host.callback()),
+        match nivren_database_host::DatabaseHost::new(database_root) {
+            Ok(database) => {
+                let database = database.callback();
+                let gpu = nivren_gpu_host::GpuHost::new().callback();
+                interpreter.with_host_callback(move |operation, request| {
+                    if host_request_targets_gpu(operation, request) {
+                        gpu(operation, request)
+                    } else {
+                        database(operation, request)
+                    }
+                })
+            }
             Err(error) => interpreter.with_host_callback(move |operation, _| {
                 Err(format!(
-                    "cannot initialize the built-in SQLite host for {operation}: {error}"
+                    "cannot initialize the built-in database host for {operation}: {error}"
                 ))
             }),
         }
@@ -2385,6 +2418,7 @@ fn inspect_path(path: &str, output: &str) -> ExitCode {
             "column": event.column,
             "operation": event.operation,
             "stack_depth": event.stack_depth,
+            "call_depth": event.call_depth,
             "variable_names": variable_names,
         });
         if let Err(error) = write_event(&hook_stream, &value) {

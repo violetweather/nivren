@@ -545,6 +545,9 @@ pub struct NativeFunction {
 
 type NativeCall = fn(Vec<Value>, Span) -> Result<Value, NivError>;
 type DebugHook = Box<dyn FnMut(&DebugEvent) -> DebugControl>;
+
+/// A shared writer receiving `show` output instead of stdout.
+pub type PrintSink = Arc<Mutex<dyn std::io::Write + Send>>;
 type HostCallback = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
 
 pub struct RecordType {
@@ -1039,6 +1042,9 @@ pub struct Interpreter {
     inherited_cancellations: Vec<Arc<AtomicBool>>,
     metrics: Option<Arc<Mutex<ExecutionMetrics>>>,
     debug_hook: Option<DebugHook>,
+    /// When present, `show` output is written here instead of stdout, so a
+    /// protocol server (the debug adapter) can forward it as events.
+    print_sink: Option<PrintSink>,
     gc_ticks: usize,
     jit_threshold: u32,
     jit_compilations: usize,
@@ -1109,6 +1115,9 @@ pub struct DebugEvent {
     pub column: usize,
     pub operation: String,
     pub stack_depth: usize,
+    /// The interpreter's function-call depth, used for step-over and
+    /// step-out decisions; the top level is depth zero.
+    pub call_depth: usize,
     pub variables: BTreeMap<String, String>,
 }
 
@@ -1241,6 +1250,7 @@ impl Interpreter {
             inherited_cancellations: vec![],
             metrics: None,
             debug_hook: None,
+            print_sink: None,
             gc_ticks: 0,
             jit_threshold: std::env::var("NIVREN_JIT_THRESHOLD")
                 .ok()
@@ -1572,7 +1582,7 @@ impl Interpreter {
             }
         }
         if prints_result {
-            println!("{}", Value::Int(value));
+            self.print_line(&Value::Int(value));
             return Ok(Some(Value::Null));
         }
         Ok(Some(Value::Int(value)))
@@ -1738,6 +1748,21 @@ impl Interpreter {
             .map(|metrics| metrics.lock().unwrap().clone())
     }
 
+    pub fn set_print_sink(&mut self, sink: PrintSink) {
+        self.print_sink = Some(sink);
+    }
+
+    fn print_line(&self, value: &dyn Display) {
+        match &self.print_sink {
+            Some(sink) => {
+                let mut sink = sink.lock().unwrap();
+                let _ = writeln!(sink, "{value}");
+                let _ = sink.flush();
+            }
+            None => println!("{value}"),
+        }
+    }
+
     pub fn set_debug_hook(&mut self, hook: impl FnMut(&DebugEvent) -> DebugControl + 'static) {
         self.debug_hook = Some(Box::new(hook));
     }
@@ -1863,7 +1888,7 @@ impl Interpreter {
                 if let Value::EarlyReturn(value) = value {
                     return Ok(Flow::Return(value.as_ref().clone()));
                 }
-                println!("{value}");
+                self.print_line(&value);
                 Ok(Flow::Continue(Value::Null))
             }
             Stmt::Block(statements, _) => {
@@ -4415,6 +4440,7 @@ impl Interpreter {
                 column: item.span.column,
                 operation: operation_name(&item.op).into(),
                 stack_depth: stack.len(),
+                call_depth: self.call_depth,
                 variables: self.debug_variables(),
             };
             if self
@@ -4590,7 +4616,7 @@ impl Interpreter {
                 stack.push(get_value(object, name, item.span)?);
             }
             Op::Print => {
-                println!("{}", stack.pop().unwrap());
+                self.print_line(&stack.pop().unwrap());
                 stack.push(Value::Null);
             }
             Op::EnterScope => {
