@@ -69,8 +69,8 @@ Exit gate: a stranger can publish a package and another stranger can depend on i
 ## 7. Phase A — assurance, then 1.0
 
 - **A1. Independent security audit** of the runtime, capability system, package pipeline, and installers. External, paid, calendar-bound. Every critical and high finding closed with a test.
-- **A2. Soak.** A release-candidate period with the registry live and real users on the betas; the bar is that incoming reports stay boring for several consecutive weeks.
-- **A3. 1.0 ships as Edition 6.** The language spec (frozen), the runtime evidence, the platform matrix, the registry, and the audit report, one release.
+- **A2. Soak, on internal evidence.** A release-candidate period measured in real workloads rather than a userbase: dogfooded applications run daily, the 25 official packages exercised from the registry, and the self-hosted checker checking its own source in CI. The bar is several consecutive weeks with the incoming defect list staying boring. Real outside users strengthen this gate when they exist; they are not a precondition for it.
+- **A3. 1.0 ships as Edition 6.** The language spec (frozen), the runtime evidence, the platform matrix, the registry, and the audit report, one release. Versioning from there: the 1.0.x line carries fixes only, and new work ships as 1.1 betas. Edition 5 remains the beta line (0.10.x) until this moment; it never becomes 1.0 on its own.
 
 ## 8. Sequencing and versioning
 
