@@ -4,6 +4,18 @@ use std::time::{Duration, Instant};
 use nivren::runtime::{Interpreter, Value};
 
 fn main() {
+    // Debug builds (cargo test --all-targets) carry much larger interpreter
+    // stack frames than release builds; give the benchmark a deep stack so
+    // the recursive tree-walk section cannot overflow the 1 MiB default.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(benchmarks)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn benchmarks() {
     let source = "define kernel takes { a is Int, b is Int } gives Int { give (a + b) * 2; } change index set 0; change result set 0; repeat (index < 200000) { result = kernel(index, 3); index = index + 1; } result";
     let tokens = nivren::lexer::scan(source).unwrap();
     let program = nivren::parser::parse(tokens).unwrap();
