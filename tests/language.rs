@@ -7390,6 +7390,34 @@ choose compute with {} {
 }
 
 #[test]
+fn text_holes_render_display_shapes_and_datetimes_in_both_engines() {
+    let source = r#"
+shape Point holds {
+    x is Int
+    y is Int
+} with Display
+keep origin set Point with { x set 1, y set 2 }
+text "at {origin}"
+"#;
+    let tree = eval_tree(source);
+    let Value::String(rendered) = &tree else {
+        panic!("expected text");
+    };
+    assert!(rendered.starts_with("at "));
+    assert!(rendered.contains('1') && rendered.contains('2'));
+    assert_eq!(eval_vm(source), tree);
+    let undisplayable = r#"
+shape Quiet holds {
+    x is Int
+}
+keep value set Quiet with { x set 1 }
+text "at {value}"
+"#;
+    let errors = nivren::check(undisplayable).unwrap_err();
+    assert!(errors[0].to_string().contains("Display"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

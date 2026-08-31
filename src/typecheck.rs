@@ -2987,18 +2987,29 @@ impl Checker {
                             ));
                         }
                         let found = self.expression(hole);
-                        if !matches!(
+                        let allowed = matches!(
                             found,
                             Type::String
                                 | Type::Int
                                 | Type::UInt
                                 | Type::Float
                                 | Type::Bool
+                                | Type::BigInt
+                                | Type::Decimal
+                                | Type::Fixed(_)
+                                | Type::DateTime
                                 | Type::Unknown
-                        ) {
+                        ) || matches!(
+                            &found,
+                            Type::Record(name, _) if self
+                                .record_derives
+                                .get(name)
+                                .is_some_and(|derives| derives.contains("Display"))
+                        );
+                        if !allowed {
                             self.errors.push(NivError::new(
                                 format!(
-                                    "a text hole renders text, whole numbers, finite floats, or booleans; found {}",
+                                    "a text hole renders text, numbers, booleans, date/times, or shapes deriving Display; found {}",
                                     found.name()
                                 ),
                                 span.line,

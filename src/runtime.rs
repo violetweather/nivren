@@ -1965,7 +1965,7 @@ impl Interpreter {
                         TextPiece::Literal(part) => output.push_str(part),
                         TextPiece::Hole(hole) => {
                             let value = evaluate_part!(self, hole);
-                            output.push_str(&text_hole_string(&value, *span)?);
+                            output.push_str(&self.text_hole_string(&value, *span)?);
                         }
                     }
                     if output.len() > MAX_TEXT_LITERAL_BYTES {
@@ -2320,6 +2320,60 @@ impl Interpreter {
                 }
                 _ => false,
             },
+        }
+    }
+
+    /// Renders one text-hole value canonically. Text, numbers, booleans,
+    /// date/times, and shapes deriving Display have a canonical form;
+    /// everything else is a typed error the checker normally prevents.
+    fn text_hole_string(&self, value: &Value, span: Span) -> Result<String, NivError> {
+        match value {
+            Value::String(text) => Ok(text.clone()),
+            Value::Int(_)
+            | Value::UInt(_)
+            | Value::Bool(_)
+            | Value::BigInt(_)
+            | Value::Decimal(_)
+            | Value::FixedInt(_)
+            | Value::DateTime(_) => Ok(value.to_string()),
+            Value::Float(number) if number.is_finite() => Ok(value.to_string()),
+            Value::Float(_) => Err(NivError::new(
+                "a text hole attempted to render a float that is not finite; handle NaN or infinity before formatting",
+                span.line,
+                span.column,
+            )),
+            Value::Record(record) => {
+                let derives_display = matches!(
+                    lookup(&self.environment, &record.type_name).or_else(|| {
+                        record
+                            .type_name
+                            .rsplit('.')
+                            .next()
+                            .and_then(|short| lookup(&self.environment, short))
+                    }),
+                    Some(Value::RecordType(schema)) if schema.derives.iter().any(|derive| derive == "Display")
+                );
+                if derives_display {
+                    Ok(value.to_string())
+                } else {
+                    Err(NivError::new(
+                        format!(
+                            "a text hole attempted to render {}, which does not derive Display; {TEXT_HOLE_CONTRACT}",
+                            record.type_name
+                        ),
+                        span.line,
+                        span.column,
+                    ))
+                }
+            }
+            other => Err(NivError::new(
+                format!(
+                    "a text hole attempted to render {}, which has no canonical text; {TEXT_HOLE_CONTRACT}",
+                    other.type_name()
+                ),
+                span.line,
+                span.column,
+            )),
         }
     }
 
@@ -3944,7 +3998,7 @@ impl Interpreter {
                 let values = stack.split_off(stack.len() - length);
                 let mut output = String::new();
                 for value in &values {
-                    output.push_str(&text_hole_string(value, item.span)?);
+                    output.push_str(&self.text_hole_string(value, item.span)?);
                     if output.len() > MAX_TEXT_LITERAL_BYTES {
                         return Err(text_too_long_error(item.span));
                     }
@@ -5413,29 +5467,8 @@ fn effect_json_to_value(value: &serde_json::Value, span: Span) -> Result<Value, 
 
 const MAX_TEXT_LITERAL_BYTES: usize = 16 * 1024 * 1024;
 
-/// Renders one text-hole value canonically. Only text, whole numbers, finite
-/// floats, and booleans have a canonical text form; everything else is a
-/// typed error the checker normally prevents.
-fn text_hole_string(value: &Value, span: Span) -> Result<String, NivError> {
-    match value {
-        Value::String(text) => Ok(text.clone()),
-        Value::Int(_) | Value::UInt(_) | Value::Bool(_) => Ok(value.to_string()),
-        Value::Float(number) if number.is_finite() => Ok(value.to_string()),
-        Value::Float(_) => Err(NivError::new(
-            "a text hole attempted to render a float that is not finite; handle NaN or infinity before formatting",
-            span.line,
-            span.column,
-        )),
-        other => Err(NivError::new(
-            format!(
-                "a text hole attempted to render {}, which has no canonical text; give text, a whole number, a finite float, or a boolean",
-                other.type_name()
-            ),
-            span.line,
-            span.column,
-        )),
-    }
-}
+const TEXT_HOLE_CONTRACT: &str =
+    "give text, a number, a boolean, a date/time, or a shape that derives Display";
 
 fn text_too_long_error(span: Span) -> NivError {
     NivError::new(
