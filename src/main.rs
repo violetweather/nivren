@@ -184,6 +184,45 @@ fn main() -> ExitCode {
         {
             registry_recover_admin(registry, now, minimum)
         }
+        [command, action, output] if command == "trust" && action == "keygen" => {
+            trust_keygen(output)
+        }
+        [
+            command,
+            action,
+            publisher,
+            key,
+            repository,
+            workflow,
+            expires,
+            secret,
+            output,
+        ] if command == "trust" && action == "authorize" => trust_authorize(
+            publisher, key, repository, workflow, expires, secret, output,
+        ),
+        [
+            command,
+            action,
+            package,
+            publisher,
+            repository,
+            workflow,
+            commit,
+            secret,
+            output,
+        ] if command == "trust" && action == "attest" => trust_attest(
+            package, publisher, repository, workflow, commit, secret, output,
+        ),
+        [command, action, input, secret, output]
+            if command == "trust" && action == "sign-status" =>
+        {
+            trust_sign_status(input, secret, output)
+        }
+        [command, action, input, secret, output]
+            if command == "trust" && action == "sign-advisory" =>
+        {
+            trust_sign_advisory(input, secret, output)
+        }
         [command, action] if command == "release" && action == "check" => release_check("."),
         [command, action, path] if command == "release" && action == "check" => release_check(path),
         [command, action, manifest, secret, output]
@@ -273,6 +312,161 @@ fn main() -> ExitCode {
             ExitCode::from(64)
         }
     }
+}
+
+fn read_secret_key(path: &str) -> Result<[u8; 32], String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read signing key {path}: {error}"))?;
+    nivren::trust::parse_secret_key(text.trim()).map_err(|error| error.message)
+}
+
+fn unix_now() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| "system clock is before the Unix epoch".to_string())
+}
+
+fn trust_result(result: Result<String, String>) -> ExitCode {
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(65)
+        }
+    }
+}
+
+fn trust_keygen(output: &str) -> ExitCode {
+    trust_result((|| {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret)
+            .map_err(|error| format!("cannot gather key entropy: {error}"))?;
+        let path = Path::new(output);
+        if path.exists() {
+            return Err(format!("refusing to overwrite existing key file {output}"));
+        }
+        write_atomic(
+            path,
+            format!(
+                "{}
+",
+                nivren::trust::encode_hex(&secret)
+            )
+            .as_bytes(),
+        )
+        .map_err(|error| error.to_string())?;
+        let public = nivren::trust::public_key(secret);
+        Ok(format!(
+            "secret {output}
+public {}",
+            nivren::trust::encode_hex(&public)
+        ))
+    })())
+}
+
+fn trust_authorize(
+    publisher: &str,
+    key: &str,
+    repository: &str,
+    workflow: &str,
+    expires: &str,
+    secret: &str,
+    output: &str,
+) -> ExitCode {
+    trust_result((|| {
+        let public = fs::read_to_string(key)
+            .map_err(|error| format!("cannot read publisher key {key}: {error}"))?;
+        nivren::trust::parse_public_key(public.trim()).map_err(|error| error.message)?;
+        let expires = expires
+            .parse::<u64>()
+            .map_err(|_| "expires must be a Unix time in seconds".to_string())?;
+        let root_secret = read_secret_key(secret)?;
+        let authorization = nivren::trust::authorize_publisher(
+            root_secret,
+            publisher.to_string(),
+            public.trim().to_string(),
+            repository.to_string(),
+            workflow.to_string(),
+            expires,
+        )
+        .map_err(|error| error.message)?;
+        let encoded = serde_json::to_vec_pretty(&authorization)
+            .map_err(|error| format!("cannot encode authorization: {error}"))?;
+        write_atomic(Path::new(output), &encoded).map_err(|error| error.to_string())?;
+        Ok(format!(
+            "authorized {publisher} until {expires} -> {output}"
+        ))
+    })())
+}
+
+fn trust_attest(
+    package: &str,
+    publisher: &str,
+    repository: &str,
+    workflow: &str,
+    commit: &str,
+    secret: &str,
+    output: &str,
+) -> ExitCode {
+    trust_result((|| {
+        let package_bytes =
+            fs::read(package).map_err(|error| format!("cannot read package {package}: {error}"))?;
+        let publisher_secret = read_secret_key(secret)?;
+        let provenance = nivren::trust::attest_release(
+            publisher_secret,
+            &package_bytes,
+            publisher.to_string(),
+            repository.to_string(),
+            workflow.to_string(),
+            commit.to_string(),
+            unix_now()?,
+        )
+        .map_err(|error| error.message)?;
+        let encoded = serde_json::to_vec_pretty(&provenance)
+            .map_err(|error| format!("cannot encode provenance: {error}"))?;
+        write_atomic(Path::new(output), &encoded).map_err(|error| error.to_string())?;
+        Ok(format!(
+            "attested {} {} -> {output}",
+            provenance.package, provenance.version
+        ))
+    })())
+}
+
+fn trust_sign_status(input: &str, secret: &str, output: &str) -> ExitCode {
+    trust_result((|| {
+        let text = fs::read_to_string(input)
+            .map_err(|error| format!("cannot read status {input}: {error}"))?;
+        let status: nivren::trust::RegistryStatus = serde_json::from_str(&text)
+            .map_err(|error| format!("invalid registry status: {error}"))?;
+        let root_secret = read_secret_key(secret)?;
+        let signed = nivren::trust::sign_status(root_secret, status);
+        let encoded = serde_json::to_vec_pretty(&signed)
+            .map_err(|error| format!("cannot encode status: {error}"))?;
+        write_atomic(Path::new(output), &encoded).map_err(|error| error.to_string())?;
+        Ok(format!(
+            "signed generation {} -> {output}",
+            signed.generation
+        ))
+    })())
+}
+
+fn trust_sign_advisory(input: &str, secret: &str, output: &str) -> ExitCode {
+    trust_result((|| {
+        let text = fs::read_to_string(input)
+            .map_err(|error| format!("cannot read advisory {input}: {error}"))?;
+        let advisory: nivren::trust::Advisory =
+            serde_json::from_str(&text).map_err(|error| format!("invalid advisory: {error}"))?;
+        let root_secret = read_secret_key(secret)?;
+        let signed = nivren::trust::sign_advisory(root_secret, advisory);
+        let encoded = serde_json::to_vec_pretty(&signed)
+            .map_err(|error| format!("cannot encode advisory: {error}"))?;
+        write_atomic(Path::new(output), &encoded).map_err(|error| error.to_string())?;
+        Ok(format!("signed advisory {} -> {output}", signed.id))
+    })())
 }
 
 fn release_sign_channel(manifest: &str, secret: &str, output: &str) -> ExitCode {
@@ -3121,7 +3315,14 @@ fn help() {
         nivren::VERSION
     );
     println!(
-        "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>"
+        "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>
+
+Registry trust operations:
+  niv trust keygen <secret-output>
+  niv trust authorize <publisher> <publisher-key-file> <repository> <workflow> <expires-unix> <root-secret-file> <output.json>
+  niv trust attest <file.nivpkg> <publisher> <repository> <workflow> <commit> <publisher-secret-file> <output.json>
+  niv trust sign-status <status.json> <root-secret-file> <output.json>
+  niv trust sign-advisory <advisory.json> <root-secret-file> <output.json>"
     );
     println!(
         "\nTest profiles:\n  niv test --property [path]\n  niv test --compat [path]\n  niv test --fuzz-smoke [path]\n  niv test --time <unix-seconds> [path]"
