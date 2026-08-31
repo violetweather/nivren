@@ -1193,6 +1193,46 @@ fn build_aot(path: &str) -> ExitCode {
         emitted += 1;
     }
     println!("aot optimized-kernels {emitted}");
+    // When the whole top-level chunk lowers to native integer code, also emit
+    // it as one relocatable object: the exported root plus every planned
+    // function calling one another directly, no runtime callback needed.
+    if let Some(plan) = nivren::bytecode::integer_program_plan(&chunk) {
+        let functions = plan
+            .functions
+            .iter()
+            .map(|function| nivren_jit::PlanFunction {
+                parameters: function.parameters,
+                slots: function.slots,
+                operations: function.operations.clone(),
+            })
+            .collect::<Vec<_>>();
+        let root = nivren_jit::PlanRoot {
+            slots: plan.root_slots,
+            operations: plan.root_operations.clone(),
+        };
+        match nivren_jit::AotObject::compile_program(
+            "nivren_program_native",
+            &functions,
+            &root,
+            256,
+        ) {
+            Ok(bytes) => {
+                let output = directory.join(format!("program_native.{extension}"));
+                if let Err(error) = write_atomic(&output, &bytes) {
+                    eprintln!("error: cannot write {}: {error}", output.display());
+                    return ExitCode::from(73);
+                }
+                println!("aot {}", output.display());
+                println!("aot native-program 1");
+            }
+            Err(error) => {
+                eprintln!("error: cannot compile the native program ahead of time: {error}");
+                return ExitCode::from(70);
+            }
+        }
+    } else {
+        println!("aot native-program 0");
+    }
     ExitCode::SUCCESS
 }
 

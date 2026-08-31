@@ -18,9 +18,14 @@ fn assert_vm_native_equivalent(source: &str) -> Value {
         vm.as_ref().map_err(ToString::to_string)
     );
     let stats = native.native_stats();
-    assert!(stats.compilations > 0);
-    assert!(stats.executions > 0);
-    assert_eq!(stats.fallbacks, 0);
+    let jit = native.jit_stats();
+    // Whole-program plans execute native code without the control-trace
+    // tier; either tier satisfies the native guarantee.
+    assert!(stats.compilations > 0 || jit.executions > 0);
+    if stats.compilations > 0 {
+        assert!(stats.executions > 0);
+        assert_eq!(stats.fallbacks, 0);
+    }
     native_result.unwrap()
 }
 

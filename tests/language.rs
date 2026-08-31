@@ -6165,10 +6165,44 @@ fn complete_program_aot_does_not_require_an_integer_kernel() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("optimized-kernels 0"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("native-program 0"));
     let extension = if cfg!(windows) { "obj" } else { "o" };
     assert!(
         directory
             .join(format!("target/aot/program.{extension}"))
+            .is_file()
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn integer_programs_emit_a_whole_program_native_object() {
+    let directory = module_fixture("whole-program-aot");
+    fs::create_dir_all(directory.join("src")).unwrap();
+    fs::write(
+        directory.join("niv.toml"),
+        "[package]\nname = \"whole-program-aot\"\nversion = \"1.0.0\"\nentry = \"src/main.niv\"\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("src/main.niv"),
+        "define double\ntakes {\n    value is Int\n}\ngives Int\n{\n    give value * 2\n}\n\nshow(double with { value set 21 })\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_niv"))
+        .args(["build", "--aot", directory.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("native-program 1"));
+    let extension = if cfg!(windows) { "obj" } else { "o" };
+    assert!(
+        directory
+            .join(format!("target/aot/program_native.{extension}"))
             .is_file()
     );
     fs::remove_dir_all(directory).unwrap();

@@ -19,3 +19,11 @@ clang examples/aot_project/host.c examples/aot_project/target/aot/double.o -o ta
 ```
 
 The complete-program object retains Nivren's checked runtime ABI for strings, collections, closures, capabilities, resources, cancellation, managed memory, and typed failures. The kernel exports are optional optimizations; absence of a kernel never means absence of complete-program coverage.
+
+When the whole top-level program lowers to native integer code — every top-level function and the root chunk use only `Int` values, integer shapes, and planned calls — the build additionally emits `program_native.o` (`.obj` on Windows) with one export:
+
+```c
+int64_t nivren_program_native(const int64_t *slots, uint8_t *fault);
+```
+
+`slots` supplies the program's slot buffer (all zeros for a fresh run) and receives every slot's final value back on success. A nonzero `fault` byte reports checked failure: `1` overflow, `2` division by zero, `3` remainder by zero, `4` call-depth exhaustion. Planned functions are module-local and call one another directly in native code — the runtime callback is never used. The `aot native-program` line reports `1` when this object was emitted and `0` when the program is not integer-plannable; `0` never means loss of complete-program coverage.
