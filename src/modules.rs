@@ -119,7 +119,7 @@ impl Loader {
                     errors
                 })?;
                 let name = alias
-                    .or_else(|| dependency_name)
+                    .or(dependency_name)
                     .or_else(|| module_name(&resolved))
                     .ok_or_else(|| {
                         vec![NivError::new(
