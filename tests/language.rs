@@ -7653,6 +7653,59 @@ text "{million} {mask} {bits} {exponent} {unicode} {pem}"
 }
 
 #[test]
+fn use_as_names_imported_modules_explicitly() {
+    let directory = module_fixture("use-as");
+    fs::write(
+        directory.join("helper.niv"),
+        "define double takes { value is Int } gives Int { give value * 2 }\nexpose { double }",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("main.niv"),
+        "use \"helper.niv\" as tools\nshow(tools.double with { value set 21 })",
+    )
+    .unwrap();
+    let program = nivren::modules::load(&directory.join("main.niv")).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    nivren::runtime::Interpreter::new()
+        .run_bytecode(&chunk)
+        .unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn declared_gives_may_not_fall_off_the_end() {
+    let errors = nivren::check(
+        r#"
+define lucky takes { value is Int } gives Int {
+    when value > 0 {
+        give value
+    }
+}
+lucky with { value set 1 }
+"#,
+    )
+    .unwrap_err();
+    assert!(errors[0].to_string().contains("without 'give'"));
+    assert!(
+        nivren::check(
+            r#"
+define lucky takes { value is Int } gives Int {
+    when value > 0 {
+        give value
+    } otherwise {
+        give 0
+    }
+}
+lucky with { value set 1 }
+"#,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

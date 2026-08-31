@@ -677,8 +677,13 @@ impl Parser {
             TokenKind::String(path) => path,
             _ => return Err(self.error_here("expected quoted use path")),
         };
+        let alias = if self.matches(&[TokenKind::As]) {
+            Some(self.consume_identifier("expected a namespace name after 'as'")?)
+        } else {
+            None
+        };
         self.optional_semicolon();
-        Ok(Stmt::Import { path, span })
+        Ok(Stmt::Import { path, alias, span })
     }
 
     fn export_declaration(&mut self) -> Result<Stmt, NivError> {

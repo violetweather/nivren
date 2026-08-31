@@ -93,7 +93,7 @@ impl Loader {
         let mut imported_paths = HashSet::new();
         let mut program = vec![];
         for statement in parsed {
-            if let Stmt::Import { path, span } = statement {
+            if let Stmt::Import { path, alias, span } = statement {
                 let (module_path, dependency_name) =
                     self.resolve_import(&canonical, &path, span)?;
                 let resolved = module_path.canonicalize().map_err(|error| {
@@ -118,7 +118,8 @@ impl Loader {
                     }
                     errors
                 })?;
-                let name = dependency_name
+                let name = alias
+                    .or_else(|| dependency_name)
                     .or_else(|| module_name(&resolved))
                     .ok_or_else(|| {
                         vec![NivError::new(

@@ -366,6 +366,9 @@ pub enum Stmt {
     },
     Import {
         path: String,
+        /// `use "path" as name`: the namespace binding; required when the
+        /// file stem is not a usable identifier or would collide.
+        alias: Option<String>,
         span: Span,
     },
     Export {

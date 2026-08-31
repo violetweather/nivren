@@ -204,6 +204,32 @@ pub(crate) fn standard_effects() -> BTreeMap<String, Vec<String>> {
     effects
 }
 
+/// Whether executing these statements always ends in `give` (ledger row 27:
+/// a function that declares `gives` may not fall off its end into `none`).
+/// The analysis is conservative: loops and expression statements never count.
+fn always_gives(statements: &[Stmt]) -> bool {
+    statements.last().is_some_and(statement_always_gives)
+}
+
+fn statement_always_gives(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Return(_, _) => true,
+        Stmt::Block(body, _) => always_gives(body),
+        Stmt::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => statement_always_gives(then_branch) && statement_always_gives(else_branch),
+        Stmt::IfCarries {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => statement_always_gives(then_branch) && statement_always_gives(else_branch),
+        Stmt::Using { body, .. } => statement_always_gives(body),
+        _ => false,
+    }
+}
+
 /// Reports whether an expression contains a `perform` boundary anywhere, so
 /// pure-only positions such as text holes can reject it with intent.
 fn contains_perform(expression: &Expr) -> bool {
@@ -2365,6 +2391,16 @@ impl Checker {
                     },
                     *span,
                 );
+                if return_type.is_some() && !always_gives(body) {
+                    self.errors.push(NivError::new(
+                        format!(
+                            "'{name}' declares gives {} but can reach its end without 'give'; end every path with 'give'",
+                            result.name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
                 self.returns.push(result);
                 self.needs.push(needs.clone());
                 self.outside_loops("the enclosing function boundary", |checker| {
