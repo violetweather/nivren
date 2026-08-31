@@ -57,7 +57,7 @@ shape User holds {
     id is UserId
     name is String
     email is maybe String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 choice LookupProblem holds {
     case Missing
@@ -137,7 +137,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
     let errors = nivren::check("prepare request as Request { value set 1 }").unwrap_err();
     assert!(errors[0].message.contains("with"));
 
-    let errors = nivren::check("shape User holds { name is String } with Magic").unwrap_err();
+    let errors = nivren::check("shape User holds { name is String } derives Magic").unwrap_err();
     assert!(errors[0].message.contains("unknown derive 'Magic'"));
 
     let errors = nivren::check(
@@ -166,7 +166,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
             "set",
         ),
         (
-            "shape User holds { name is String } with Json, Json",
+            "shape User holds { name is String } derives Json, Json",
             "more than once",
         ),
     ] {
@@ -286,7 +286,7 @@ fn edition_four_json_schema_labels_are_parseable_and_checked() {
     let source = r#"
 shape Event holds {
     id is Int
-} with Json
+} derives Json
 
 std.json.decode with {
     schema set Event
@@ -336,7 +336,7 @@ fn edition_four_derives_are_checked_and_gate_generated_operations() {
 shape Release holds {
     name is String
     build is Int
-} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+} derives Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
 
 keep first set Release with { name set "beta" build set 4 }
 keep second set Release with { name set "beta" build set 4 }
@@ -347,7 +347,7 @@ std.json.encode(first)
     assert_eq!(eval_tree(complete), eval_vm(complete));
 
     for derive in ["Json", "Compare", "Display", "Validate", "Binary"] {
-        let source = format!("shape Unsafe holds {{ handle is NativeHandle }} with {derive}");
+        let source = format!("shape Unsafe holds {{ handle is NativeHandle }} derives {derive}");
         let errors = nivren::check(&source).unwrap_err();
         assert!(
             errors[0]
@@ -355,13 +355,13 @@ std.json.encode(first)
                 .contains(&format!("derive {derive} does not support"))
         );
     }
-    assert!(nivren::check("shape Row holds { values is [Int] } with DatabaseRow").is_err());
-    assert!(nivren::check("shape Cli holds { bytes is Bytes } with Arguments").is_err());
-    let key_errors = nivren::check("shape Id holds { value is Int } with Key").unwrap_err();
+    assert!(nivren::check("shape Row holds { values is [Int] } derives DatabaseRow").is_err());
+    assert!(nivren::check("shape Cli holds { bytes is Bytes } derives Arguments").is_err());
+    let key_errors = nivren::check("shape Id holds { value is Int } derives Key").unwrap_err();
     assert!(key_errors[0].message.contains("must also derive Compare"));
 
     let missing_json = r#"
-shape Visible holds { value is Int } with Display
+shape Visible holds { value is Int } derives Display
 std.json.encode(Visible with { value set 1 })
 "#;
     let errors = nivren::check(missing_json).unwrap_err();
@@ -374,7 +374,7 @@ fn edition_four_generated_derive_methods_run_in_both_engines() {
 shape Release holds {
     name is String
     build is Int
-} with Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
+} derives Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
 
 define verify
 gives String or String
@@ -2730,11 +2730,11 @@ greet with {
 
 #[test]
 fn edition_four_formatter_erases_equivalent_line_layout_choices() {
-    let compact = r#"shape User holds { name is String } with Json define greet takes { user is User } gives String { give user.name } greet with { user set User with { name set "Mira" } }"#;
+    let compact = r#"shape User holds { name is String } derives Json define greet takes { user is User } gives String { give user.name } greet with { user set User with { name set "Mira" } }"#;
     let vertical = r#"
 shape User holds {
     name is String
-} with Json
+} derives Json
 
 define greet
 takes {
@@ -3495,7 +3495,7 @@ define verify() gives Result<Int, String> {
     keep valid = std.crypto.hmac_sha256_verify(key, message, tag) or give
     keep invalid = std.crypto.hmac_sha256_verify(key, std.bytes.from_string("other"), tag) or give
     assert(valid, "valid HMAC")
-    assert(!invalid, "invalid HMAC")
+    assert(not invalid, "invalid HMAC")
     give ok(std.bytes.length(tag))
 }
 
@@ -3525,7 +3525,7 @@ define passwords() gives Result<Bool, String> {
     keep encoded = std.crypto.password_hash("correct horse", salt, 8192, 1, 1) or give
     keep valid = std.crypto.password_verify("correct horse", encoded) or give
     keep invalid = std.crypto.password_verify("wrong", encoded) or give
-    give ok(valid and !invalid)
+    give ok(valid and not invalid)
 }
 
 passwords()
@@ -3628,7 +3628,7 @@ define verify_vector() gives Result<Bool, String> {
     assert(signature == expected_signature, "RFC 8032 signature")
     keep valid = std.crypto.ed25519_verify(public, message, signature) or give
     keep changed = std.crypto.ed25519_verify(public, std.bytes.from_string("changed"), signature) or give
-    give ok(valid and !changed)
+    give ok(valid and not changed)
 }
 verify_vector()
 "#;
@@ -4067,7 +4067,7 @@ define probe() gives Result<Int, String> needs Network {{
             Push(values) => no,
             Null => no
         }}
-        when !next {{ give ok(-1) }}
+        when not next {{ give ok(-1) }}
         give ok(count)
     }}
 }}
@@ -5178,12 +5178,12 @@ define stress(path: String) gives Result<Int, String> needs FileRead, Network {{
         using file set opened_file {{
             keep closed = std.files.close(file) or give
             keep rejected = choose std.files.read_from(file, 1) {{ Ok(value) => no, Err(problem) => yes }}
-            when !rejected {{ give err("closed file accepted a read") }}
+            when not rejected {{ give err("closed file accepted a read") }}
         }}
         keep opened_stream = std.net.connect("127.0.0.1", {port}, 2.0) or give
         using connection set opened_stream {{
             keep rejected = choose std.net.read_exact_bytes(connection, 1, 2.0) {{ Ok(value) => no, Err(problem) => yes }}
-            when !rejected {{ give err("closed peer produced an exact byte") }}
+            when not rejected {{ give err("closed peer produced an exact byte") }}
         }}
         index = index + 1
     }}
@@ -5246,7 +5246,7 @@ fn bytecode_vm_matches_the_tree_interpreter() {
     let programs = [
         "2 + 3 * 4",
         "change n = 0; repeat (n < 5) { n = n + 1; } n",
-        "when yes and !no { 42 } otherwise { 0 }",
+        "when yes and not no { 42 } otherwise { 0 }",
         "define outer(x: Int) { define inner(y: Int) { give x + y; } give inner; } outer(2)(40)",
         "keep values = append([1, 2], 3); values[2]",
         "keep missing: String? = none; missing ?? \"fallback\"",
@@ -7133,7 +7133,7 @@ fn portable_plans_encode_and_decode_across_programs_in_both_engines() {
 shape FetchPlan holds {
     address is String
     attempts is Int
-} with Json
+} derives Json
 define round_trip takes { } gives String or String {
     prepare request as FetchPlan with { address set "example.com", attempts set 3 }
     keep encoded set std.plans.encode(request) or give
@@ -7155,11 +7155,11 @@ fn plan_decoding_rejects_mismatched_shapes() {
     let source = r#"
 shape FetchPlan holds {
     address is String
-} with Json
+} derives Json
 shape OtherPlan holds {
     address is String
     extra is Int
-} with Json
+} derives Json
 define attempt takes { } gives String or String {
     prepare request as FetchPlan with { address set "example.com" }
     keep encoded set std.plans.encode(request) or give
@@ -7400,7 +7400,7 @@ fn text_holes_render_display_shapes_and_datetimes_in_both_engines() {
 shape Point holds {
     x is Int
     y is Int
-} with Display
+} derives Display
 keep origin set Point with { x set 1, y set 2 }
 text "at {origin}"
 "#;

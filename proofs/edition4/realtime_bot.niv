@@ -2,7 +2,7 @@ shape MessagePlan holds {
     endpoint is String
     body is String
     timeout is Float
-} with Json, Display, Validate
+} derives Json, Display, Validate
 
 define send_message
 takes {

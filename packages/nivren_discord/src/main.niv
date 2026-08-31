@@ -1,42 +1,42 @@
 shape Message holds {
     content is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape Command holds {
     name is String
     description is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape RetryPolicy holds {
     maximum_attempts is Int
     base_delay is Float
     maximum_delay is Float
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape RetryDecision holds {
     retry is Bool
     delay is Float
     reason is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape GatewayPlan holds {
     endpoint is String
     intents is Int
     timeout is Float
     maximum_message is Int
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape Identify holds {
     token is String
     intents is Int
-} with Json, Display, Validate
+} derives Json, Display, Validate
 
 shape GatewayEvent holds {
     operation is Int
     sequence is maybe Int
     event is maybe String
     data is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 define message_body
 takes {
@@ -143,7 +143,7 @@ takes {
 }
 gives GatewayPlan or String
 {
-    when !std.text.starts_with with { value set plan.endpoint prefix set "wss://" } {
+    when not std.text.starts_with with { value set plan.endpoint prefix set "wss://" } {
         give err("Discord Gateway endpoint must use wss://")
     }
     when plan.intents < 0 or plan.intents > 2147483647 {

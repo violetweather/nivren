@@ -11,7 +11,7 @@
   },
   {
     "name": "nominal-shape-and-prepare",
-    "source": "type UserId is Int shape Query holds { id is UserId limit is Int } with Display, Validate prepare query as Query with { id set UserId with { value set 7 } limit set 10 } show((perform query).limit)",
+    "source": "type UserId is Int shape Query holds { id is UserId limit is Int } derives Display, Validate prepare query as Query with { id set UserId with { value set 7 } limit set 10 } show((perform query).limit)",
     "arguments": [
       "run",
       "{source}"
@@ -41,7 +41,7 @@
   },
   {
     "name": "unknown-derive",
-    "source": "shape User holds { name is String } with Magic",
+    "source": "shape User holds { name is String } derives Magic",
     "arguments": [
       "check",
       "{source}"

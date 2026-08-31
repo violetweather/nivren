@@ -42,7 +42,7 @@ gives String or String
     keep message set signing_input with { header set parts[0] payload set parts[1] } or give
     keep tag set std.encoding.base64url_decode with { source set parts[2] } or give
     keep valid set std.crypto.hmac_sha256_verify with { key set secret message set std.bytes.from_string with { value set message } expected set tag } or give
-    when !valid { give err("JWT signature is invalid") }
+    when not valid { give err("JWT signature is invalid") }
     keep payload_bytes set std.encoding.base64url_decode with { source set parts[1] } or give
     keep payload set std.bytes.to_string with { bytes set payload_bytes } or give
     give std.json.compact with { source set payload }
@@ -72,7 +72,7 @@ gives String or String
     keep message set signing_input with { header set parts[0] payload set parts[1] } or give
     keep signature set std.encoding.base64url_decode with { source set parts[2] } or give
     keep valid set std.crypto.ed25519_verify with { public_key set public_key message set std.bytes.from_string with { value set message } signature set signature } or give
-    when !valid { give err("JWT signature is invalid") }
+    when not valid { give err("JWT signature is invalid") }
     keep payload_bytes set std.encoding.base64url_decode with { source set parts[1] } or give
     keep payload set std.bytes.to_string with { bytes set payload_bytes } or give
     give std.json.compact with { source set payload }

@@ -18,7 +18,7 @@ define expect_no
 takes { condition is Bool label is String }
 gives Null or String
 {
-    when !condition { give ok(none) }
+    when not condition { give ok(none) }
     give err(label + ": expected no")
 }
 

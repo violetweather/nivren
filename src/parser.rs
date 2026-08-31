@@ -427,12 +427,20 @@ impl Parser {
     }
 
     fn derive_list(&mut self) -> Result<Vec<String>, NivError> {
-        if !self.matches(&[TokenKind::With]) {
+        // `derives Json, Compare` — `with` is reserved for labeled values
+        // and preparation; derive lists own their word (ledger row 11).
+        if !matches!(&self.peek().kind, TokenKind::Identifier(word) if word == "derives") {
+            if self.check(&TokenKind::With) {
+                return Err(self.error_here(
+                    "a derive list opens with 'derives'; 'with' introduces labeled values",
+                ));
+            }
             return Ok(vec![]);
         }
+        self.advance();
         let mut derives = vec![];
         loop {
-            let derive = self.consume_identifier("expected a derive name after 'with'")?;
+            let derive = self.consume_identifier("expected a derive name after 'derives'")?;
             const BUILT_INS: &[&str] = &[
                 "Json",
                 "Compare",

@@ -22,7 +22,7 @@ gives String or String
         when byte != 0 { change nonzero to yes }
         change index to index + 1
     }
-    when !nonzero { give err(label + " must not be all zero") }
+    when not nonzero { give err(label + " must not be all zero") }
     give ok(value)
 }
 

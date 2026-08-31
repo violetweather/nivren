@@ -1,7 +1,7 @@
 shape Sealed holds {
     nonce is Bytes
     body is Bytes
-} with Compare
+} derives Compare
 
 define import_key
 takes { bytes is Bytes }

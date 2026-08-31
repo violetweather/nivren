@@ -121,7 +121,7 @@
   },
   {
     "name": "portable-plan-round-trip",
-    "source": "shape FetchPlan holds {\n    address is String\n    attempts is Int\n} with Json\ndefine round_trip takes { } gives String or String {\n    prepare request as FetchPlan with { address set \"example.com\", attempts set 3 }\n    keep encoded set std.plans.encode(request) or give\n    keep decoded set std.plans.decode(FetchPlan, encoded) or give\n    give ok(decoded.address)\n}\nshow(choose round_trip with {} {\n    case Ok carries value => value\n    case Err carries message => message\n})",
+    "source": "shape FetchPlan holds {\n    address is String\n    attempts is Int\n} derives Json\ndefine round_trip takes { } gives String or String {\n    prepare request as FetchPlan with { address set \"example.com\", attempts set 3 }\n    keep encoded set std.plans.encode(request) or give\n    keep decoded set std.plans.decode(FetchPlan, encoded) or give\n    give ok(decoded.address)\n}\nshow(choose round_trip with {} {\n    case Ok carries value => value\n    case Err carries message => message\n})",
     "arguments": [
       "run",
       "{source}"

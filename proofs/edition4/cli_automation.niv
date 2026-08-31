@@ -1,7 +1,7 @@
 shape CopyPlan holds {
     source is String
     destination is String
-} with Display, Validate, Arguments
+} derives Display, Validate, Arguments
 
 define copy_configuration
 takes {

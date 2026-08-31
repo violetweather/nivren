@@ -30,7 +30,7 @@ define authorization_url
 takes { endpoint is String client_id is String redirect_uri is String scope is String state is String nonce is String verifier is String }
 gives Authorization or String
 {
-    when !std.text.starts_with with { value set endpoint prefix set "https://" } { give err("OIDC authorization endpoint must use HTTPS") }
+    when not std.text.starts_with with { value set endpoint prefix set "https://" } { give err("OIDC authorization endpoint must use HTTPS") }
     when len(std.text.split with { value set endpoint separator set "?" maximum set 2 } or give) != 1 { give err("OIDC authorization endpoint must not contain a query") }
     when client_id == "" or redirect_uri == "" or scope == "" { give err("OIDC client, redirect URI, and scope must not be empty") }
     when len(state) < 16 or len(state) > 256 or len(nonce) < 16 or len(nonce) > 256 { give err("OIDC state and nonce must each contain 16 through 256 characters") }

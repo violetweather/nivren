@@ -33,7 +33,7 @@ gives String or String
         keep is_letter set letter with { character set character }
         keep is_digit set digit with { character set character }
         keep allowed set is_letter or is_digit or character == "_"
-        when !allowed { give err("SQL identifier contains an unsafe character") }
+        when not allowed { give err("SQL identifier contains an unsafe character") }
         when index == 0 and is_digit { give err("SQL identifier cannot start with a digit") }
         change index to index + 1
     }

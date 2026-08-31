@@ -15,7 +15,7 @@ gives String or String
         change escaped set character
         when character == "\\" { change escaped to "\\\\" }
         when character == "\n" { change escaped to "\\n" }
-        when character == "\"" and !help { change escaped to "\\\"" }
+        when character == "\"" and not help { change escaped to "\\\"" }
         change output to join with { left set output right set escaped } or give
     }
     give ok(output)

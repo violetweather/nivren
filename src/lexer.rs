@@ -161,12 +161,15 @@ impl Lexer {
             '*' => self.add(TokenKind::Star),
             '%' => self.add(TokenKind::Percent),
             '!' => {
-                let kind = if self.matches('=') {
-                    TokenKind::BangEqual
+                if self.matches('=') {
+                    self.add(TokenKind::BangEqual);
                 } else {
-                    TokenKind::Bang
-                };
-                self.add(kind);
+                    self.errors.push(NivError::new(
+                        "negation is spelled 'not'",
+                        self.line,
+                        self.start_column,
+                    ));
+                }
             }
             '=' => {
                 let kind = if self.matches('=') {
@@ -505,6 +508,7 @@ impl Lexer {
             "in" => TokenKind::In,
             "gives" => TokenKind::Arrow,
             "and" => TokenKind::And,
+            "not" => TokenKind::Bang,
             "or" => TokenKind::Or,
             _ => TokenKind::Identifier(text),
         };

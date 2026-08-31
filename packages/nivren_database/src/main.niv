@@ -5,7 +5,7 @@ shape PoolConfig holds {
     maximum is Int
     connect_timeout is Float
     idle_timeout is Float
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape DriverRequest holds {
     operation is String
@@ -13,18 +13,18 @@ shape DriverRequest holds {
     parameters is [String]
     maximum_rows is Int
     timeout is Float
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape Migration holds {
     version is Int
     name is String
     statement is String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 shape QueryPage holds {
     rows is [String]
     next_cursor is maybe String
-} with Json, Compare, Display, Validate
+} derives Json, Compare, Display, Validate
 
 define validate_pool
 takes {
