@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "nivren"
-version = "0.10.0-beta.9"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "nivren-database-host"
-version = "0.10.0-beta.9"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1049,14 +1049,14 @@ dependencies = [
 
 [[package]]
 name = "nivren-ffi"
-version = "0.10.0-beta.9"
+version = "1.0.0"
 dependencies = [
  "nivren",
 ]
 
 [[package]]
 name = "nivren-jit"
-version = "0.10.0-beta.9"
+version = "1.0.0"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1068,14 +1068,14 @@ dependencies = [
 
 [[package]]
 name = "nivren-native"
-version = "0.10.0-beta.9"
+version = "1.0.0"
 dependencies = [
  "libloading",
 ]
 
 [[package]]
 name = "nivren-wasm"
-version = "0.10.0-beta.9"
+version = "1.0.0"
 dependencies = [
  "nivren",
 ]

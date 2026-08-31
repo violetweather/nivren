@@ -1,6 +1,6 @@
 # Nivren
 
-Nivren is an intent-first application programming language focused on safety, clarity, visible effects, and a coherent path from a first script to production software. This repository contains the Edition 5 draft development line on the road to 1.0.
+Nivren is an intent-first application programming language focused on safety, clarity, visible effects, and a coherent path from a first script to production software. This repository contains Nivren 1.0: the frozen Edition 5 language, stable, with an unconditional compatibility promise from this release onward.
 
 > **Edition 5 is a breaking update.** Edition 2, 3, and 4 sources are no longer supported surfaces: legacy `=` bindings, `:` type annotations, caseless `choose` arms, positional protocol members, and the other retired forms now stop with diagnostics that name the Edition 5 spelling. There are no compatibility fallbacks. See `spec/LANGUAGE-5-DRAFT.md` for the final grammar and `spec/EDITION-5-FIX-LEDGER.md` for every removal and its rationale.
 

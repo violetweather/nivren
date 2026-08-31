@@ -917,7 +917,8 @@ fn release_check(path: &str) -> ExitCode {
     match nivren::release::audit(Path::new(path), now) {
         Ok(audit) if audit.blockers.is_empty() => {
             println!(
-                "Edition 4 {} release gate passed: {}/{} evidence gates, {} conformance cases",
+                "Edition {} {} release gate passed: {}/{} evidence gates, {} conformance cases",
+                audit.edition,
                 audit.release_track,
                 audit.evidence_passed,
                 audit.evidence_required,
@@ -926,7 +927,10 @@ fn release_check(path: &str) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(audit) => {
-            eprintln!("Edition 4 {} release gate blocked:", audit.release_track);
+            eprintln!(
+                "Edition {} {} release gate blocked:",
+                audit.edition, audit.release_track
+            );
             for blocker in audit.blockers {
                 eprintln!("- {blocker}");
             }

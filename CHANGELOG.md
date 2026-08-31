@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.0
+
+Nivren 1.0: the frozen Edition 5 language, stable. The finality clause
+holds — no new syntax, keywords, operators, or capability names, ever —
+and from this release the compatibility promise is unconditional:
+Edition 5 source runs unchanged on every later Nivren.
+
+The 1.0 bar is internal evidence, stated without embellishment: the
+dual-engine test suites, fourteen Edition 5 conformance vectors,
+continuous fuzzing, six-platform CI with reproducible artifacts, and
+machine-checked release receipts (`niv release check`). An independent
+security audit and signing-recovery drill are 1.1 gates, not 1.0
+claims. The 1.0.x line carries fixes only; new work ships as 1.1 betas.
+
+Highlights over the 0.10 beta line: the Edition 5 engine (escape-aware
+fast slots, native compilation of whole integer programs with direct
+calls) that put Nivren ahead of Node.js on every published benchmark
+row, and typed problems — every standard-library failure carries the
+builtin Problem shape.
+
 ## Unreleased
 
 - **Edition 5 is a breaking update.** Edition 2, 3, and 4 sources are no longer supported surfaces: the Edition 5 fix ledger's accepted repairs land directly, with no compatibility fallbacks. Programs written for earlier editions must migrate their spellings. The retained Edition 2/3 black-box conformance suites are removed with this policy.
