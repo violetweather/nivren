@@ -21,8 +21,8 @@ class ReleasePackagerTests(unittest.TestCase):
             first = root / "first.zip"
             second = root / "second.zip"
 
-            package_release.package(binary, "0.10.0-beta.7", "linux-x64", first)
-            package_release.package(binary, "0.10.0-beta.7", "linux-x64", second)
+            package_release.package(binary, "0.10.0-beta.8", "linux-x64", first)
+            package_release.package(binary, "0.10.0-beta.8", "linux-x64", second)
 
             self.assertEqual(
                 hashlib.sha256(first.read_bytes()).digest(),
@@ -33,33 +33,33 @@ class ReleasePackagerTests(unittest.TestCase):
                 names = archive.namelist()
                 self.assertEqual(names, sorted(names, key=lambda name: name.encode("utf-8")))
                 executable = archive.getinfo(
-                    "nivren-0.10.0-beta.7-linux-x64/bin/niv"
+                    "nivren-0.10.0-beta.8-linux-x64/bin/niv"
                 )
                 self.assertEqual((executable.external_attr >> 16) & 0o777, 0o755)
                 installer = archive.getinfo(
-                    "nivren-0.10.0-beta.7-linux-x64/install/install.sh"
+                    "nivren-0.10.0-beta.8-linux-x64/install/install.sh"
                 )
                 self.assertEqual((installer.external_attr >> 16) & 0o777, 0o755)
                 for document in package_release.DOCUMENTS:
                     self.assertIn(
-                        f"nivren-0.10.0-beta.7-linux-x64/{document}", names
+                        f"nivren-0.10.0-beta.8-linux-x64/{document}", names
                     )
                 self.assertIn(
-                    "nivren-0.10.0-beta.7-linux-x64/licenses/INDEX.txt", names
+                    "nivren-0.10.0-beta.8-linux-x64/licenses/INDEX.txt", names
                 )
                 self.assertIn(
-                    "nivren-0.10.0-beta.7-linux-x64/SBOM.spdx.json", names
+                    "nivren-0.10.0-beta.8-linux-x64/SBOM.spdx.json", names
                 )
                 self.assertIn(
-                    "nivren-0.10.0-beta.7-linux-x64/crates/nivren-ffi/include/nivren.h",
+                    "nivren-0.10.0-beta.8-linux-x64/crates/nivren-ffi/include/nivren.h",
                     names,
                 )
                 self.assertIn(
-                    "nivren-0.10.0-beta.7-linux-x64/sdk/mobile/ios/NivrenMobile.swift",
+                    "nivren-0.10.0-beta.8-linux-x64/sdk/mobile/ios/NivrenMobile.swift",
                     names,
                 )
                 self.assertIn(
-                    "nivren-0.10.0-beta.7-linux-x64/sdk/mobile/android/nivren_mobile_jni.c",
+                    "nivren-0.10.0-beta.8-linux-x64/sdk/mobile/android/nivren_mobile_jni.c",
                     names,
                 )
                 self.assertTrue(
