@@ -7453,6 +7453,33 @@ first
 }
 
 #[test]
+fn declared_payload_limits_bound_text_literals_in_both_engines() {
+    let source = r#"
+keep chunk set "0123456789abcdef"
+text "{chunk}{chunk}{chunk}"
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .with_payload_limit(32)
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(error.to_string().contains("payload limit"));
+    let error = nivren::runtime::Interpreter::new()
+        .with_payload_limit(32)
+        .run(&program)
+        .unwrap_err();
+    assert!(error.to_string().contains("payload limit"));
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&chunk)
+            .unwrap(),
+        Value::String("0123456789abcdef".repeat(3))
+    );
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

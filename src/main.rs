@@ -672,8 +672,13 @@ fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
     } else {
         interpreter
     };
-    if let Some(limit) = manifest.memory_limit {
+    let interpreter = if let Some(limit) = manifest.memory_limit {
         interpreter.with_memory_limit(limit)
+    } else {
+        interpreter
+    };
+    if let Some(limit) = manifest.payload_limit {
+        interpreter.with_payload_limit(limit)
     } else {
         interpreter
     }
@@ -842,6 +847,25 @@ fn authority_report(path: &str) -> ExitCode {
     match nivren::package::installed_authority_lockfile(&manifest) {
         Ok(contents) => {
             print!("{contents}");
+            println!("declared limits:");
+            println!(
+                "  instructions = {}",
+                manifest
+                    .instruction_limit
+                    .map_or("default".to_string(), |limit| limit.to_string())
+            );
+            println!(
+                "  memory_bytes = {}",
+                manifest
+                    .memory_limit
+                    .map_or("default".to_string(), |limit| limit.to_string())
+            );
+            println!(
+                "  payload_bytes = {}",
+                manifest
+                    .payload_limit
+                    .map_or("default (16777216)".to_string(), |limit| limit.to_string())
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {

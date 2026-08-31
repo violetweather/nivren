@@ -23,6 +23,9 @@ pub struct Manifest {
     pub unsafe_modules: BTreeSet<String>,
     pub instruction_limit: Option<u64>,
     pub memory_limit: Option<u64>,
+    /// Declared `payload_bytes` limit: the Edition 5 named override for the
+    /// 16 MiB default payload cap, honored by interpreter-owned bounds.
+    pub payload_limit: Option<u64>,
 }
 
 impl Manifest {
@@ -55,6 +58,7 @@ impl Manifest {
         let mut unsafe_modules = BTreeSet::new();
         let mut instruction_limit = None;
         let mut memory_limit = None;
+        let mut payload_limit = None;
         for (index, raw_line) in source.lines().enumerate() {
             let line_number = index + 1;
             let line = raw_line.split('#').next().unwrap_or("").trim();
@@ -210,7 +214,7 @@ impl Manifest {
                     ));
                 }
             } else {
-                if !matches!(key, "instructions" | "memory_bytes") {
+                if !matches!(key, "instructions" | "memory_bytes" | "payload_bytes") {
                     return Err(project_error(format!("unknown limit '{key}'"), line_number));
                 }
                 let parsed = value
@@ -220,10 +224,18 @@ impl Manifest {
                     .ok_or_else(|| {
                         project_error(format!("{key} must be a positive integer"), line_number)
                     })?;
+                if key == "payload_bytes" && !(1_024..=268_435_456).contains(&parsed) {
+                    return Err(project_error(
+                        "payload_bytes must be from 1024 through 268435456",
+                        line_number,
+                    ));
+                }
                 let slot = if key == "instructions" {
                     &mut instruction_limit
-                } else {
+                } else if key == "memory_bytes" {
                     &mut memory_limit
+                } else {
+                    &mut payload_limit
                 };
                 if slot.replace(parsed).is_some() {
                     return Err(project_error(
@@ -279,6 +291,7 @@ impl Manifest {
             unsafe_modules,
             instruction_limit,
             memory_limit,
+            payload_limit,
         })
     }
 
@@ -335,13 +348,19 @@ impl Manifest {
                 output.push_str(&format!("{module} = \"allow\"\n"));
             }
         }
-        if self.instruction_limit.is_some() || self.memory_limit.is_some() {
+        if self.instruction_limit.is_some()
+            || self.memory_limit.is_some()
+            || self.payload_limit.is_some()
+        {
             output.push_str("\n[limits]\n");
             if let Some(instructions) = self.instruction_limit {
                 output.push_str(&format!("instructions = \"{instructions}\"\n"));
             }
             if let Some(memory) = self.memory_limit {
                 output.push_str(&format!("memory_bytes = \"{memory}\"\n"));
+            }
+            if let Some(payload) = self.payload_limit {
+                output.push_str(&format!("payload_bytes = \"{payload}\"\n"));
             }
         }
         output

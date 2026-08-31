@@ -969,6 +969,9 @@ pub struct Interpreter {
     /// Promises active in the running dynamic extent; effects check them
     /// again at the capability gate so even unchecked bytecode honors them.
     active_promises: Vec<crate::ast::PromiseClause>,
+    /// The declared `payload_bytes` limit for interpreter-owned bounds such
+    /// as text-literal construction; the frozen default is 16 MiB.
+    payload_limit: usize,
     native_execution_depth: usize,
     native_compilations: usize,
     native_executions: usize,
@@ -1153,6 +1156,7 @@ impl Interpreter {
             effect_recorder: None,
             effect_replay: None,
             active_promises: vec![],
+            payload_limit: MAX_TEXT_LITERAL_BYTES,
             native_execution_depth: 0,
             native_compilations: 0,
             native_executions: 0,
@@ -1188,6 +1192,13 @@ impl Interpreter {
     /// child tasks inherit cancellation through their ordinary task lifecycle.
     pub fn with_cancellation(mut self, cancellation: Arc<AtomicBool>) -> Self {
         self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// Applies the root manifest's declared `payload_bytes` limit to
+    /// interpreter-owned payload bounds.
+    pub fn with_payload_limit(mut self, bytes: u64) -> Self {
+        self.payload_limit = usize::try_from(bytes).unwrap_or(usize::MAX).max(1);
         self
     }
 
@@ -1978,8 +1989,8 @@ impl Interpreter {
                             output.push_str(&self.text_hole_string(&value, *span)?);
                         }
                     }
-                    if output.len() > MAX_TEXT_LITERAL_BYTES {
-                        return Err(text_too_long_error(*span));
+                    if output.len() > self.payload_limit {
+                        return Err(text_too_long_error(self.payload_limit, *span));
                     }
                 }
                 Ok(Value::String(output))
@@ -4042,8 +4053,8 @@ impl Interpreter {
                 let mut output = String::new();
                 for value in &values {
                     output.push_str(&self.text_hole_string(value, item.span)?);
-                    if output.len() > MAX_TEXT_LITERAL_BYTES {
-                        return Err(text_too_long_error(item.span));
+                    if output.len() > self.payload_limit {
+                        return Err(text_too_long_error(self.payload_limit, item.span));
                     }
                 }
                 stack.push(Value::String(output));
@@ -5517,9 +5528,11 @@ const MAX_TEXT_LITERAL_BYTES: usize = 16 * 1024 * 1024;
 const TEXT_HOLE_CONTRACT: &str =
     "give text, a number, a boolean, a date/time, or a shape that derives Display";
 
-fn text_too_long_error(span: Span) -> NivError {
+fn text_too_long_error(limit: usize, span: Span) -> NivError {
     NivError::new(
-        "a text literal grew beyond 16 MiB; build large output through bounded streams instead",
+        format!(
+            "a text literal grew beyond the declared {limit}-byte payload limit; build large output through bounded streams or raise payload_bytes under [limits]"
+        ),
         span.line,
         span.column,
     )
