@@ -1,11 +1,11 @@
 define count
-gives Int or String
+gives Int or Problem
 needs Task
 {
     keep counter set std.atomics.create with { value set 0 }
 
     define increment
-    gives Nothing or String
+    gives Nothing or Problem
     {
         change index set 0
         repeat index < 100 {

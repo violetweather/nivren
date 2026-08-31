@@ -7,7 +7,7 @@ define first_event
 takes {
     path is String
 }
-gives maybe Event or String
+gives maybe Event or Problem
 needs FileRead
 {
     keep opened set std.files.open_read with { path set path } or give

@@ -2,7 +2,7 @@ define count_protocol_lines
 takes {
     stream is TcpStream
 }
-gives Int or String
+gives Int or Problem
 needs Network
 {
     keep lines set std.iter.tcp_lines with {

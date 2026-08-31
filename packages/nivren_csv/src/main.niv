@@ -1,26 +1,26 @@
 define decode
 takes { source is String headers is [String] maximum_rows is Int }
-gives [Map<String, String>] or String
+gives [Map<String, String>] or Problem
 { give std.csv.decode with { source set source headers set headers delimiter set "," maximum_rows set maximum_rows } }
 
 define encode
 takes { rows is [Map<String, String>] headers is [String] }
-gives String or String
+gives String or Problem
 { give std.csv.encode with { rows set rows headers set headers delimiter set "," } }
 
 define decode_with
 takes { source is String headers is [String] delimiter is String maximum_rows is Int }
-gives [Map<String, String>] or String
+gives [Map<String, String>] or Problem
 { give std.csv.decode with { source set source headers set headers delimiter set delimiter maximum_rows set maximum_rows } }
 
 define encode_with
 takes { rows is [Map<String, String>] headers is [String] delimiter is String }
-gives String or String
+gives String or Problem
 { give std.csv.encode with { rows set rows headers set headers delimiter set delimiter } }
 
 define read
 takes { path is String headers is [String] maximum_rows is Int }
-gives [Map<String, String>] or String
+gives [Map<String, String>] or Problem
 needs FileRead
 {
     keep source set perform std.files.read with { path set path } or give
@@ -29,7 +29,7 @@ needs FileRead
 
 define write
 takes { path is String rows is [Map<String, String>] headers is [String] }
-gives Nothing or String
+gives Nothing or Problem
 needs FileWrite
 {
     keep source set encode with { rows set rows headers set headers } or give

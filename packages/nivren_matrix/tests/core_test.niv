@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define works
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep left set main.matrix with { rows set 2 columns set 2 values set [1.0, 2.0, 3.0, 4.0] } or give
     keep right set main.matrix with { rows set 2 columns set 2 values set [5.0, 6.0, 7.0, 8.0] } or give

@@ -2,7 +2,7 @@ define load
 takes {
     path is String
 }
-gives String or String
+gives String or Problem
 needs FileRead, Task
 {
     keep queued set std.files.read_async with { path set path maximum set 1048576 } or give
@@ -12,5 +12,5 @@ needs FileRead, Task
 keep contents set load with { path set "notes.txt" }
 show(choose contents {
     case Ok carries text => text
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 })

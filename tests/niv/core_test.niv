@@ -33,11 +33,11 @@ each value within [2, 4, 6] {
 assert(iteratedTotal == 12, "each should iterate array elements")
 assert(1.5 + 2.5 == 4.0, "Float arithmetic should remain distinct from Int arithmetic")
 
-define checkedValue takes { valid is Bool } gives Result<Int, String> {
+define checkedValue takes { valid is Bool } gives Result<Int, Problem> {
     when valid { give ok(42) }
-    give err("invalid")
+    give err(std.problems.create("app", "invalid"))
 }
-keep checked is Result<Int, String> set checkedValue(yes)
+keep checked is Result<Int, Problem> set checkedValue(yes)
 keep checkedNumber is Int set choose checked {
     case Ok carries value => value,
     case Err carries message => 0

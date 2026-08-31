@@ -2,7 +2,7 @@ define random_key
 takes {
     length is Int
 }
-gives Bytes or String
+gives Bytes or Problem
 needs Random
 {
     give perform std.crypto.random_bytes with { length set length }
@@ -12,7 +12,7 @@ define hash_password
 takes {
     password is String
 }
-gives String or String
+gives String or Problem
 needs Random
 {
     keep salt set perform random_key with { length set 16 } or give
@@ -24,7 +24,7 @@ takes {
     password is String
     salt is Bytes
 }
-gives String or String
+gives String or Problem
 {
     give std.crypto.password_hash with { password set password salt set salt memory_kib set 19456 iterations set 2 lanes set 1 }
 }
@@ -34,7 +34,7 @@ takes {
     password is String
     encoded is String
 }
-gives Bool or String
+gives Bool or Problem
 {
     give std.crypto.password_verify with { password set password encoded set encoded }
 }

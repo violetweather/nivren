@@ -9,7 +9,7 @@ takes {
     context is Bytes
     plaintext is Bytes
 }
-gives Protected or String
+gives Protected or Problem
 needs Random
 {
     keep nonce set std.crypto.random_bytes with { length set 12 } or give
@@ -28,7 +28,7 @@ takes {
     context is Bytes
     protected is Protected
 }
-gives Bytes or String
+gives Bytes or Problem
 {
     give std.crypto.decrypt with {
         key set key

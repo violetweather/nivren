@@ -2,7 +2,7 @@ shape Canvas holds { width is Int height is Int elements is [String] }
 
 define join
 takes { parts is [String] }
-gives String or String
+gives String or Problem
 {
     change value set ""
     each part within parts { change value to std.text.concat with { left set value right set part } or give }
@@ -11,9 +11,9 @@ gives String or String
 
 define escape
 takes { value is String }
-gives String or String
+gives String or Problem
 {
-    when len(value) > 1048576 { give err("SVG text exceeds 1 MiB") }
+    when len(value) > 1048576 { give err(std.problems.create("svg", "SVG text exceeds 1 MiB")) }
     change output set ""
     each character within value {
         change escaped set character
@@ -28,26 +28,26 @@ gives String or String
 
 define canvas
 takes { width is Int height is Int }
-gives Canvas or String
+gives Canvas or Problem
 {
-    when width <= 0 or height <= 0 or width > 32768 or height > 32768 { give err("SVG dimensions must be 1 through 32768") }
+    when width <= 0 or height <= 0 or width > 32768 or height > 32768 { give err(std.problems.create("svg", "SVG dimensions must be 1 through 32768")) }
     give ok(Canvas(width, height, []))
 }
 
 define add
 takes { value is Canvas element is String }
-gives Canvas or String
+gives Canvas or Problem
 {
-    when len(value.elements) >= 100000 { give err("SVG exceeds 100000 elements") }
-    when len(element) > 1048576 { give err("SVG element exceeds 1 MiB") }
+    when len(value.elements) >= 100000 { give err(std.problems.create("svg", "SVG exceeds 100000 elements")) }
+    when len(element) > 1048576 { give err(std.problems.create("svg", "SVG element exceeds 1 MiB")) }
     give ok(Canvas(value.width, value.height, append with { values set value.elements value set element }))
 }
 
 define rect
 takes { value is Canvas x is Int y is Int width is Int height is Int fill is String }
-gives Canvas or String
+gives Canvas or Problem
 {
-    when width < 0 or height < 0 { give err("rectangle dimensions must not be negative") }
+    when width < 0 or height < 0 { give err(std.problems.create("svg", "rectangle dimensions must not be negative")) }
     keep color set escape with { value set fill } or give
     keep element set join with { parts set ["<rect x=\"", std.int.format with { value set x }, "\" y=\"", std.int.format with { value set y }, "\" width=\"", std.int.format with { value set width }, "\" height=\"", std.int.format with { value set height }, "\" fill=\"", color, "\"/>"] } or give
     give add with { value set value element set element }
@@ -55,7 +55,7 @@ gives Canvas or String
 
 define text
 takes { value is Canvas x is Int y is Int content is String fill is String }
-gives Canvas or String
+gives Canvas or Problem
 {
     keep safe_content set escape with { value set content } or give
     keep color set escape with { value set fill } or give
@@ -65,7 +65,7 @@ gives Canvas or String
 
 define render
 takes { value is Canvas }
-gives String or String
+gives String or Problem
 {
     change output set join with { parts set ["<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"", std.int.format with { value set value.width }, "\" height=\"", std.int.format with { value set value.height }, "\" viewBox=\"0 0 ", std.int.format with { value set value.width }, " ", std.int.format with { value set value.height }, "\">"] } or give
     each element within value.elements { change output to std.text.concat with { left set output right set element } or give }

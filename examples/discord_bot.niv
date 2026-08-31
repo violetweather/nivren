@@ -5,7 +5,7 @@ define send_message
 takes {
     text is String
 }
-gives String or String
+gives String or Problem
 needs Environment, Network
 {
     keep token set std.env.get with { name set "DISCORD_BOT_TOKEN" } ?? ""

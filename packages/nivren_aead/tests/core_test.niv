@@ -1,7 +1,7 @@
 use "../src/main.niv"
 
 define verify
-gives Bool or String
+gives Bool or Problem
 {
     keep key set main.import_key with { bytes set std.bytes.from_string with { value set "0123456789abcdef0123456789abcdef" } } or give
     keep nonce set std.bytes.from_string with { value set "unique-nonce" }

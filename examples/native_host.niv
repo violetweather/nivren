@@ -4,7 +4,7 @@ define query_database
 takes {
     request is String
 }
-gives String or String
+gives String or Problem
 needs Native
 {
     keep opened set std.host.open with {

@@ -2,7 +2,7 @@ define echo_once
 takes {
     listener is TcpListener
 }
-gives Nothing or String
+gives Nothing or Problem
 needs Network
 {
     using server set listener {

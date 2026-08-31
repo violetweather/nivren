@@ -2,7 +2,7 @@ define read_sensor
 takes {
     port is Int
 }
-gives String or String
+gives String or Problem
 needs Native, Task
 {
     keep request set "{\"port\":" + std.int.format with { value set port } + "}"
@@ -16,5 +16,5 @@ needs Native, Task
 keep sample set read_sensor with { port set 7 }
 choose sample {
     case Ok carries value => value
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }

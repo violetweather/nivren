@@ -105,7 +105,7 @@ Decision values: **Applied** (implemented on this branch), **Accepted** (decided
 
 ## Cross-cutting fixes already proposed in earlier planning
 
-These predate the ledger sweep and are restated here so one document holds every open repair: typed problems replacing `Result<T, String>` throughout the library (the largest fix; overlaps #7, #36, #42), structured capability-scope grammar replacing the `"path:…"`/`"host:…"` string mini-language (overlaps #16), label and pattern punning (`with { x }` for `x set x`), and unifying the eight derives with `generate` so one generation mechanism remains (overlaps #11). All Pending.
+These predate the ledger sweep and are restated here so one document holds every open repair: typed problems replacing `Result<T, String>` throughout the library (the largest fix; overlaps #7, #36, #42) — **Applied**: every standard-library failure now carries the builtin `Problem { kind, message }` shape, wrapped uniformly at the module registration boundary, with `std.problems.create` for application code and kind `"derive"` for generated methods (STANDARD-LIBRARY-5 §1.2); structured capability-scope grammar replacing the `"path:…"`/`"host:…"` string mini-language (overlaps #16) — retained as-is per the row 16 amendment; label and pattern punning (`with { x }` for `x set x`) — not adopted, labels stay explicit; and unifying the eight derives with `generate` (overlaps #11) — retained separately, derives stay declarative. All decided.
 
 ## Suggested decision order
 

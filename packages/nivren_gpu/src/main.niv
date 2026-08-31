@@ -27,19 +27,19 @@ define validate_plan
 takes {
     plan is AddPlan
 }
-gives AddPlan or String
+gives AddPlan or Problem
 {
     when plan.limits.maximum_items < 1 or plan.limits.maximum_items > 1048576 {
-        give err("GPU maximum_items must be from 1 through 1048576")
+        give err(std.problems.create("gpu", "GPU maximum_items must be from 1 through 1048576"))
     }
     when plan.limits.workgroup_size < 1 or plan.limits.workgroup_size > 256 {
-        give err("GPU workgroup_size must be from 1 through 256")
+        give err(std.problems.create("gpu", "GPU workgroup_size must be from 1 through 256"))
     }
     when len(plan.left) != len(plan.right) {
-        give err("GPU vector inputs must have equal lengths")
+        give err(std.problems.create("gpu", "GPU vector inputs must have equal lengths"))
     }
     when len(plan.left) > plan.limits.maximum_items {
-        give err("GPU vector input exceeds the declared maximum_items")
+        give err(std.problems.create("gpu", "GPU vector input exceeds the declared maximum_items"))
     }
     give ok(plan)
 }
@@ -62,7 +62,7 @@ define add_cpu
 takes {
     plan is AddPlan
 }
-gives [Int] or String
+gives [Int] or Problem
 {
     keep checked set validate_plan with { plan set plan } or give
     change output set []
@@ -111,7 +111,7 @@ define compile_add
 takes {
     plan is AddPlan
 }
-gives ComputeArtifact or String
+gives ComputeArtifact or Problem
 {
     keep checked set validate_plan with { plan set plan } or give
     keep fallback set add_cpu with { plan set checked } or give
@@ -129,7 +129,7 @@ define execute_gpu
 takes {
     plan is AddPlan
 }
-gives [Int] or String
+gives [Int] or Problem
 needs Native within "gpu"
 {
     keep artifact set compile_add with { plan set plan } or give
@@ -139,7 +139,7 @@ needs Native within "gpu"
         keep response set perform std.host.call with { handle set device name set "compute" request set request } or give
         keep result set VectorResult.from_json with { source set response } or give
         when len(result.values) != len(artifact.cpu_fallback) {
-            give err("GPU result length differs from the checked CPU fallback")
+            give err(std.problems.create("gpu", "GPU result length differs from the checked CPU fallback"))
         }
         give ok(result.values)
     }

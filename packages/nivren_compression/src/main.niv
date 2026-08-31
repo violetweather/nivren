@@ -1,31 +1,31 @@
 define gzip
 takes { data is Bytes level is Int }
-gives Bytes or String
+gives Bytes or Problem
 { give std.compression.gzip with { bytes set data level set level } }
 
 define gzip_decode
 takes { data is Bytes maximum is Int }
-gives Bytes or String
+gives Bytes or Problem
 { give std.compression.gzip_decode with { bytes set data maximum set maximum } }
 
 define zlib
 takes { data is Bytes level is Int }
-gives Bytes or String
+gives Bytes or Problem
 { give std.compression.zlib with { bytes set data level set level } }
 
 define zlib_decode
 takes { data is Bytes maximum is Int }
-gives Bytes or String
+gives Bytes or Problem
 { give std.compression.zlib_decode with { bytes set data maximum set maximum } }
 
 define gzip_text
 takes { text is String level is Int }
-gives Bytes or String
+gives Bytes or Problem
 { give gzip with { data set std.bytes.from_string with { value set text } level set level } }
 
 define gunzip_text
 takes { data is Bytes maximum is Int }
-gives String or String
+gives String or Problem
 {
     keep restored set gzip_decode with { data set data maximum set maximum } or give
     give std.bytes.to_string with { bytes set restored }

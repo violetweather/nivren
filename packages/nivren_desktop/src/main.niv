@@ -25,16 +25,16 @@ define validate_window
 takes {
     window is Window
 }
-gives Window or String
+gives Window or Problem
 {
     when len(window.title) < 1 or len(window.title) > 256 {
-        give err("desktop title must contain 1 through 256 characters")
+        give err(std.problems.create("desktop", "desktop title must contain 1 through 256 characters"))
     }
     when window.width < 320 or window.width > 16384 or window.height < 240 or window.height > 16384 {
-        give err("desktop dimensions are outside the supported bounds")
+        give err(std.problems.create("desktop", "desktop dimensions are outside the supported bounds"))
     }
     when not std.text.starts_with with { value set window.start_url prefix set "https://" } and window.start_url != "app://index.html" {
-        give err("desktop start_url must use https:// or app://index.html")
+        give err(std.problems.create("desktop", "desktop start_url must use https:// or app://index.html"))
     }
     give ok(window)
 }
@@ -43,16 +43,16 @@ define encode_message
 takes {
     message is BridgeMessage
 }
-gives String or String
+gives String or Problem
 {
     when len(message.identifier) < 1 or len(message.identifier) > 128 {
-        give err("desktop bridge identifier must contain 1 through 128 characters")
+        give err(std.problems.create("desktop", "desktop bridge identifier must contain 1 through 128 characters"))
     }
     when len(message.command) < 1 or len(message.command) > 128 {
-        give err("desktop bridge command must contain 1 through 128 characters")
+        give err(std.problems.create("desktop", "desktop bridge command must contain 1 through 128 characters"))
     }
     when len(message.payload) > 1048576 {
-        give err("desktop bridge payload exceeds 1 MiB")
+        give err(std.problems.create("desktop", "desktop bridge payload exceeds 1 MiB"))
     }
     give BridgeMessage.to_json with { value set message }
 }
@@ -61,19 +61,19 @@ define validate_update
 takes {
     update is UpdateManifest
 }
-gives UpdateManifest or String
+gives UpdateManifest or Problem
 {
     when update.channel != "stable" and update.channel != "beta" and update.channel != "nightly" {
-        give err("desktop update channel must be stable, beta, or nightly")
+        give err(std.problems.create("desktop", "desktop update channel must be stable, beta, or nightly"))
     }
     when not std.text.starts_with with { value set update.url prefix set "https://" } {
-        give err("desktop update URL must use https://")
+        give err(std.problems.create("desktop", "desktop update URL must use https://"))
     }
     when len(update.sha256) != 64 {
-        give err("desktop update SHA-256 must contain 64 hexadecimal characters")
+        give err(std.problems.create("desktop", "desktop update SHA-256 must contain 64 hexadecimal characters"))
     }
     when len(update.signature) < 64 or len(update.signature) > 512 {
-        give err("desktop update signature has an invalid length")
+        give err(std.problems.create("desktop", "desktop update signature has an invalid length"))
     }
     give ok(update)
 }
@@ -82,7 +82,7 @@ define open_host
 takes {
     window is Window
 }
-gives NativeHandle or String
+gives NativeHandle or Problem
 needs Native within "desktop"
 {
     keep checked set validate_window with { window set window } or give
@@ -95,7 +95,7 @@ takes {
     handle is NativeHandle
     message is BridgeMessage
 }
-gives String or String
+gives String or Problem
 needs Native within "desktop"
 {
     keep request set encode_message with { message set message } or give
@@ -107,7 +107,7 @@ takes {
     handle is NativeHandle
     update is UpdateManifest
 }
-gives String or String
+gives String or Problem
 needs Native within "desktop"
 {
     keep checked set validate_update with { update set update } or give

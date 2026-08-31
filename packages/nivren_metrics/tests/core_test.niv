@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define works
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep labels set std.map.of with { key set "route" value set "/health" }
     keep value set main.sample with { name set "nivren_requests_total" help set "Handled requests" kind set "counter" value set 42.0 labels set labels } or give

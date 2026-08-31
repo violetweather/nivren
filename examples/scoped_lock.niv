@@ -1,11 +1,11 @@
 define count_twice
-gives Int or String
+gives Int or Problem
 needs Task
 {
     keep counter set std.locks.create with { value set 0 }
 
     define increment
-    gives Nothing or String
+    gives Nothing or Problem
     needs Task
     {
         keep acquired set std.locks.acquire with { lock set counter timeout set 2.0 } or give

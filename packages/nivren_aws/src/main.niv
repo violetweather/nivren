@@ -6,7 +6,7 @@ shape Signature holds {
 
 define combine
 takes { parts is [String] }
-gives String or String
+gives String or Problem
 {
     change output is String set ""
     each part within parts {
@@ -17,7 +17,7 @@ gives String or String
 
 define sha_hex
 takes { value is String }
-gives String or String
+gives String or Problem
 {
     keep digest set std.crypto.sha256 with { bytes set std.bytes.from_string with { value set value } } or give
     give std.encoding.hex_encode with { bytes set digest }
@@ -25,14 +25,14 @@ gives String or String
 
 define hmac
 takes { key is Bytes value is String }
-gives Bytes or String
+gives Bytes or Problem
 {
     give std.crypto.hmac_sha256 with { key set key message set std.bytes.from_string with { value set value } }
 }
 
 define credential_scope
 takes { date is String region is String service is String }
-gives String or String
+gives String or Problem
 {
     give combine with { parts set [date, "/", region, "/", service, "/aws4_request"] }
 }
@@ -43,13 +43,13 @@ takes {
     signed_headers is String payload is String timestamp is String date is String region is String
     service is String access_key is String secret_key is Bytes
 }
-gives Signature or String
+gives Signature or Problem
 {
     when method == "" or canonical_uri == "" or signed_headers == "" or region == "" or service == "" or access_key == "" {
-        give err("AWS signing fields must not be empty")
+        give err(std.problems.create("aws", "AWS signing fields must not be empty"))
     }
     when len(timestamp) != 16 or len(date) != 8 {
-        give err("AWS timestamp must be YYYYMMDDTHHMMSSZ and date must be YYYYMMDD")
+        give err(std.problems.create("aws", "AWS timestamp must be YYYYMMDDTHHMMSSZ and date must be YYYYMMDD"))
     }
     keep payload_hash set sha_hex with { value set payload } or give
     keep canonical_request set combine with { parts set [method, "\n", canonical_uri, "\n", canonical_query, "\n", canonical_headers, "\n\n", signed_headers, "\n", payload_hash] } or give

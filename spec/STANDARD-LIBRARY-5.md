@@ -12,6 +12,24 @@ Every numeric bound in this document is a frozen **default** under the declared-
 
 Implemented with tests: the `std.text` growth (except the `codepoints`/`graphemes` iterators, which wait on the iterator seam and a Unicode segmentation decision), `std.time.monotonic` plus calendar fields and `difference_seconds`, `std.uint`, `std.plans` (dynamic portability checking), the `std.gpu` availability surface, and `std.reflect.schema` over functions (parameter names and positions; declared types, results, and generics still require checker-side generation). Pending: `I128`/`U128`, the `Number`/`Integer`/`Exact` protocol refinements as user-visible constraints, `Display` adoption for text holes, `Iterate`, `std.source`, and the alias removals.
 
+## 1.2 The Problem failure type
+
+Every standard-library typed failure carries the builtin `Problem` shape:
+
+```
+shape Problem holds {
+    kind is String
+    message is String
+}
+```
+
+- `kind` names the failing module (`"files"`, `"net"`, `"web"`, `"json"`, `"derive"`, and so on), so callers can `choose` on the failure family without parsing text. `message` explains the failure in plain language.
+- Standard-library signatures spell recoverable failure as `gives Value or Problem`. The wrapping happens at the module boundary, so every module's failures are uniformly typed with no per-function ceremony.
+- `Problem` displays as its `message`, so `show(problem)` and text holes stay readable.
+- `std.problems.create(kind, message)` builds a `Problem` for application code that wants to join a standard failure channel. `kind` uses 1 through 64 bytes.
+- Derive-generated methods (`to_json`, `from_json`, `validate`, `to_binary`, `from_binary`, `from_row`, `from_arguments`, `key`) fail with kind `"derive"`.
+- User code remains free to use its own failure types, including plain `String` (`err("...")` is unchanged) and domain shapes such as a `Violation`; `Problem` is the standard library's contract, and a user shape named `Problem` shadows the builtin.
+
 ## 2. Namespaces
 
 The canonical namespaces are `std.files`, `std.web`, `std.tasks`, and `std.channels`, plus the topical namespaces this document names. The Edition 2 compatibility aliases `std.fs`, `std.http`, `std.task`, and `std.channel` are removed, exercising the removal clause of the Edition 3 specification; `niv fix` rewrites every alias reference to its canonical spelling. The namespace set is closed: new capability areas ship as packages, not as new `std` namespaces.

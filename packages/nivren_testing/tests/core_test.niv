@@ -5,21 +5,21 @@ assert with { condition set main.expect_yes with { condition set yes label set "
 assert with { condition set main.expect_no with { condition set no label set "falsehood" } == ok(none) message set "no passes" }
 
 define controlled
-gives Bool or String
+gives Bool or Problem
 needs Task, Channel
 {
     keep first set perform main.gate with {}
     keep second set perform main.gate with {}
     keep events set perform std.channels.create with { capacity set 2 }
     define one
-    gives Nothing or String
+    gives Nothing or Problem
     needs Channel
     {
         perform main.pass with { value set first } or give
         give perform main.checkpoint with { events set events label set "one" }
     }
     define two
-    gives Nothing or String
+    gives Nothing or Problem
     needs Channel
     {
         perform main.pass with { value set second } or give

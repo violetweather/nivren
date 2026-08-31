@@ -1,7 +1,7 @@
 use "../src/main.niv"
 
 define verify
-gives Bool or String
+gives Bool or Problem
 {
 
 keep pool set main.PoolConfig with {

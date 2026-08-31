@@ -2,7 +2,7 @@ define fingerprint
 takes {
     text is String
 }
-gives Bytes or String
+gives Bytes or Problem
 {
     give std.crypto.sha256 with { bytes set std.bytes.from_string with { value set text } }
 }
@@ -12,7 +12,7 @@ takes {
     key is String
     message is String
 }
-gives Bytes or String
+gives Bytes or Problem
 {
     give std.crypto.hmac_sha256 with {
         key set std.bytes.from_string with { value set key }
@@ -26,7 +26,7 @@ takes {
     message is String
     tag is Bytes
 }
-gives Bool or String
+gives Bool or Problem
 {
     give std.crypto.hmac_sha256_verify with {
         key set std.bytes.from_string with { value set key }

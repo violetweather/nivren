@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define compatibility
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep value set "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
     keep parsed set main.parse with { value set value } or give

@@ -6,27 +6,27 @@ shape Matrix holds {
 
 define matrix
 takes { rows is Int columns is Int values is [Float] }
-gives Matrix or String
+gives Matrix or Problem
 {
-    when rows <= 0 or columns <= 0 { give err("matrix dimensions must be positive") }
-    when rows > 4096 or columns > 4096 { give err("matrix dimensions exceed 4096") }
-    when rows * columns != len(values) { give err("matrix value count does not match its dimensions") }
+    when rows <= 0 or columns <= 0 { give err(std.problems.create("matrix", "matrix dimensions must be positive")) }
+    when rows > 4096 or columns > 4096 { give err(std.problems.create("matrix", "matrix dimensions exceed 4096")) }
+    when rows * columns != len(values) { give err(std.problems.create("matrix", "matrix value count does not match its dimensions")) }
     give ok(Matrix(rows, columns, values))
 }
 
 define at
 takes { value is Matrix row is Int column is Int }
-gives Float or String
+gives Float or Problem
 {
-    when row < 0 or row >= value.rows or column < 0 or column >= value.columns { give err("matrix index is out of bounds") }
+    when row < 0 or row >= value.rows or column < 0 or column >= value.columns { give err(std.problems.create("matrix", "matrix index is out of bounds")) }
     give ok(value.values[row * value.columns + column])
 }
 
 define add
 takes { left is Matrix right is Matrix }
-gives Matrix or String
+gives Matrix or Problem
 {
-    when left.rows != right.rows or left.columns != right.columns { give err("matrix dimensions must match for addition") }
+    when left.rows != right.rows or left.columns != right.columns { give err(std.problems.create("matrix", "matrix dimensions must match for addition")) }
     change values is [Float] set []
     change index set 0
     repeat index < len(left.values) {
@@ -38,10 +38,10 @@ gives Matrix or String
 
 define multiply
 takes { left is Matrix right is Matrix }
-gives Matrix or String
+gives Matrix or Problem
 {
-    when left.columns != right.rows { give err("inner matrix dimensions must match") }
-    when left.rows * right.columns > 1000000 { give err("matrix result exceeds one million values") }
+    when left.columns != right.rows { give err(std.problems.create("matrix", "inner matrix dimensions must match")) }
+    when left.rows * right.columns > 1000000 { give err(std.problems.create("matrix", "matrix result exceeds one million values")) }
     change values is [Float] set []
     change row set 0
     repeat row < left.rows {

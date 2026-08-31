@@ -2,7 +2,7 @@ define first_readable
 takes {
     streams is [TcpStream]
 }
-gives maybe Int or String
+gives maybe Int or Problem
 needs Network
 {
     give std.net.wait_ready_any with { streams set streams interest set Interest.Read timeout set 5.0 }
@@ -13,7 +13,7 @@ takes {
     stream is TcpStream
     message is String
 }
-gives String or String
+gives String or Problem
 needs Network
 {
     keep sent set std.net.write_ready with {

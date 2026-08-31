@@ -1,6 +1,6 @@
 define count_as_float
 takes { values is [Float] }
-gives Float or String
+gives Float or Problem
 { give std.float.parse with { source set std.int.format with { value set len(values) } } }
 
 define sum
@@ -14,16 +14,16 @@ gives Float
 
 define mean
 takes { values is [Float] }
-gives Float or String
+gives Float or Problem
 {
-    when len(values) == 0 { give err("mean requires at least one value") }
+    when len(values) == 0 { give err(std.problems.create("stats", "mean requires at least one value")) }
     keep count set count_as_float with { values set values } or give
     give ok(sum with { values set values } / count)
 }
 
 define variance
 takes { values is [Float] }
-gives Float or String
+gives Float or Problem
 {
     keep average set mean with { values set values } or give
     keep count set count_as_float with { values set values } or give
@@ -37,9 +37,9 @@ gives Float or String
 
 define minimum
 takes { values is [Float] }
-gives Float or String
+gives Float or Problem
 {
-    when len(values) == 0 { give err("minimum requires at least one value") }
+    when len(values) == 0 { give err(std.problems.create("stats", "minimum requires at least one value")) }
     change found set values[0]
     each value within values { when value < found { change found to value } }
     give ok(found)
@@ -47,9 +47,9 @@ gives Float or String
 
 define maximum
 takes { values is [Float] }
-gives Float or String
+gives Float or Problem
 {
-    when len(values) == 0 { give err("maximum requires at least one value") }
+    when len(values) == 0 { give err(std.problems.create("stats", "maximum requires at least one value")) }
     change found set values[0]
     each value within values { when value > found { change found to value } }
     give ok(found)
@@ -57,12 +57,12 @@ gives Float or String
 
 define normalize
 takes { values is [Float] }
-gives [Float] or String
+gives [Float] or Problem
 {
     keep low set minimum with { values set values } or give
     keep high set maximum with { values set values } or give
     keep width set high - low
-    when width == 0.0 { give err("normalize requires a nonzero range") }
+    when width == 0.0 { give err(std.problems.create("stats", "normalize requires a nonzero range")) }
     change normalized is [Float] set []
     each value within values { change normalized to append with { values set normalized value set (value - low) / width } }
     give ok(normalized)

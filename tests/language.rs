@@ -79,7 +79,7 @@ takes {
     left is Int
     right is Int
 }
-gives Int or String
+gives Int or Problem
 needs Network within "example.test"
 {
     give ok(add with {
@@ -180,7 +180,7 @@ fn edition_four_diagnostics_name_the_intended_forms() {
 
 #[test]
 fn edition_four_preserves_scoped_needs_as_checked_metadata() {
-    let source = "define fetch gives String or String needs Network within \"api.example.test\" { give err(\"offline\") } expose { fetch }";
+    let source = "define fetch gives String or Problem needs Network within \"api.example.test\" { give err(std.problems.create(\"app\", \"offline\")) } expose { fetch }";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let nivren::ast::Stmt::Function {
         capability_needs, ..
@@ -377,7 +377,7 @@ shape Release holds {
 } derives Json, Compare, Display, Key, Validate, Binary, DatabaseRow, Arguments
 
 define verify
-gives String or String
+gives String or Problem
 {
     keep release set Release with { name set "beta" build set 4 }
     keep json set Release.to_json with { value set release } or give
@@ -539,8 +539,8 @@ fn edition_four_usability_corpus_stays_within_the_language_proof_budget() {
             "change count set 0\nrepeat while count < 3 { change count to count + 1 }\ncount",
         ),
         (
-            "define answer takes { } gives Result<Int, String> { give ok(42) }\nanswer()",
-            "define answer gives Int or String { give ok(42) }\nanswer with {}",
+            "define answer takes { } gives Result<Int, Problem> { give ok(42) }\nanswer()",
+            "define answer gives Int or Problem { give ok(42) }\nanswer with {}",
         ),
         (
             "define double takes { value is Int } gives Int { give value * 2 }\n21 through double",
@@ -632,9 +632,9 @@ choose joined {
 #[test]
 fn scoped_locks_serialize_shared_updates_in_both_engines() {
     let source = r#"
-define count takes { } gives Result<Int, String> needs Task {
+define count takes { } gives Result<Int, Problem> needs Task {
     keep counter set std.locks.create(0)
-    define increment takes { } gives Result<Nothing, String> needs Task {
+    define increment takes { } gives Result<Nothing, Problem> needs Task {
         keep acquired set std.locks.acquire(counter, 2.0) or give
         using guard set acquired {
             keep current set std.locks.read(guard) or give
@@ -655,7 +655,7 @@ choose count() { case Ok carries value => value, case Err carries problem => -1 
     assert_eq!(eval_vm(source), Value::Int(2));
 
     let closed = r#"
-define inspect takes { } gives Result<Bool, String> needs Task {
+define inspect takes { } gives Result<Bool, Problem> needs Task {
     keep lock set std.locks.create("safe")
     keep guard set std.locks.acquire(lock, 1.0) or give
     keep first set std.locks.close(guard) or give
@@ -668,7 +668,7 @@ choose inspect() { case Ok carries value => value, case Err carries problem => n
     assert_eq!(eval_vm(closed), Value::Bool(true));
 
     let timeout = r#"
-define blocked takes { } gives Result<Bool, String> needs Task {
+define blocked takes { } gives Result<Bool, Problem> needs Task {
     keep lock set std.locks.create(1)
     keep first set std.locks.acquire(lock, 1.0) or give
     keep second set std.locks.acquire(lock, 0.01)
@@ -684,9 +684,9 @@ choose blocked() { case Ok carries value => value, case Err carries problem => n
 #[test]
 fn atomic_integers_are_linearizable_transferable_and_checked_in_both_engines() {
     let source = r#"
-define count takes { } gives Result<Int, String> needs Task {
+define count takes { } gives Result<Int, Problem> needs Task {
     keep counter set std.atomics.create(0)
-    define increment takes { } gives Result<Nothing, String> {
+    define increment takes { } gives Result<Nothing, Problem> {
         change index set 0
         repeat index < 250 {
             keep previous set std.atomics.add(counter, 1) or give
@@ -726,7 +726,7 @@ choose failure { case Ok carries previous => -1, case Err carries observed => ol
 #[test]
 fn transactions_commit_or_rollback_and_close_deterministically() {
     let commit = r#"
-define update takes { } gives Result<Int, String> {
+define update takes { } gives Result<Int, Problem> {
     keep original set std.map.of("count", 1)
     keep transaction is Transaction<String, Int> set std.transactions.create(original)
     keep changed set std.transactions.set(transaction, "count", 2) or give
@@ -739,7 +739,7 @@ choose update() { case Ok carries value => value, case Err carries problem => 0 
     assert_eq!(eval_vm(commit), Value::Int(2));
 
     let rollback = r#"
-define update takes { } gives Result<Int, String> {
+define update takes { } gives Result<Int, Problem> {
     keep original set std.map.of("count", 1)
     keep transaction set std.transactions.create(original)
     keep changed set std.transactions.set(transaction, "count", 9) or give
@@ -752,10 +752,10 @@ choose update() { case Ok carries value => value, case Err carries problem => 0 
     assert_eq!(eval_vm(rollback), Value::Int(1));
 
     let scoped = r#"
-define abandon takes { transaction is Transaction<String, Int> } gives Result<Nothing, String> {
+define abandon takes { transaction is Transaction<String, Int> } gives Result<Nothing, Problem> {
     using active set transaction {
         keep changed set std.transactions.set(active, "count", 7) or give
-        give err("abandoned")
+        give err(std.problems.create("app", "abandoned"))
     }
 }
 keep transaction set std.transactions.create(std.map.of("count", 1))
@@ -779,7 +779,7 @@ choose closed { case Ok carries value => no, case Err carries problem => yes }
 #[test]
 fn native_handles_are_opaque_scoped_and_released_once_in_both_engines() {
     let source = r#"
-define operate takes { } gives Result<String, String> needs Native {
+define operate takes { } gives Result<String, Problem> needs Native {
     keep opened set std.host.open("database", "configuration") or give
     using handle set opened {
         give std.host.call(handle, "query", "select 42")
@@ -855,7 +855,7 @@ operate()
             .replace('"', "\\\"");
         let integer = format!(
             r#"
-define calculate takes {{ }} gives Result<Int, String> needs Native {{
+define calculate takes {{ }} gives Result<Int, Problem> needs Native {{
     keep opened set std.native.open("{path}") or give
     using library set opened {{
         give std.native.call_int(library, "nivren_add", [20, 22])
@@ -866,7 +866,7 @@ choose calculate() {{ case Ok carries value => value, case Err carries problem =
         );
         let float = format!(
             r#"
-define calculate takes {{ }} gives Result<Float, String> needs Native {{
+define calculate takes {{ }} gives Result<Float, Problem> needs Native {{
     keep opened set std.native.open("{path}") or give
     using library set opened {{
         give std.native.call_float(library, "nivren_mean", [1.5, 2.5])
@@ -877,7 +877,7 @@ choose calculate() {{ case Ok carries value => value, case Err carries problem =
         );
         let closed = format!(
             r#"
-define verify takes {{ }} gives Result<Bool, String> needs Native {{
+define verify takes {{ }} gives Result<Bool, Problem> needs Native {{
     keep library set std.native.open("{path}") or give
     keep closed set std.native.close(library) or give
     give choose std.native.call_int(library, "nivren_add", [1, 2]) {{
@@ -890,14 +890,14 @@ choose verify() {{ case Ok carries value => value, case Err carries problem => n
         );
         let buffer = format!(
             r#"
-define transform takes {{ }} gives Result<String, String> needs Native {{
+define transform takes {{ }} gives Result<String, Problem> needs Native {{
     keep opened set std.native.open("{path}") or give
     using library set opened {{
         keep output set std.native.call_buffer(library, "nivren_upper", std.bytes.from_string("Nivren"), 64) or give
         give std.bytes.to_string(output)
     }}
 }}
-choose transform() {{ case Ok carries value => value, case Err carries problem => problem }}
+choose transform() {{ case Ok carries value => value, case Err carries problem => problem.message }}
 "#
         );
         for source in [&integer, &float, &buffer, &closed] {
@@ -980,7 +980,7 @@ choose transform() {{ case Ok carries value => value, case Err carries problem =
 #[test]
 fn native_handle_cleanup_retries_failures_and_survives_stress() {
     let retry = r#"
-define close_retry takes { } gives Result<Bool, String> needs Native {
+define close_retry takes { } gives Result<Bool, Problem> needs Native {
     keep handle set std.host.open("device", "configuration") or give
     keep first set std.host.close(handle)
     keep second set std.host.close(handle)
@@ -989,7 +989,7 @@ define close_retry takes { } gives Result<Bool, String> needs Native {
 close_retry()
 "#;
     let stress = r#"
-define exercise takes { } gives Result<Int, String> needs Native {
+define exercise takes { } gives Result<Int, Problem> needs Native {
     change index set 0
     repeat index < 1000 {
         keep opened set std.host.open("device", "configuration") or give
@@ -1057,7 +1057,7 @@ exercise()
 #[test]
 fn native_host_operations_join_as_bounded_structured_tasks_in_both_engines() {
     let source = r#"
-define query takes { } gives Result<String, String> needs Native, Task {
+define query takes { } gives Result<String, Problem> needs Native, Task {
     keep queued set std.host.invoke_async("device.read", "{\"port\":7}") or give
     give wait queued
 }
@@ -1089,7 +1089,7 @@ query()
         nivren::check(r#"define missing takes { } { std.host.invoke_async("x", "y") }"#).is_err()
     );
     let no_host = nivren::run(
-        r#"define missing takes { } gives Result<Task, String> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
+        r#"define missing takes { } gives Result<Task, Problem> needs Native, Task { give std.host.invoke_async("x", "y") } missing()"#,
     )
     .unwrap();
     assert!(matches!(no_host, Value::Err(_)));
@@ -1098,7 +1098,7 @@ query()
 #[test]
 fn datetime_values_preserve_instants_and_iana_zones_in_both_engines() {
     let source = r#"
-define render takes { } gives Result<String, String> {
+define render takes { } gives Result<String, Problem> {
     keep epoch set std.time.from_unix(0, "UTC") or give
     keep new_york set std.time.in_zone(epoch, "America/New_York") or give
     keep later set std.time.add_seconds(epoch, 3600) or give
@@ -1109,7 +1109,7 @@ define render takes { } gives Result<String, String> {
     give ok(std.time.format(new_york))
 }
 
-choose render() { case Ok carries value => value, case Err carries problem => problem }
+choose render() { case Ok carries value => value, case Err carries problem => problem.message }
 "#;
     let expected = Value::String("1969-12-31T19:00:00-05:00[America/New_York]".into());
     assert_eq!(eval_tree(source), expected);
@@ -1126,7 +1126,7 @@ choose render() { case Ok carries value => value, case Err carries problem => pr
 #[test]
 fn bigint_and_decimal_arithmetic_is_exact_checked_and_typed() {
     let source = r#"
-define calculate takes { } gives Result<String, String> {
+define calculate takes { } gives Result<String, Problem> {
     keep huge set std.bigint.parse("1000000000000000000000000000000") or give
     keep two set std.bigint.from_int(2)
     keep exact set std.decimal.parse("0.1") or give
@@ -1137,7 +1137,7 @@ define calculate takes { } gives Result<String, String> {
     give ok(std.bigint.format(huge + two))
 }
 
-choose calculate() { case Ok carries value => value, case Err carries problem => problem }
+choose calculate() { case Ok carries value => value, case Err carries problem => problem.message }
 "#;
     let expected = Value::String("1000000000000000000000000000002".into());
     assert_eq!(eval_tree(source), expected);
@@ -1150,7 +1150,7 @@ choose calculate() { case Ok carries value => value, case Err carries problem =>
         .is_err()
     );
     let outside = r#"
-define inspect takes { } gives Result<Bool, String> {
+define inspect takes { } gives Result<Bool, Problem> {
     keep huge set std.bigint.parse("999999999999999999999999") or give
     give choose std.bigint.to_int(huge) { case Ok carries value => ok(no), case Err carries problem => ok(yes) }
 }
@@ -1162,7 +1162,7 @@ choose inspect() { case Ok carries value => value, case Err carries problem => n
 #[test]
 fn fixed_width_signed_and_unsigned_numbers_are_distinct_and_checked() {
     let source = r#"
-define render takes { } gives Result<String, String> {
+define render takes { } gives Result<String, Problem> {
     keep first is U8 set std.u8.from_int(250) or give
     keep second is U8 set std.u8.from_int(5) or give
     keep maximum is U8 set first + second
@@ -1173,14 +1173,14 @@ define render takes { } gives Result<String, String> {
     assert(choose std.u64.to_int(wide) { case Ok carries value => no, case Err carries problem => yes }, "U64 conversion is checked")
     give ok(std.u8.format(maximum) + ":" + std.u64.format(wide))
 }
-choose render() { case Ok carries value => value, case Err carries problem => problem }
+choose render() { case Ok carries value => value, case Err carries problem => problem.message }
 "#;
     let expected = Value::String("255:18446744073709551615".into());
     assert_eq!(eval_tree(source), expected);
     assert_eq!(eval_vm(source), expected);
 
     let overflow = r#"
-define overflow takes { } gives Result<U8, String> {
+define overflow takes { } gives Result<U8, Problem> {
     keep left set std.u8.from_int(250) or give
     keep right set std.u8.from_int(6) or give
     give ok(left + right)
@@ -1197,11 +1197,11 @@ overflow()
             .is_err()
     );
     assert!(nivren::check(
-        "define mixed takes { } gives Result<U8, String> { keep left set std.u8.from_int(1) or give keep right set std.i8.from_int(1) or give give ok(left + right) }"
+        "define mixed takes { } gives Result<U8, Problem> { keep left set std.u8.from_int(1) or give keep right set std.i8.from_int(1) or give give ok(left + right) }"
     )
     .is_err());
     assert!(nivren::check(
-        "define negative takes { } gives Result<U8, String> { keep value set std.u8.from_int(1) or give give ok(-value) }"
+        "define negative takes { } gives Result<U8, Problem> { keep value set std.u8.from_int(1) or give give ok(-value) }"
     )
     .is_err());
 }
@@ -1209,19 +1209,19 @@ overflow()
 #[test]
 fn capability_needs_are_explicit_and_transitive() {
     let direct = nivren::check(
-        "define load takes { path is String } gives Result<String, String> { give std.files.read(path) }",
+        "define load takes { path is String } gives Result<String, Problem> { give std.files.read(path) }",
     )
     .unwrap_err();
     assert!(direct[0].message.contains("needs FileRead"));
 
     nivren::check(
-        "define load takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) }",
+        "define load takes { path is String } gives Result<String, Problem> needs FileRead { give std.files.read(path) }",
     )
     .unwrap();
 
     let transitive = nivren::check(
-        "define load takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) }\n\
-         define config takes { } gives Result<String, String> { give load(\"app.json\") }",
+        "define load takes { path is String } gives Result<String, Problem> needs FileRead { give std.files.read(path) }\n\
+         define config takes { } gives Result<String, Problem> { give load(\"app.json\") }",
     )
     .unwrap_err();
     assert!(transitive[0].message.contains("needs FileRead"));
@@ -1582,7 +1582,7 @@ fn safe_reflection_inspects_shape_values_without_vm_internals() {
     let source = r#"
 choice Role { Admin, Member }
 shape User { name is String, active is Bool }
-define inspect takes { } gives Result<String, String> {
+define inspect takes { } gives Result<String, Problem> {
     keep user set User("Mira", yes)
     keep fields set std.reflect.fields(user) or give
     keep shape_schema set std.reflect.schema(User) or give
@@ -1599,7 +1599,7 @@ define inspect takes { } gives Result<String, String> {
 }
 choose inspect() {
     case Ok carries value => value,
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }
 "#;
     let expected = Value::String("String:Bool:User:shape:String:choice:1".into());
@@ -1740,25 +1740,25 @@ fn integers_and_floats_are_distinct_and_overflow_is_trapped() {
 
 #[test]
 fn typed_results_require_exhaustive_payload_matching() {
-    let source = "define parse takes { valid is Bool } gives Result<Int, String> { when (valid) { give ok(42); } give err(\"invalid\"); } keep result is Result<Int, String> set parse(yes); choose (result) { case Ok carries value => value, case Err carries message => 0 }";
+    let source = "define parse takes { valid is Bool } gives Result<Int, Problem> { when (valid) { give ok(42); } give err(std.problems.create(\"app\", \"invalid\")); } keep result is Result<Int, Problem> set parse(yes); choose (result) { case Ok carries value => value, case Err carries message => 0 }";
     assert_eq!(eval(source), Value::Int(42));
     assert!(
         nivren::check(
-            "keep result is Result<Int, String> set ok(1); choose (result) { case Ok carries value => value }"
+            "keep result is Result<Int, Problem> set ok(1); choose (result) { case Ok carries value => value }"
         )
         .is_err()
     );
-    assert!(nivren::check("keep result is Result<Int, String> set err(\"bad\"); choose (result) { case Ok => 1, case Err carries error => 0 }").is_err());
+    assert!(nivren::check("keep result is Result<Int, Problem> set err(std.problems.create(\"app\", \"bad\")); choose (result) { case Ok => 1, case Err carries error => 0 }").is_err());
 }
 
 #[test]
 fn or_give_propagates_typed_failures_through_nested_expressions() {
     let program = r#"
-define parse takes { valid is Bool } gives Result<Int, String> {
+define parse takes { valid is Bool } gives Result<Int, Problem> {
     when valid { give ok(41) }
-    give err("invalid")
+    give err(std.problems.create("app", "invalid"))
 }
-define answer takes { valid is Bool } gives Result<Int, String> {
+define answer takes { valid is Bool } gives Result<Int, Problem> {
     keep value is Int set parse(valid) or give
     give ok(value + 1)
 }
@@ -1781,18 +1781,18 @@ answer(yes)
     let failure = program.replace("answer(yes)", "answer(no)");
     assert_eq!(
         eval_tree(&failure),
-        Value::Err(Arc::new(Value::String("invalid".into())))
+        Value::Err(Arc::new(Value::problem("app", "invalid")))
     );
     assert_eq!(eval_vm(&failure), eval_tree(&failure));
 
-    let nested = "define value takes { } gives Result<Int, String> { give ok(20) } define answer takes { } gives Result<Int, String> { give ok((value() or give) * 2 + 2) } answer()";
+    let nested = "define value takes { } gives Result<Int, Problem> { give ok(20) } define answer takes { } gives Result<Int, Problem> { give ok((value() or give) * 2 + 2) } answer()";
     assert_eq!(eval_tree(nested), Value::Ok(Arc::new(Value::Int(42))));
     assert_eq!(eval_vm(nested), Value::Ok(Arc::new(Value::Int(42))));
 
     assert!(nivren::check("ok(1) or give").is_err());
     assert!(nivren::check("define bad takes { } gives Int { give ok(1) or give }").is_err());
     assert!(nivren::check(
-        "define bad takes { } gives Result<Int, Int> { keep value set err(\"wrong\") or give give ok(value) }",
+        "define bad takes { } gives Result<Int, Int> { keep value set err(std.problems.create(\"app\", \"wrong\")) or give give ok(value) }",
     )
     .is_err());
 }
@@ -2469,7 +2469,7 @@ fn cli_projects_receive_the_bounded_builtin_sqlite_host() {
     fs::write(
         root.join("src/main.niv"),
         r#"define run
-gives String or String
+gives String or Problem
 needs Native within "database"
 {
     keep opened set perform std.host.open with { kind set "database" request set "memory://cli-proof" } or give
@@ -2482,7 +2482,7 @@ needs Native within "database"
 
 show(choose perform run with {} {
     case Ok carries response => response
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 })
 "#,
     )
@@ -2814,7 +2814,7 @@ fn doc_comments_document_the_following_declaration_and_execution_ignores_them() 
 
 #[test]
 fn documentation_includes_declared_capabilities() {
-    let source = "define read takes { path is String } gives Result<String, String> needs FileRead { give std.files.read(path) } expose { read }";
+    let source = "define read takes { path is String } gives Result<String, Problem> needs FileRead { give std.files.read(path) } expose { read }";
     let parsed = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
     let module = nivren::ast::Stmt::Module {
         name: "files".into(),
@@ -3171,11 +3171,11 @@ fn typed_standard_library_handles_files_paths_time_and_process_errors() {
     let file = directory.join("message.txt");
     let path = file.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
-        "keep writeResult is Result<Nothing, String> set std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ case Ok carries value => yes, case Err carries error => no }}, \"write\"); keep readResult is Result<String, String> set std.files.read(\"{path}\"); keep text set choose (readResult) {{ case Ok carries value => value, case Err carries error => error }}; assert(choose (std.files.exists(\"{path}\")) {{ case Ok carries present => present, case Err carries error => no }}, \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
+        "keep writeResult is Result<Nothing, Problem> set std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ case Ok carries value => yes, case Err carries error => no }}, \"write\"); keep readResult is Result<String, Problem> set std.files.read(\"{path}\"); keep text set choose (readResult) {{ case Ok carries value => value, case Err carries error => error.message }}; assert(choose (std.files.exists(\"{path}\")) {{ case Ok carries present => present, case Err carries error => no }}, \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
 
-    let process = "keep result is Result<String, String> set std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); choose (result) { case Ok carries output => no, case Err carries error => yes }";
+    let process = "keep result is Result<String, Problem> set std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); choose (result) { case Ok carries output => no, case Err carries error => yes }";
     assert_eq!(eval_vm(process), Value::Bool(true));
     assert!(nivren::check("std.files.read(42)").is_err());
 
@@ -3204,7 +3204,7 @@ fn bounded_json_engine_validates_unicode_and_formats_deterministically() {
         );
     }
 
-    let program = "keep result is Result<String, String> set std.json.compact(\"{\\\"ok\\\": true}\"); choose result { case Ok carries value => value, case Err carries error => error }";
+    let program = "keep result is Result<String, Problem> set std.json.compact(\"{\\\"ok\\\": true}\"); choose result { case Ok carries value => value, case Err carries error => error.message }";
     assert_eq!(eval_vm(program), Value::String("{\"ok\":true}".into()));
 }
 
@@ -3225,7 +3225,10 @@ choose decoded {
 
     assert_eq!(
         eval("std.json.encode(std.set.of(1))"),
-        Value::Err(Arc::new(Value::String("JSON cannot represent Set".into())))
+        Value::Err(Arc::new(Value::problem(
+            "json",
+            "JSON cannot represent Set"
+        )))
     );
 }
 
@@ -3244,7 +3247,7 @@ shape User {
     role is Role,
 }
 
-define display_name takes { source is String } gives Result<String, String> {
+define display_name takes { source is String } gives Result<String, Problem> {
     keep user set std.json.decode(User, source) or give
     give ok(user.name)
 }
@@ -3291,7 +3294,7 @@ fn json_lines_stream_with_a_bounded_record_buffer() {
     let source = format!(
         r#"
 shape Item {{ id is Int }}
-define load takes {{ path is String }} gives Result<String, String> needs FileRead {{
+define load takes {{ path is String }} gives Result<String, Problem> needs FileRead {{
     keep opened set std.files.open_read(path) or give
     using file set opened {{
         keep first set std.json.read_next_as(Item, file, 64) or give
@@ -3315,12 +3318,12 @@ load({:?})
     fs::write(&path, "{\"payload\":\"too long\"}\n{\"id\":3}\n").unwrap();
     let recovery = format!(
         r#"
-define recover takes {{ path is String }} gives Result<String, String> needs FileRead {{
+define recover takes {{ path is String }} gives Result<String, Problem> needs FileRead {{
     keep opened set std.files.open_read(path) or give
     using file set opened {{
         keep rejected set std.json.read_next(file, 8)
         keep recovered set choose rejected {{
-            case Ok carries value => err("oversized record accepted"),
+            case Ok carries value => err(std.problems.create("app", "oversized record accepted")),
             case Err carries problem => std.json.read_next(file, 64),
         }}
         keep next set recovered or give
@@ -3347,13 +3350,13 @@ fn file_line_iterators_are_lazy_bounded_and_recover_after_errors() {
     fs::write(&path, "alpha\nway-too-long\nomega\r\n").unwrap();
     let source = format!(
         r#"
-define load takes {{ path is String }} gives Result<Bool, String> needs FileRead {{
+define load takes {{ path is String }} gives Result<Bool, Problem> needs FileRead {{
     keep opened set std.files.open_read(path) or give
     using file set opened {{
         keep lines set std.iter.lines(file, 8) or give
-        keep first set std.iter.next(lines) ?? err("missing first line")
+        keep first set std.iter.next(lines) ?? err(std.problems.create("app", "missing first line"))
         keep oversized set std.iter.next(lines) ?? ok("missing")
-        keep third set std.iter.next(lines) ?? err("missing third line")
+        keep third set std.iter.next(lines) ?? err(std.problems.create("app", "missing third line"))
         keep ending set std.iter.next(lines)
         keep first_text set first or give
         keep third_text set third or give
@@ -3380,9 +3383,9 @@ keep sliced set std.bytes.slice(data, 0, 6)
 keep text set choose sliced {
     case Ok carries part => choose std.bytes.to_string(part) {
         case Ok carries value => value,
-        case Err carries problem => problem,
+        case Err carries problem => problem.message,
     },
-    case Err carries problem => problem,
+    case Err carries problem => problem.message,
 }
 assert(text == "Nivren", "byte slice")
 length
@@ -3406,7 +3409,7 @@ fn explicit_text_concatenation_is_typed_bounded_and_dual_engine() {
     let source = r#"
 choose std.text.concat("Niv", "ren") {
     case Ok carries value => value,
-    case Err carries problem => problem,
+    case Err carries problem => problem.message,
 }
 "#;
     let expected = Value::String("Nivren".into());
@@ -3418,7 +3421,7 @@ choose std.text.concat("Niv", "ren") {
 #[test]
 fn bounded_text_partition_and_float_conversion_are_dual_engine() {
     let source = r#"
-define inspect takes { } gives Result<String, String> {
+define inspect takes { } gives Result<String, Problem> {
     keep parts set std.text.split("MOVED 42 [::1]:6379", " ", 4) or give
     keep address set std.text.split_last(parts[2], ":") or give
     keep number set std.float.parse("1.5") or give
@@ -3442,7 +3445,7 @@ inspect()
 #[test]
 fn int_text_conversion_is_explicit_checked_and_dual_engine() {
     let source = r#"
-define round_trip takes { } gives Result<Int, String> {
+define round_trip takes { } gives Result<Int, Problem> {
     keep parsed set std.int.parse("-9223372036854775808") or give
     assert(std.int.format(parsed) == "-9223372036854775808", "Int format")
     give ok(parsed)
@@ -3463,7 +3466,7 @@ round_trip()
 #[test]
 fn binary_codecs_are_typed_bounded_and_endian_explicit() {
     let source = r#"
-define verify takes { } gives Result<Int, String> {
+define verify takes { } gives Result<Int, Problem> {
     keep number set std.u16.from_int(4660) or give
     keep big set std.binary.u16_be(number)
     keep little set std.binary.u16_le(number)
@@ -3512,7 +3515,7 @@ choose bytes {
 #[test]
 fn cryptographic_hashes_and_hmacs_are_bounded_and_constant_time_verified() {
     let source = r#"
-define verify takes { } gives Result<Int, String> {
+define verify takes { } gives Result<Int, Problem> {
     keep key set std.bytes.from_string("secret")
     keep message set std.bytes.from_string("Nivren")
     keep digest set std.crypto.sha256(message) or give
@@ -3549,7 +3552,7 @@ choose std.crypto.hmac_sha256_verify(key, message, tag) {
 #[test]
 fn secure_randomness_and_argon2id_are_capability_checked_and_bounded() {
     let source = r#"
-define passwords takes { } gives Result<Bool, String> {
+define passwords takes { } gives Result<Bool, Problem> {
     keep salt set std.bytes.from_string("0123456789abcdef")
     keep encoded set std.crypto.password_hash("correct horse", salt, 8192, 1, 1) or give
     keep valid set std.crypto.password_verify("correct horse", encoded) or give
@@ -3564,7 +3567,7 @@ passwords()
     assert_eq!(eval_vm(source), expected);
 
     let entropy = r#"
-define entropy takes { } gives Result<Int, String> needs Random {
+define entropy takes { } gives Result<Int, Problem> needs Random {
     keep bytes set std.crypto.random_bytes(32) or give
     give ok(std.bytes.length(bytes))
 }
@@ -3595,7 +3598,7 @@ entropy()
 #[test]
 fn authenticated_encryption_detects_tampering_and_enforces_key_nonce_and_size_bounds() {
     let source = r#"
-define protect takes { } gives Result<Bool, String> {
+define protect takes { } gives Result<Bool, Problem> {
     keep key set std.crypto.key_import(std.bytes.from_string("0123456789abcdef0123456789abcdef")) or give
     keep nonce set std.bytes.from_string("unique-nonce")
     keep context set std.bytes.from_string("account:42")
@@ -3646,7 +3649,7 @@ protect()
 #[test]
 fn ed25519_matches_rfc8032_and_rejects_tampering_in_both_engines() {
     let source = r#"
-define verify_vector takes { } gives Result<Bool, String> {
+define verify_vector takes { } gives Result<Bool, Problem> {
     keep seed set std.encoding.hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") or give
     keep key set std.crypto.key_import(seed) or give
     keep public set std.crypto.ed25519_public(key) or give
@@ -3675,7 +3678,7 @@ verify_vector()
 #[test]
 fn gzip_and_zlib_are_deterministic_bounded_and_portable_in_both_engines() {
     let source = r#"
-define roundtrip takes { } gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, Problem> {
     keep input set std.bytes.from_string("Nivren Nivren Nivren")
     keep first set std.compression.gzip(input, 6) or give
     keep second set std.compression.gzip(input, 6) or give
@@ -3715,7 +3718,7 @@ choose packed {
 #[test]
 fn hex_and_base64_encodings_are_canonical_bounded_and_portable() {
     let source = r#"
-define roundtrip takes { } gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, Problem> {
     keep bytes set std.bytes.from_string("Nivren?")
     keep hex set std.encoding.hex_encode(bytes) or give
     keep standard set std.encoding.base64_encode(bytes) or give
@@ -3751,7 +3754,7 @@ roundtrip()
 #[test]
 fn csv_tables_are_quoted_bounded_typed_and_portable_in_both_engines() {
     let source = r#"
-define roundtrip takes { } gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, Problem> {
     keep headers set ["name", "note"]
     keep rows set std.csv.decode("Ada,\"hello, Nivren\"\r\nLin,\"line one\nline two\"\r\n", headers, ",", 10) or give
     assert(len(rows) == 2, "two CSV records")
@@ -3935,7 +3938,7 @@ score
 fn lazy_range_sources_are_bounded_single_pass_and_dual_engine() {
     let source = r#"
 define add takes { total is Int, value is Int } gives Int { give total + value }
-define sample takes { } gives Result<Int, String> {
+define sample takes { } gives Result<Int, Problem> {
     keep source set std.iter.range(0, 1000000, 1) or give
     keep first set std.iter.next(source) ?? -1
     keep page set std.iter.take(source, 3)
@@ -3993,7 +3996,7 @@ fn typed_tcp_standard_library_uses_bounded_timeouts() {
         stream.write_all(b"hello").unwrap();
     });
     let source = format!(
-        "keep connection set std.net.connect(\"127.0.0.1\", {port}, 2.0); choose (connection) {{ case Ok carries stream => choose (std.net.read(stream, 5)) {{ case Ok carries text => text, case Err carries error => error }}, case Err carries error => error }}"
+        "keep connection set std.net.connect(\"127.0.0.1\", {port}, 2.0); choose (connection) {{ case Ok carries stream => choose (std.net.read(stream, 5)) {{ case Ok carries text => text, case Err carries error => error.message }}, case Err carries error => error.message }}"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
     server.join().unwrap();
@@ -4017,7 +4020,7 @@ fn tcp_framing_reads_exact_bytes_without_consuming_the_next_message() {
         });
         let source = format!(
             r#"
-define framed takes {{ }} gives Result<String, String> needs Network {{
+define framed takes {{ }} gives Result<String, Problem> needs Network {{
     using stream set std.net.connect("127.0.0.1", {port}, 2.0) or give {{
         keep line set std.net.read_line(stream, 64, 2.0) or give
         assert(line == "+OK", "line framing")
@@ -4061,7 +4064,7 @@ fn official_redis_decodes_recursive_arrays_without_frame_overread() {
         });
         let source = format!(
             r#"{redis}
-define probe takes {{ }} gives Result<Int, String> needs Network {{
+define probe takes {{ }} gives Result<Int, Problem> needs Network {{
     using stream set connect("127.0.0.1", {port}, 2.0) or give {{
         keep first set receive(stream, 2.0, 1024) or give
         keep count set choose first {{
@@ -4144,7 +4147,7 @@ fn official_redis_authenticates_and_pipelines_without_frame_loss() {
         });
         let source = format!(
             r#"{redis}
-define probe takes {{ }} gives Result<String, String> needs Network {{
+define probe takes {{ }} gives Result<String, Problem> needs Network {{
     keep opened set open("127.0.0.1", {port}, 2.0) or give
     keep empty set pool(2) or give
     keep stored set pool_add(empty, opened) or give
@@ -4187,7 +4190,7 @@ define probe takes {{ }} gives Result<String, String> needs Network {{
     when pong and value and len(leased.pool.idle) == 0 {{ give ok(std.int.format(len(responses))) }}
     give ok("invalid responses")
 }}
-choose probe() {{ case Ok carries value => value, case Err carries problem => problem }}
+choose probe() {{ case Ok carries value => value, case Err carries problem => problem.message }}
 "#
         );
         let result = if vm {
@@ -4242,7 +4245,7 @@ fn official_redis_secure_connection_verifies_certificates() {
         let root = serde_json::to_string(&certificate_pem).unwrap();
         let source = format!(
             r#"{redis}
-define probe takes {{ }} gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, Problem> needs Network {{
     keep options set std.map.set(std.web.tls_options(), "additional_root_pem", {root})
     keep opened set open_secure("localhost", {port}, 3.0, options) or give
     keep responses set pipeline(opened, [["PING"]], 3.0, 1024) or give
@@ -4319,7 +4322,7 @@ fn official_redis_follows_bounded_moved_and_ask_redirects() {
             });
             let source = format!(
                 r#"{redis}
-define probe takes {{ }} gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, Problem> needs Network {{
     keep configured set client("127.0.0.1", {first_port}, "", "", no, std.web.tls_options(), 2.0, 1024, 2) or give
     keep outcome set execute(configured, ["PING"]) or give
     give ok(choose outcome.response {{
@@ -4375,7 +4378,7 @@ fn official_redis_decodes_bounded_resp3_aggregates() {
         });
         let source = format!(
             r#"{redis}
-define probe takes {{ }} gives Result<Int, String> needs Network {{
+define probe takes {{ }} gives Result<Int, Problem> needs Network {{
     keep opened set open("127.0.0.1", {port}, 2.0) or give
     keep first set receive_connection(opened, 2.0, 4096) or give
     keep count set choose first {{
@@ -4420,7 +4423,7 @@ fn official_redis_live_release_matrix() {
     let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
     let source = format!(
         r#"{redis}
-define probe takes {{ }} gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, Problem> needs Network {{
     keep configured set client("127.0.0.1", {port}, "", "", no, std.web.tls_options(), 3.0, 65536, 2) or give
     keep hello set execute(configured, ["HELLO", "3"]) or give
     keep hello_ok set choose hello.response {{
@@ -4464,7 +4467,7 @@ fn tcp_partial_writes_make_backpressure_and_progress_explicit() {
         });
         let source = format!(
             r#"
-define send takes {{ }} gives Result<Int, String> needs Network {{
+define send takes {{ }} gives Result<Int, Problem> needs Network {{
     keep stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set stream {{
         give std.net.write_some(connection, "abcdefgh", 4, 2.0)
@@ -4497,7 +4500,7 @@ fn tcp_readiness_waits_on_the_os_reactor_in_both_engines() {
         });
         let source = format!(
             r#"
-define probe takes {{ }} gives Result<Bool, String> needs Network {{
+define probe takes {{ }} gives Result<Bool, Problem> needs Network {{
     keep stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set stream {{
         give std.net.wait_ready(connection, Interest.Read, 2.0)
@@ -4541,7 +4544,7 @@ fn tcp_reactor_selects_many_streams_and_drives_bounded_adapters() {
         });
         let source = format!(
             r#"
-define exchange takes {{ }} gives Result<Int, String> needs Network {{
+define exchange takes {{ }} gives Result<Int, Problem> needs Network {{
     keep first_opened set std.net.connect("127.0.0.1", {first_port}, 2.0) or give
     using first set first_opened {{
         keep second_opened set std.net.connect("127.0.0.1", {second_port}, 2.0) or give
@@ -4601,7 +4604,7 @@ keep headers set std.map.of("X-Nivren", "Edition3")
 keep response set std.web.request("POST", "http://127.0.0.1:{port}/echo", headers, "hello", 2.0, 1024)
 choose response {{
     case Ok carries data => text "{{data.status}}:{{data.body}}:{{std.map.get(data.headers, \"content-type\") ?? \"missing\"}}",
-    case Err carries problem => problem
+    case Err carries problem => problem.message
 }}
 "#
         );
@@ -4652,13 +4655,13 @@ fn official_trace_exports_bounded_otlp_http_json_in_both_engines() {
         });
         let source = format!(
             r#"{trace}
-define send takes {{ }} gives Result<String, String> needs Network {{
+define send takes {{ }} gives Result<String, Problem> needs Network {{
     keep value set context("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", yes) or give
     keep attribute set otlp_attribute("service.name", "nivren") or give
     keep span set otlp_span(value, "request", "100", "250", [attribute]) or give
     give export_otlp_json("http://127.0.0.1:{port}/v1/traces", std.web.headers(), span, 2.0)
 }}
-choose send() {{ case Ok carries status => status, case Err carries problem => problem }}
+choose send() {{ case Ok carries status => status, case Err carries problem => problem.message }}
 "#
         );
         let value = if bytecode {
@@ -4679,7 +4682,7 @@ choose send() {{ case Ok carries status => status, case Err carries problem => p
 #[test]
 fn url_components_are_strict_bounded_and_unicode_safe_in_both_engines() {
     let source = r#"
-define roundtrip takes { } gives Result<Bool, String> {
+define roundtrip takes { } gives Result<Bool, Problem> {
     keep encoded set std.web.encode_component("Nivren / 🜁 +") or give
     assert(encoded == "Nivren%20%2F%20%F0%9F%9C%81%20%2B", "RFC 3986 component")
     keep decoded set std.web.decode_component(encoded) or give
@@ -4734,14 +4737,14 @@ fn websocket_standard_library_exchanges_bounded_text_in_both_engines() {
         });
         let source = format!(
             r#"
-define exchange takes {{ }} gives Result<String, String> needs Network {{
+define exchange takes {{ }} gives Result<String, Problem> needs Network {{
     keep opened set std.web.websocket_connect("127.0.0.1", {port}, "/echo", 2.0) or give
     using socket set opened {{
         keep sent set std.web.websocket_send(socket, "hello") or give
         give std.web.websocket_receive(socket, 1024)
     }}
 }}
-choose exchange() {{ case Ok carries message => message, case Err carries problem => problem }}
+choose exchange() {{ case Ok carries message => message, case Err carries problem => problem.message }}
 "#
         );
         let value = if bytecode {
@@ -4815,7 +4818,7 @@ fn secure_websocket_listeners_serve_verified_tls_in_both_engines() {
         let client_ca_literal = serde_json::to_string(&client_ca_pem).unwrap();
         let source = format!(
             r#"
-define serve takes {{ }} gives Result<String, String> needs Network {{
+define serve takes {{ }} gives Result<String, Problem> needs Network {{
     keep auth_policy set std.map.set(std.web.tls_options(), "client_auth", "required")
     keep options set std.map.set(auth_policy, "client_ca_pem", {client_ca_literal})
     keep opened set std.web.websocket_secure_listen("127.0.0.1", {port}, {certificate_literal}, {key_literal}, options) or give
@@ -4828,7 +4831,7 @@ define serve takes {{ }} gives Result<String, String> needs Network {{
         }}
     }}
 }}
-choose serve() {{ case Ok carries message => message, case Err carries problem => problem }}
+choose serve() {{ case Ok carries message => message, case Err carries problem => problem.message }}
 "#
         );
         let result = if bytecode {
@@ -4893,7 +4896,7 @@ fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
         let client_key_literal = serde_json::to_string(&client_private_key_pem).unwrap();
         let source = format!(
             r#"
-define exchange takes {{ }} gives Result<String, String> needs Network {{
+define exchange takes {{ }} gives Result<String, Problem> needs Network {{
     keep roots set std.map.set(std.web.tls_options(), "additional_root_pem", {server_root_literal})
     keep identity set std.map.set(roots, "client_certificate_pem", {client_certificate_literal})
     keep policy set std.map.set(identity, "client_private_key_pem", {client_key_literal})
@@ -4903,7 +4906,7 @@ define exchange takes {{ }} gives Result<String, String> needs Network {{
         give std.web.websocket_receive(socket, 1024)
     }}
 }}
-choose exchange() {{ case Ok carries message => message, case Err carries problem => problem }}
+choose exchange() {{ case Ok carries message => message, case Err carries problem => problem.message }}
 "#
         );
         let result = if bytecode {
@@ -4946,7 +4949,7 @@ fn tcp_listeners_accept_bounded_connections_and_close_with_scope() {
         });
         let source = format!(
             r#"
-define serve takes {{ listener is TcpListener }} gives Result<Int, String> needs Network {{
+define serve takes {{ listener is TcpListener }} gives Result<Int, Problem> needs Network {{
     using server set listener {{
         keep accepted set std.net.accept(server, 2.0)
         using connection set accepted or give {{
@@ -4987,13 +4990,13 @@ fn tcp_line_iterators_are_lazy_bounded_and_recover_after_oversized_frames() {
         });
         let source = format!(
             r#"
-define consume takes {{ }} gives Result<Bool, String> needs Network {{
+define consume takes {{ }} gives Result<Bool, Problem> needs Network {{
     keep opened set std.net.connect("127.0.0.1", {port}, 2.0) or give
     using connection set opened {{
         keep lines set std.iter.tcp_lines(connection, 5, 2.0) or give
-        keep first set std.iter.next(lines) ?? err("missing first line")
-        keep oversized set std.iter.next(lines) ?? err("missing oversized line")
-        keep third set std.iter.next(lines) ?? err("missing third line")
+        keep first set std.iter.next(lines) ?? err(std.problems.create("app", "missing first line"))
+        keep oversized set std.iter.next(lines) ?? err(std.problems.create("app", "missing oversized line"))
+        keep third set std.iter.next(lines) ?? err(std.problems.create("app", "missing third line"))
         keep ended set std.iter.next(lines)
         keep first_ok set choose first {{ case Ok carries value => value == "one", case Err carries problem => no }}
         keep overflow_ok set choose oversized {{ case Ok carries value => no, case Err carries problem => yes }}
@@ -5048,7 +5051,7 @@ fn web_servers_parse_bounded_requests_and_write_managed_responses() {
         });
         let source = format!(
             r#"
-define serve takes {{ listener is TcpListener }} gives Result<String, String> needs Network {{
+define serve takes {{ listener is TcpListener }} gives Result<String, Problem> needs Network {{
     using server set listener {{
         keep accepted set std.net.accept(server, 2.0)
         using connection set accepted or give {{
@@ -5140,7 +5143,7 @@ fn using_scopes_close_bounded_file_handles_in_both_engines() {
         let path = directory.join(name);
         let source = format!(
             r#"
-define save takes {{ path is String }} gives Result<Int, String> needs FileWrite {{
+define save takes {{ path is String }} gives Result<Int, Problem> needs FileWrite {{
     keep opened set std.files.open_write(path)
     using file set opened or give {{
         keep written set std.files.write_to(file, "nivren") or give
@@ -5164,7 +5167,7 @@ save("{}")
     fs::write(&readable, "bounded").unwrap();
     let source = format!(
         r#"
-define load takes {{ path is String }} gives Result<String, String> needs FileRead {{
+define load takes {{ path is String }} gives Result<String, Problem> needs FileRead {{
     keep opened set std.files.open_read(path)
     using file set opened or give {{
         give std.files.read_from(file, 64)
@@ -5201,19 +5204,19 @@ fn cross_resource_failure_stress_closes_files_and_tcp_streams_in_both_engines() 
         });
         let source = format!(
             r#"
-define stress takes {{ path is String }} gives Result<Int, String> needs FileRead, Network {{
+define stress takes {{ path is String }} gives Result<Int, Problem> needs FileRead, Network {{
     change index set 0
     repeat index < 64 {{
         keep opened_file set std.files.open_read(path) or give
         using file set opened_file {{
             keep closed set std.files.close(file) or give
             keep rejected set choose std.files.read_from(file, 1) {{ case Ok carries value => no, case Err carries problem => yes }}
-            when not rejected {{ give err("closed file accepted a read") }}
+            when not rejected {{ give err(std.problems.create("app", "closed file accepted a read")) }}
         }}
         keep opened_stream set std.net.connect("127.0.0.1", {port}, 2.0) or give
         using connection set opened_stream {{
             keep rejected set choose std.net.read_exact_bytes(connection, 1, 2.0) {{ case Ok carries value => no, case Err carries problem => yes }}
-            when not rejected {{ give err("closed peer produced an exact byte") }}
+            when not rejected {{ give err(std.problems.create("app", "closed peer produced an exact byte")) }}
         }}
         index = index + 1
     }}
@@ -5245,13 +5248,13 @@ fn async_files_use_bounded_executor_tasks_in_both_engines() {
         .replace('"', "\\\"");
     let source = format!(
         r#"
-define roundtrip takes {{ }} gives Result<String, String> needs FileRead, FileWrite, Task {{
+define roundtrip takes {{ }} gives Result<String, Problem> needs FileRead, FileWrite, Task {{
     keep writing set std.files.write_async("{path}", "async nivren") or give
     keep written set wait writing or give
     keep reading set std.files.read_async("{path}", 1024) or give
     give wait reading
 }}
-choose roundtrip() {{ case Ok carries contents => contents, case Err carries problem => problem }}
+choose roundtrip() {{ case Ok carries contents => contents, case Err carries problem => problem.message }}
 "#
     );
     assert_eq!(eval_tree(&source), Value::String("async nivren".into()));
@@ -5282,7 +5285,7 @@ fn bytecode_vm_matches_the_tree_interpreter() {
         "keep missing is String? set none; missing ?? \"fallback\"",
         "shape Person { name is String, age is Int } keep person set Person(\"Ada\", 37); person.age",
         "choice State { Idle, Ready } keep state set State.Ready; choose (state) { case Idle => 0, case Ready => 42 }",
-        "keep result is Result<Int, String> set ok(42); choose (result) { case Ok carries value => value, case Err carries message => 0 }",
+        "keep result is Result<Int, Problem> set ok(42); choose (result) { case Ok carries value => value, case Err carries message => 0 }",
         "change total set 0; each (value within [10, 20, 12]) { total = total + value; } total",
         "define first takes { } gives Int { each (value within [42, 0]) { give value; } give 0; } first()",
     ];
@@ -5400,7 +5403,7 @@ fn cli_exports_stable_observation_and_privacy_safe_crash_reports() {
     fs::write(
         &healthy,
         "define one takes {} gives Int { give 1 }\n\
-         define many takes {} gives [Int] or String needs Task {\n\
+         define many takes {} gives [Int] or Problem needs Task {\n\
              keep first set perform std.tasks.spawn with { operation set one }\n\
              keep second set perform std.tasks.spawn with { operation set one }\n\
              give perform std.tasks.all with { tasks set [first, second] }\n\
@@ -5889,6 +5892,69 @@ fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
 }
 
 #[test]
+fn hot_functions_with_loops_and_branches_tier_to_native_code() {
+    let source = "define triangle takes { limit is Int } gives Int { change total set 0; change index set 0; repeat index < limit { total = total + index; index = index + 1; } give total; } triangle(10); triangle(100)";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(2);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(4950));
+    assert_eq!(interpreter.jit_stats().executions, 1);
+    let mut cold = nivren::runtime::Interpreter::new();
+    cold.set_jit_threshold(u32::MAX);
+    assert_eq!(cold.run_bytecode(&chunk).unwrap(), Value::Int(4950));
+    assert_eq!(cold.jit_stats().executions, 0);
+
+    let divide = "define half takes { value is Int, by is Int } gives Int { when by > 0 { give value / by; } give value % by; } half(10, 2); half(84, 2)";
+    let program = nivren::parser::parse(nivren::lexer::scan(divide).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(2);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(42));
+    assert_eq!(interpreter.jit_stats().executions, 1);
+
+    let by_zero = "define half takes { value is Int, by is Int } gives Int { give value / by; } half(10, 2); half(84, 0)";
+    let program = nivren::parser::parse(nivren::lexer::scan(by_zero).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(2);
+    let error = interpreter.run_bytecode(&chunk).unwrap_err();
+    assert!(error.message.contains("division by zero"));
+}
+
+#[test]
+fn integer_root_chunks_run_native_and_persist_top_level_bindings() {
+    let source = "change checksum set 0; change row set 0; repeat row < 100 { checksum = checksum + row % 7; row = row + 1; } checksum";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(16);
+    let hot = interpreter.run_bytecode(&chunk).unwrap();
+    let mut cold = nivren::runtime::Interpreter::new();
+    cold.set_jit_threshold(u32::MAX);
+    assert_eq!(cold.run_bytecode(&chunk).unwrap(), hot);
+    assert_eq!(cold.jit_stats().executions, 0);
+    assert_eq!(interpreter.jit_stats().executions, 1);
+
+    let overflow = "change value set 9223372036854775807; change count set 0; repeat count < 3 { value = value + 1; count = count + 1; } value";
+    let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(16);
+    let error = interpreter.run_bytecode(&chunk).unwrap_err();
+    assert!(error.message.contains("integer overflow"));
+    let mut cold = nivren::runtime::Interpreter::new();
+    cold.set_jit_threshold(u32::MAX);
+    let error = cold.run_bytecode(&chunk).unwrap_err();
+    assert!(error.message.contains("integer overflow"));
+}
+
+#[test]
 fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
     let source = "define fibonacci takes { value is Int } gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust takes { value is Int } gives Int { change result set value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
@@ -5928,7 +5994,7 @@ inspect(Sample("!", yes)) + inspect(Sample("?", no))
 #[test]
 fn fast_frames_do_not_leak_into_general_callees() {
     let source = r#"
-define unwrap takes { value is Result<Int, String> } gives Int {
+define unwrap takes { value is Result<Int, Problem> } gives Int {
     give choose value {
         case Ok carries number => number,
         case Err carries problem => 0
@@ -6917,7 +6983,7 @@ text "{first} {second} {third}"
 fn promise_never_rejects_renounced_needs_and_calls() {
     let declaration = r#"
 promise never Network
-define fetch takes { address is String } gives String or String needs Network {
+define fetch takes { address is String } gives String or Problem needs Network {
     give std.web.get(address, 1.0)
 }
 "#;
@@ -6935,7 +7001,7 @@ std.time.sleep(0.1)
 fn promise_only_within_confines_declared_scopes() {
     let outside = r#"
 promise FileRead only within "path:./data"
-define read_config takes { } gives String or String needs FileRead within "path:./other" {
+define read_config takes { } gives String or Problem needs FileRead within "path:./other" {
     give std.files.read("./other/config")
 }
 "#;
@@ -6947,7 +7013,7 @@ define read_config takes { } gives String or String needs FileRead within "path:
     );
     let inside = r#"
 promise FileRead only within "path:./data"
-define read_config takes { } gives String or String needs FileRead within "path:./data" {
+define read_config takes { } gives String or Problem needs FileRead within "path:./data" {
     give std.files.read("./data/config")
 }
 "#;
@@ -7019,7 +7085,7 @@ fn samples_are_checked_hermetic_and_uniquely_titled() {
 #[test]
 fn the_grown_text_library_builds_and_transforms_in_both_engines() {
     let source = r#"
-define build takes { } gives String or String {
+define build takes { } gives String or Problem {
     keep sliced set std.text.slice("hello", 1, 3) or give
     keep replaced set std.text.replace("a-b-a", "a", "x", 2) or give
     keep upper set std.text.to_upper("up") or give
@@ -7029,7 +7095,7 @@ define build takes { } gives String or String {
 }
 choose build with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("el|x-b-x|UP|007|abab".into());
@@ -7061,7 +7127,7 @@ passes
 #[test]
 fn calendar_fields_and_difference_read_datetimes_in_both_engines() {
     let source = r#"
-define inspect takes { } gives String or String {
+define inspect takes { } gives String or Problem {
     keep opening set std.time.from_unix(0, "UTC") or give
     keep later set std.time.add_seconds(opening, 90061) or give
     keep difference set std.time.difference_seconds(later, opening) or give
@@ -7078,7 +7144,7 @@ define inspect takes { } gives String or String {
 }
 choose inspect with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("1970:1:1:4:1:1:1:90061".into());
@@ -7100,7 +7166,7 @@ second >= first
 #[test]
 fn intent_stories_render_deterministic_plain_language() {
     let source = r#"
-define fetch takes { path is String } gives String or String needs FileRead {
+define fetch takes { path is String } gives String or Problem needs FileRead {
     give perform std.files.read(path)
 }
 perform fetch with { path set "notes.txt" }
@@ -7126,7 +7192,7 @@ fn effects_record_and_replay_byte_identically() {
 keep moment set std.time.now_zoned("UTC")
 choose moment {
     case Ok carries value => std.time.format(value)
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
@@ -7162,7 +7228,7 @@ shape FetchPlan holds {
     address is String
     attempts is Int
 } derives Json
-define round_trip takes { } gives String or String {
+define round_trip takes { } gives String or Problem {
     prepare request as FetchPlan with { address set "example.com", attempts set 3 }
     keep encoded set std.plans.encode(request) or give
     keep decoded set std.plans.decode(FetchPlan, encoded) or give
@@ -7170,7 +7236,7 @@ define round_trip takes { } gives String or String {
 }
 choose round_trip with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("example.com".into());
@@ -7188,7 +7254,7 @@ shape OtherPlan holds {
     address is String
     extra is Int
 } derives Json
-define attempt takes { } gives String or String {
+define attempt takes { } gives String or Problem {
     prepare request as FetchPlan with { address set "example.com" }
     keep encoded set std.plans.encode(request) or give
     keep decoded set std.plans.decode(OtherPlan, encoded) or give
@@ -7196,7 +7262,7 @@ define attempt takes { } gives String or String {
 }
 choose attempt with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let tree = eval_tree(source);
@@ -7214,7 +7280,7 @@ when std.gpu.available() {
 } otherwise {
     choose std.gpu.open("cpu") {
         case Ok carries device => "opened"
-        case Err carries message => message
+        case Err carries message => message.message
     }
 }
 "#;
@@ -7271,9 +7337,9 @@ choose std.reflect.schema(add) {
         std.map.get(schema, "right") ?? "?"
     ], " ") {
         case Ok carries joined => joined
-        case Err carries message => message
+        case Err carries message => message.message
     }
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("function add 0 1".into());
@@ -7284,7 +7350,7 @@ choose std.reflect.schema(add) {
 #[test]
 fn uint_arithmetic_is_checked_wrapping_is_explicit_and_dual_engine() {
     let source = r#"
-define compute takes { } gives String or String {
+define compute takes { } gives String or Problem {
     keep small set std.uint.from_int(7) or give
     keep large set std.uint.from_int(6) or give
     keep sum set small + large
@@ -7295,7 +7361,7 @@ define compute takes { } gives String or String {
 }
 choose compute with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("13 42 18446744073709551609 13 no".into());
@@ -7306,7 +7372,7 @@ choose compute with {} {
 #[test]
 fn uint_overflow_and_negation_are_typed_runtime_errors() {
     let overflow = r#"
-define boom takes { } gives UInt or String {
+define boom takes { } gives UInt or Problem {
     keep one set std.uint.from_int(1) or give
     give ok(std.uint.max() + one)
 }
@@ -7320,7 +7386,7 @@ boom with {}
         .unwrap_err();
     assert!(error.to_string().contains("unsigned integer overflow"));
     let negation = r#"
-define flip takes { } gives UInt or String {
+define flip takes { } gives UInt or Problem {
     keep one set std.uint.from_int(1) or give
     give ok(-one)
 }
@@ -7428,7 +7494,7 @@ show(choose Signal.Wait(7) {
 #[test]
 fn i128_joins_the_fixed_width_family_in_both_engines() {
     let source = r#"
-define compute takes { } gives String or String {
+define compute takes { } gives String or Problem {
     keep big set std.i128.parse("170141183460469231731687303715884105727") or give
     keep one set std.i128.from_int(1) or give
     keep smaller set big - one
@@ -7436,7 +7502,7 @@ define compute takes { } gives String or String {
 }
 choose compute with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("170141183460469231731687303715884105726".into());
@@ -7637,7 +7703,7 @@ text "value {std.map.get(table, "kind") ?? "?"} end"
 #[test]
 fn u128_completes_the_unsigned_family_in_both_engines() {
     let source = r#"
-define compute takes { } gives String or String {
+define compute takes { } gives String or Problem {
     keep huge set std.u128.parse("340282366920938463463374607431768211455") or give
     keep one set std.u128.from_int(1) or give
     keep smaller set huge - one
@@ -7645,7 +7711,7 @@ define compute takes { } gives String or String {
 }
 choose compute with {} {
     case Ok carries value => value
-    case Err carries message => message
+    case Err carries message => message.message
 }
 "#;
     let expected = Value::String("340282366920938463463374607431768211454".into());

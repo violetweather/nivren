@@ -8,4 +8,4 @@ keep text set choose built { case Ok carries query => query.text case Err carrie
 keep parameters set choose built { case Ok carries query => query.parameters case Err carries problem => [] }
 assert with { condition set text == "SELECT id, name FROM users WHERE role = ?" message set "parameterized SQL" }
 assert with { condition set parameters == ["admin"] message set "parameter order" }
-assert with { condition set main.identifier with { value set "users; DROP TABLE users" } == err("SQL identifier contains an unsafe character") message set "reject injection" }
+assert with { condition set main.identifier with { value set "users; DROP TABLE users" } == err(std.problems.create("sql", "SQL identifier contains an unsafe character")) message set "reject injection" }

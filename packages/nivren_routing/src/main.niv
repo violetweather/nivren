@@ -76,7 +76,7 @@ takes {
     method is String
     path is String
 }
-gives maybe RouteMatch or String
+gives maybe RouteMatch or Problem
 {
     when candidate.method != method {
         give ok(none)
@@ -97,7 +97,7 @@ gives maybe RouteMatch or String
         when std.text.starts_with with { value set expected_part prefix set ":" } {
             keep name_parts set std.text.split with { value set expected_part separator set ":" maximum set 2 } or give
             when len(name_parts) != 2 or len(name_parts[1]) < 1 or len(actual_part) < 1 {
-                give err("route parameter names and values must not be empty")
+                give err(std.problems.create("routing", "route parameter names and values must not be empty"))
             }
             change parameters to std.map.set with { map set parameters key set name_parts[1] value set actual_part }
         } otherwise {
@@ -116,7 +116,7 @@ takes {
     method is String
     path is String
 }
-gives maybe RouteMatch or String
+gives maybe RouteMatch or Problem
 {
     each candidate in routes {
         keep selected set match_route with { candidate set candidate method set method path set path } or give
@@ -132,26 +132,26 @@ takes {
     request is RequestContext
     policy is RequestPolicy
 }
-gives RequestContext or String
+gives RequestContext or Problem
 {
     when policy.maximum_body < 0 or policy.maximum_body > 16777216 {
-        give err("request maximum_body must be from 0 through 16777216")
+        give err(std.problems.create("routing", "request maximum_body must be from 0 through 16777216"))
     }
     when len(request.body) > policy.maximum_body {
-        give err("request body exceeds its policy ceiling")
+        give err(std.problems.create("routing", "request body exceeds its policy ceiling"))
     }
     each header in policy.required_headers {
         when not std.map.contains with { map set request.headers key set header } {
-            give err("request is missing required header " + header)
+            give err(std.problems.create("routing", "request is missing required header " + header))
         }
     }
     when policy.bearer {
         when not std.map.contains with { map set request.headers key set "authorization" } {
-            give err("request requires bearer authorization")
+            give err(std.problems.create("routing", "request requires bearer authorization"))
         }
         keep authorization set std.map.get with { map set request.headers key set "authorization" }
         when not std.text.starts_with with { value set authorization prefix set "Bearer " } {
-            give err("request bearer authorization is malformed")
+            give err(std.problems.create("routing", "request bearer authorization is malformed"))
         }
     }
     give ok(request)
@@ -162,13 +162,13 @@ takes {
     status is Int
     body is String
 }
-gives Response or String
+gives Response or Problem
 {
     when status < 100 or status > 599 {
-        give err("response status must be from 100 through 599")
+        give err(std.problems.create("routing", "response status must be from 100 through 599"))
     }
     when len(body) > 16777216 {
-        give err("response body exceeds 16 MiB")
+        give err(std.problems.create("routing", "response body exceeds 16 MiB"))
     }
     give ok(Response with {
         status set status

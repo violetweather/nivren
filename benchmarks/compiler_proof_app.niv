@@ -2,7 +2,7 @@ define load_payload
 takes {
     path is String
 }
-gives String or String
+gives String or Problem
 needs FileRead
 {
     keep contents set perform std.files.read with {
@@ -25,5 +25,5 @@ choose perform load_payload with {
     path set "target/compiler-proof-input.txt"
 } {
     case Ok carries contents => emit with { value set contents }
-    case Err carries problem => emit with { value set problem }
+    case Err carries problem => emit with { value set problem.message }
 }

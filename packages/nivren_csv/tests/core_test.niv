@@ -1,7 +1,7 @@
 use "../src/main.niv"
 
 define verify
-gives Bool or String
+gives Bool or Problem
 {
     keep headers set ["name", "note"]
     keep rows set main.decode with { source set "Ada,\"hello, Nivren\"\r\nLin,portable\r\n" headers set headers maximum_rows set 10 } or give

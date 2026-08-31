@@ -55,7 +55,7 @@ shape Outcome holds {
 
 define tail
 takes { value is String }
-gives String or String
+gives String or Problem
 {
     keep bytes set std.bytes.from_string with { value set value }
     keep sliced set std.bytes.slice with { bytes set bytes offset set 1 length set std.bytes.length with { bytes set bytes } } or give
@@ -64,7 +64,7 @@ gives String or String
 
 define bulk
 takes { value is String }
-gives String or String
+gives String or Problem
 {
     keep length set std.bytes.length with { bytes set std.bytes.from_string with { value set value } }
     keep prefix set std.text.concat with { left set "$" right set std.int.format with { value set length } } or give
@@ -75,10 +75,10 @@ gives String or String
 
 define command
 takes { parts is [String] }
-gives String or String
+gives String or Problem
 {
-    when len with { value set parts } == 0 { give err with { problem set "Redis command requires at least one part" } }
-    when len with { value set parts } > 1024 { give err with { problem set "Redis command exceeds 1024 parts" } }
+    when len with { value set parts } == 0 { give err with { problem set std.problems.create("redis", "Redis command requires at least one part") } }
+    when len with { value set parts } > 1024 { give err with { problem set std.problems.create("redis", "Redis command exceeds 1024 parts") } }
     keep count set std.text.concat with { left set "*" right set std.int.format with { value set len with { value set parts } } } or give
     change encoded set std.text.concat with { left set count right set "\r\n" } or give
     each part within parts {
@@ -90,7 +90,7 @@ gives String or String
 
 define connect
 takes { host is String, port is Int, timeout is Float }
-gives TcpStream or String
+gives TcpStream or Problem
 needs Network
 {
     give std.net.connect with { host set host port set port timeout set timeout }
@@ -98,7 +98,7 @@ needs Network
 
 define open
 takes { host is String, port is Int, timeout is Float }
-gives Connection or String
+gives Connection or Problem
 needs Network
 {
     keep stream set std.net.connect with { host set host port set port timeout set timeout } or give
@@ -107,7 +107,7 @@ needs Network
 
 define open_secure
 takes { host is String, port is Int, timeout is Float, options is Map<String, String> }
-gives Connection or String
+gives Connection or Problem
 needs Network
 {
     keep stream set std.net.tls_connect with { host set host port set port timeout set timeout options set options } or give
@@ -116,7 +116,7 @@ needs Network
 
 define write_connection
 takes { connection is Connection, encoded is String, timeout is Float }
-gives Nothing or String
+gives Nothing or Problem
 needs Network
 {
     give choose connection {
@@ -127,7 +127,7 @@ needs Network
 
 define read_line_connection
 takes { connection is Connection, maximum is Int, timeout is Float }
-gives String or String
+gives String or Problem
 needs Network
 {
     give choose connection {
@@ -138,7 +138,7 @@ needs Network
 
 define read_exact_connection
 takes { connection is Connection, length is Int, timeout is Float }
-gives Bytes or String
+gives Bytes or Problem
 needs Network
 {
     give choose connection {
@@ -149,7 +149,7 @@ needs Network
 
 define close
 takes { connection is Connection }
-gives Nothing or String
+gives Nothing or Problem
 needs Network
 {
     give choose connection {
@@ -160,7 +160,7 @@ needs Network
 
 define send_chunk
 takes { stream is TcpStream, parts is [String], timeout is Float, maximum is Int }
-gives String or String
+gives String or Problem
 needs Network
 {
     keep encoded set command with { parts set parts } or give
@@ -170,12 +170,12 @@ needs Network
 
 define receive_nested
 takes { stream is TcpStream, timeout is Float, maximum is Int, depth is Int }
-gives Response or String
+gives Response or Problem
 needs Network
 {
-    when depth > 128 { give err with { problem set "RESP nesting exceeds 128 levels" } }
+    when depth > 128 { give err with { problem set std.problems.create("redis", "RESP nesting exceeds 128 levels") } }
     keep line set std.net.read_line with { stream set stream maximum set 65536 timeout set timeout } or give
-    when len with { value set line } == 0 { give err with { problem set "empty RESP header" } }
+    when len with { value set line } == 0 { give err with { problem set std.problems.create("redis", "empty RESP header") } }
     keep marker set line[0]
     keep content set tail with { value set line } or give
     when marker == "+" { give ok with { value set Response.Text(content) } }
@@ -187,17 +187,17 @@ needs Network
     when marker == "$" {
         keep length set std.int.parse with { source set content } or give
         when length == -1 { give ok with { value set Response.Null } }
-        when length < 0 or length > maximum { give err with { problem set "RESP bulk length exceeds configured limit" } }
+        when length < 0 or length > maximum { give err with { problem set std.problems.create("redis", "RESP bulk length exceeds configured limit") } }
         keep data set std.net.read_exact_bytes with { stream set stream length set length timeout set timeout } or give
         keep ending set std.net.read_exact_bytes with { stream set stream length set 2 timeout set timeout } or give
-        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set "RESP bulk value is missing its terminator" } }
+        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set std.problems.create("redis", "RESP bulk value is missing its terminator") } }
         give ok with { value set Response.Bulk(data) }
     }
     when marker == "*" {
         keep length set std.int.parse with { source set content } or give
         when length == -1 { give ok with { value set Response.Null } }
         when length < 0 or length > maximum or length > 1000000 {
-            give err with { problem set "RESP array length exceeds configured limit" }
+            give err with { problem set std.problems.create("redis", "RESP array length exceeds configured limit") }
         }
         change values is [Response] set []
         change index set 0
@@ -208,28 +208,28 @@ needs Network
         }
         give ok with { value set Response.Array(values) }
     }
-    give err with { problem set "unknown RESP response marker" }
+    give err with { problem set std.problems.create("redis", "unknown RESP response marker") }
 }
 
 define receive
 takes { stream is TcpStream, timeout is Float, maximum is Int }
-gives Response or String
+gives Response or Problem
 needs Network
 {
     when maximum < 0 or maximum > 16777216 {
-        give err with { problem set "RESP maximum must be between 0 and 16777216" }
+        give err with { problem set std.problems.create("redis", "RESP maximum must be between 0 and 16777216") }
     }
     give receive_nested with { stream set stream timeout set timeout maximum set maximum depth set 0 }
 }
 
 define receive_connection_nested
 takes { connection is Connection, timeout is Float, maximum is Int, depth is Int }
-gives Response or String
+gives Response or Problem
 needs Network
 {
-    when depth > 128 { give err with { problem set "RESP nesting exceeds 128 levels" } }
+    when depth > 128 { give err with { problem set std.problems.create("redis", "RESP nesting exceeds 128 levels") } }
     keep line set read_line_connection with { connection set connection maximum set 65536 timeout set timeout } or give
-    when len with { value set line } == 0 { give err with { problem set "empty RESP header" } }
+    when len with { value set line } == 0 { give err with { problem set std.problems.create("redis", "empty RESP header") } }
     keep marker set line[0]
     keep content set tail with { value set line } or give
     when marker == "+" { give ok with { value set Response.Text(content) } }
@@ -239,13 +239,13 @@ needs Network
         give ok with { value set Response.Integer(number) }
     }
     when marker == "_" {
-        when content != "" { give err with { problem set "RESP3 null must not contain a value" } }
+        when content != "" { give err with { problem set std.problems.create("redis", "RESP3 null must not contain a value") } }
         give ok with { value set Response.Null }
     }
     when marker == "#" {
         when content == "t" { give ok with { value set Response.Boolean(yes) } }
         when content == "f" { give ok with { value set Response.Boolean(no) } }
-        give err with { problem set "invalid RESP3 boolean" }
+        give err with { problem set std.problems.create("redis", "invalid RESP3 boolean") }
     }
     when marker == "," {
         keep number set std.float.parse with { source set content } or give
@@ -258,18 +258,18 @@ needs Network
     when marker == "$" {
         keep length set std.int.parse with { source set content } or give
         when length == -1 { give ok with { value set Response.Null } }
-        when length < 0 or length > maximum { give err with { problem set "RESP bulk length exceeds configured limit" } }
+        when length < 0 or length > maximum { give err with { problem set std.problems.create("redis", "RESP bulk length exceeds configured limit") } }
         keep data set read_exact_connection with { connection set connection length set length timeout set timeout } or give
         keep ending set read_exact_connection with { connection set connection length set 2 timeout set timeout } or give
-        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set "RESP bulk value is missing its terminator" } }
+        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set std.problems.create("redis", "RESP bulk value is missing its terminator") } }
         give ok with { value set Response.Bulk(data) }
     }
     when marker == "!" or marker == "=" {
         keep length set std.int.parse with { source set content } or give
-        when length < 0 or length > maximum { give err with { problem set "RESP3 blob length exceeds configured limit" } }
+        when length < 0 or length > maximum { give err with { problem set std.problems.create("redis", "RESP3 blob length exceeds configured limit") } }
         keep data set read_exact_connection with { connection set connection length set length timeout set timeout } or give
         keep ending set read_exact_connection with { connection set connection length set 2 timeout set timeout } or give
-        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set "RESP3 blob value is missing its terminator" } }
+        when ending != std.bytes.from_string with { value set "\r\n" } { give err with { problem set std.problems.create("redis", "RESP3 blob value is missing its terminator") } }
         when marker == "!" { give ok with { value set Response.BlobError(data) } }
         give ok with { value set Response.Verbatim(data) }
     }
@@ -277,7 +277,7 @@ needs Network
         keep length set std.int.parse with { source set content } or give
         when length == -1 { give ok with { value set Response.Null } }
         when length < 0 or length > maximum or length > 1000000 {
-            give err with { problem set "RESP array length exceeds configured limit" }
+            give err with { problem set std.problems.create("redis", "RESP array length exceeds configured limit") }
         }
         change values is [Response] set []
         change index set 0
@@ -291,7 +291,7 @@ needs Network
     when marker == "~" or marker == ">" {
         keep length set std.int.parse with { source set content } or give
         when length < 0 or length > maximum or length > 1000000 {
-            give err with { problem set "RESP3 collection length exceeds configured limit" }
+            give err with { problem set std.problems.create("redis", "RESP3 collection length exceeds configured limit") }
         }
         change values is [Response] set []
         change index set 0
@@ -306,7 +306,7 @@ needs Network
     when marker == "%" {
         keep length set std.int.parse with { source set content } or give
         when length < 0 or length > maximum or length > 1000000 {
-            give err with { problem set "RESP3 map length exceeds configured limit" }
+            give err with { problem set std.problems.create("redis", "RESP3 map length exceeds configured limit") }
         }
         change entries is [[Response]] set []
         change index set 0
@@ -318,31 +318,31 @@ needs Network
         }
         give ok with { value set Response.Map(entries) }
     }
-    give err with { problem set "unknown RESP response marker" }
+    give err with { problem set std.problems.create("redis", "unknown RESP response marker") }
 }
 
 define receive_connection
 takes { connection is Connection, timeout is Float, maximum is Int }
-gives Response or String
+gives Response or Problem
 needs Network
 {
     when maximum < 0 or maximum > 16777216 {
-        give err with { problem set "RESP maximum must be between 0 and 16777216" }
+        give err with { problem set std.problems.create("redis", "RESP maximum must be between 0 and 16777216") }
     }
     give receive_connection_nested with { connection set connection timeout set timeout maximum set maximum depth set 0 }
 }
 
 define auth_status
 takes { message is String }
-gives Nothing or String
+gives Nothing or Problem
 {
     when message == "OK" { give ok with { value set none } }
-    give err with { problem set "Redis AUTH returned an unexpected status" }
+    give err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected status") }
 }
 
 define authenticate
 takes { connection is Connection, username is String, password is String, timeout is Float, maximum is Int }
-gives Nothing or String
+gives Nothing or Problem
 needs Network
 {
     change parts set ["AUTH", password]
@@ -352,29 +352,29 @@ needs Network
     keep response set receive_connection with { connection set connection timeout set timeout maximum set maximum } or give
     give choose response {
         case Text carries message => auth_status with { message set message }
-        case Error carries problem => err with { problem set problem }
-        case Integer carries number => err with { problem set "Redis AUTH returned an unexpected integer" }
-        case Boolean carries value => err with { problem set "Redis AUTH returned an unexpected boolean" }
-        case Double carries number => err with { problem set "Redis AUTH returned an unexpected double" }
-        case BigNumber carries number => err with { problem set "Redis AUTH returned an unexpected big number" }
-        case Bulk carries data => err with { problem set "Redis AUTH returned an unexpected bulk value" }
-        case BlobError carries data => err with { problem set "Redis AUTH returned a blob error" }
-        case Verbatim carries data => err with { problem set "Redis AUTH returned an unexpected verbatim value" }
-        case Array carries values => err with { problem set "Redis AUTH returned an unexpected array" }
-        case Map carries entries => err with { problem set "Redis AUTH returned an unexpected map" }
-        case Set carries values => err with { problem set "Redis AUTH returned an unexpected set" }
-        case Push carries values => err with { problem set "Redis AUTH returned an unexpected push" }
-        case Null => err with { problem set "Redis AUTH returned null" }
+        case Error carries problem => err with { problem set std.problems.create("redis", problem) }
+        case Integer carries number => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected integer") }
+        case Boolean carries value => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected boolean") }
+        case Double carries number => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected double") }
+        case BigNumber carries number => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected big number") }
+        case Bulk carries data => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected bulk value") }
+        case BlobError carries data => err with { problem set std.problems.create("redis", "Redis AUTH returned a blob error") }
+        case Verbatim carries data => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected verbatim value") }
+        case Array carries values => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected array") }
+        case Map carries entries => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected map") }
+        case Set carries values => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected set") }
+        case Push carries values => err with { problem set std.problems.create("redis", "Redis AUTH returned an unexpected push") }
+        case Null => err with { problem set std.problems.create("redis", "Redis AUTH returned null") }
     }
 }
 
 define pipeline
 takes { connection is Connection, commands is [[String]], timeout is Float, maximum is Int }
-gives [Response] or String
+gives [Response] or Problem
 needs Network
 {
     when len with { value set commands } == 0 { give ok with { value set [] } }
-    when len with { value set commands } > 4096 { give err with { problem set "Redis pipeline exceeds 4096 commands" } }
+    when len with { value set commands } > 4096 { give err with { problem set std.problems.create("redis", "Redis pipeline exceeds 4096 commands") } }
     change encoded set ""
     each parts within commands {
         keep frame set command with { parts set parts } or give
@@ -393,25 +393,25 @@ needs Network
 
 define pool
 takes { maximum is Int }
-gives Pool or String
+gives Pool or Problem
 {
-    when maximum < 1 or maximum > 1024 { give err with { problem set "Redis pool size must be from 1 through 1024" } }
+    when maximum < 1 or maximum > 1024 { give err with { problem set std.problems.create("redis", "Redis pool size must be from 1 through 1024") } }
     give ok with { value set Pool([], maximum) }
 }
 
 define pool_add
 takes { pool_value is Pool, connection is Connection }
-gives Pool or String
+gives Pool or Problem
 {
-    when len with { value set pool_value.idle } >= pool_value.maximum { give err with { problem set "Redis pool is full" } }
+    when len with { value set pool_value.idle } >= pool_value.maximum { give err with { problem set std.problems.create("redis", "Redis pool is full") } }
     give ok with { value set Pool(append with { values set pool_value.idle value set connection }, pool_value.maximum) }
 }
 
 define pool_take
 takes { pool_value is Pool }
-gives Lease or String
+gives Lease or Problem
 {
-    when len with { value set pool_value.idle } == 0 { give err with { problem set "Redis pool is empty" } }
+    when len with { value set pool_value.idle } == 0 { give err with { problem set std.problems.create("redis", "Redis pool is empty") } }
     keep connection set pool_value.idle[0]
     change remaining is [Connection] set []
     change index set 1
@@ -424,14 +424,14 @@ gives Lease or String
 
 define redirect
 takes { message is String }
-gives Redirect or String
+gives Redirect or Problem
 {
     keep words set std.text.split with { value set message separator set " " maximum set 4 } or give
-    when len with { value set words } != 3 { give err with { problem set "invalid Redis cluster redirect" } }
+    when len with { value set words } != 3 { give err with { problem set std.problems.create("redis", "invalid Redis cluster redirect") } }
     keep kind set words[0]
-    when kind != "MOVED" and kind != "ASK" { give err with { problem set "response is not a Redis cluster redirect" } }
+    when kind != "MOVED" and kind != "ASK" { give err with { problem set std.problems.create("redis", "response is not a Redis cluster redirect") } }
     keep slot set std.int.parse with { source set words[1] } or give
-    when slot < 0 or slot > 16383 { give err with { problem set "Redis cluster slot must be from 0 through 16383" } }
+    when slot < 0 or slot > 16383 { give err with { problem set std.problems.create("redis", "Redis cluster slot must be from 0 through 16383") } }
     keep target set std.text.split_last with { value set words[2] separator set ":" } or give
     change host set target[0]
     when len with { value set host } >= 2 and host[0] == "[" and host[len with { value set host } - 1] == "]" {
@@ -439,15 +439,15 @@ gives Redirect or String
         keep inner set std.bytes.slice with { bytes set bytes offset set 1 length set std.bytes.length with { bytes set bytes } - 1 } or give
         change host to std.bytes.to_string with { bytes set inner } or give
     }
-    when host == "" { give err with { problem set "Redis cluster redirect host cannot be empty" } }
+    when host == "" { give err with { problem set std.problems.create("redis", "Redis cluster redirect host cannot be empty") } }
     keep port set std.int.parse with { source set target[1] } or give
-    when port < 1 or port > 65535 { give err with { problem set "Redis cluster redirect port must be from 1 through 65535" } }
+    when port < 1 or port > 65535 { give err with { problem set std.problems.create("redis", "Redis cluster redirect port must be from 1 through 65535") } }
     give ok with { value set Redirect(kind, slot, host, port) }
 }
 
 define open_configured
 takes { host is String, port is Int, username is String, password is String, secure is Bool, options is Map<String, String>, timeout is Float, maximum is Int }
-gives Connection or String
+gives Connection or Problem
 needs Network
 {
     change connection set open with { host set host port set port timeout set timeout } or give
@@ -458,18 +458,18 @@ needs Network
 
 define client
 takes { host is String, port is Int, username is String, password is String, secure is Bool, options is Map<String, String>, timeout is Float, maximum is Int, redirects is Int }
-gives Client or String
+gives Client or Problem
 needs Network
 {
-    when redirects < 0 or redirects > 32 { give err with { problem set "Redis redirect limit must be from 0 through 32" } }
-    when maximum < 1 or maximum > 16777216 { give err with { problem set "RESP maximum must be from 1 through 16777216" } }
+    when redirects < 0 or redirects > 32 { give err with { problem set std.problems.create("redis", "Redis redirect limit must be from 0 through 32") } }
+    when maximum < 1 or maximum > 16777216 { give err with { problem set std.problems.create("redis", "RESP maximum must be from 1 through 16777216") } }
     keep connection set open_configured with { host set host port set port username set username password set password secure set secure options set options timeout set timeout maximum set maximum } or give
     give ok with { value set Client(connection, username, password, secure, options, timeout, maximum, redirects) }
 }
 
 define execute
 takes { client_value is Client, parts is [String] }
-gives Outcome or String
+gives Outcome or Problem
 needs Network
 {
     change connection set client_value.connection
@@ -494,7 +494,7 @@ needs Network
                 case Push carries values => no
                 case Null => no
             }
-            when not accepted { give err with { problem set "Redis cluster ASKING was rejected" } }
+            when not accepted { give err with { problem set std.problems.create("redis", "Redis cluster ASKING was rejected") } }
         }
         keep responses set pipeline with { connection set connection commands set [parts] timeout set client_value.timeout maximum set client_value.maximum } or give
         keep response set responses[0]
@@ -520,14 +520,14 @@ needs Network
             keep next set Client(connection, client_value.username, client_value.password, client_value.secure, client_value.tls_options, client_value.timeout, client_value.maximum, client_value.redirects)
             give ok with { value set Outcome(response, next) }
         }
-        when attempts == client_value.redirects { give err with { problem set "Redis cluster redirect limit exceeded" } }
+        when attempts == client_value.redirects { give err with { problem set std.problems.create("redis", "Redis cluster redirect limit exceeded") } }
         keep destination set redirect with { message set problem } or give
         close with { connection set connection }
         change connection to open_configured with { host set destination.host port set destination.port username set client_value.username password set client_value.password secure set client_value.secure options set client_value.tls_options timeout set client_value.timeout maximum set client_value.maximum } or give
         change asking to destination.kind == "ASK"
         change attempts to attempts + 1
     }
-    give err with { problem set "Redis cluster redirect limit exceeded" }
+    give err with { problem set std.problems.create("redis", "Redis cluster redirect limit exceeded") }
 }
 
 expose {

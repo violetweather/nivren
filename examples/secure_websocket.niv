@@ -3,7 +3,7 @@ takes {
     host is String
     path is String
 }
-gives WebSocket or String
+gives WebSocket or Problem
 needs Network
 {
     keep policy set std.web.tls_options with {}
@@ -24,7 +24,7 @@ takes {
     certificate_pem is String
     private_key_pem is String
 }
-gives WebSocket or String
+gives WebSocket or Problem
 needs Network
 {
     keep roots set std.map.set with {

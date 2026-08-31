@@ -97,7 +97,7 @@ Expected failure appears in the signature as `gives Value or Problem`:
 
 ```nivren
 define configuration
-gives String or String
+gives String or Problem
 needs FileRead
 {
     keep text set perform std.files.read with { path set "app.json" } or give
@@ -117,7 +117,7 @@ shape FetchPlan holds {
 
 define fetch
 takes { plan is FetchPlan }
-gives String or String
+gives String or Problem
 needs Network within "api.example.com"
 {
     give perform std.web.get with {
@@ -172,7 +172,7 @@ Own closeable resources with `using`:
 ```nivren
 define load
 takes { path is String }
-gives String or String
+gives String or Problem
 needs FileRead
 {
     keep opened set perform std.files.open_read with { path set path }

@@ -2,7 +2,7 @@ use "../src/main.niv"
 
 define compatibility
 takes { }
-gives Bool or String
+gives Bool or Problem
 {
     keep signed set main.sign_v4 with {
         method set "GET"
