@@ -1,120 +1,119 @@
 # Nivren
 
-Nivren is an intent-first application programming language focused on safety, clarity, visible effects, and a coherent path from a first script to production software. This repository contains the Edition 5 draft development line on the road to 1.0.
+Nivren is an intent-first application programming language. The source says what a
+program keeps, changes, needs, and gives — and the compiler holds it to that.
 
-> **Edition 5 is a breaking update.** Edition 2, 3, and 4 sources are no longer supported surfaces: legacy `=` bindings, `:` type annotations, caseless `choose` arms, positional protocol members, and the other retired forms now stop with diagnostics that name the Edition 5 spelling. There are no compatibility fallbacks. See `spec/LANGUAGE-5-DRAFT.md` for the final grammar and `spec/EDITION-5-FIX-LEDGER.md` for every removal and its rationale.
+This is **Nivren 1.0.0**: Edition 6, the runtime edition, stable. The grammar is
+frozen for good, and the compatibility promise is unconditional — code you write
+today runs unchanged on every later release.
 
-Start with `docs/GETTING_STARTED.md` for archive verification, installation, and a first project.
+- Website: <https://violetweather.github.io/nivren-site>
+- Documentation: <https://violetweather.github.io/nivren-site/docs>
+- Package registry: <https://violetweather.github.io/nivren-registry>
+- Benchmarks (wins and losses, all published): <https://violetweather.github.io/nivren-site/benchmarks>
 
-The guided installers under `install/` detect the correct binary, verify it, retain its documentation, and can configure PATH and VS Code automatically. Manual archives remain available for fully controlled installs.
+## Install
 
-## Build and run
+**macOS / Linux**
 
 ```sh
-cargo build --workspace
-cargo run -- new my-app
-cargo run -- dev my-app
-cargo run -- test
-cargo run -- repl
-cargo test --workspace
+curl --proto '=https' --tlsv1.2 -fsSLO https://raw.githubusercontent.com/violetweather/nivren/main/install/install.sh
+sh install.sh
 ```
 
-The installed executable is named `niv`:
+**Windows (PowerShell)**
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/violetweather/nivren/main/install/install.ps1 -OutFile install.ps1
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
+```
+
+The guided installer verifies every download against its published SHA-256
+checksum, keeps a recovery version for rollback, and can set up PATH and
+VS Code for you. Prefer a manual archive? Grab one from the
+[downloads page](https://violetweather.github.io/nivren-site/downloads) and
+verify it with `SHA256SUMS`.
+
+## Hello, Nivren
+
+Create `hello.niv`:
+
+```text
+define greet
+takes { name is String }
+gives String
+{
+    give "Hello, " + name + "!"
+}
+
+show(greet with { name set "world" })
+```
+
+Run it:
+
+```sh
+niv run hello.niv
+```
+
+Or start a real project — one command path from new to shipped:
 
 ```sh
 niv new my-app
-niv add package 1.2.3 my-app
-niv dev my-app
-niv test my-app/tests/niv
-niv test --snapshots my-app/tests/niv
-niv ship my-app
-niv run program.niv
-niv run --native program.niv
-niv run .
-niv check .
-niv install /path/to/registry .
-niv install --trusted https://registry.example root.pub .
-niv install --offline .
-niv cache list .
-niv authority check .
-niv authority report .
-niv build .
-niv build --standalone .
-niv build --standalone --native .
-niv build --aot .
-niv package .
-niv run target/example.nivb
-niv disasm target/example.nivb
-niv debug examples/hello.niv
-niv profile examples/hello.niv
-niv inspect examples/hello.niv events.jsonl
-niv coverage examples/hello.niv
-niv fmt --check .
-niv doc .
-niv test [path]
-niv repl
+cd my-app
+niv dev       # check + run
+niv test      # run the tests
+niv ship      # check, test, document, package, and emit a standalone executable
 ```
 
-## Implemented language surface
+## What makes it Nivren
 
-- Signed 64-bit integers, binary64 floats, Unicode strings, immutable bytes with explicit-endian binary codecs, booleans, and `none`
-- Immutable `keep` and mutable `change` bindings
-- Arithmetic, comparison, equality, and short-circuit logic
-- `when`/`otherwise`, `repeat`, blocks, and lexical scope
-- Functions, recursion, closures, generic inference, sealed safety constraints, required-member protocols with coherent dispatch, and `give`
-- Checked `needs` capabilities—including explicit operating-system entropy through `Random`—plus scoped path/host project grants and shared instruction/memory limits
-- Typed `or give` failure propagation and exhaustive `choose`
-- Readable `through` pipelines, generic persistent arrays/maps/sets, and bounded typed single-pass iterator adapters
-- Scoped `using` files/listeners/streams/locks/transactions, transferable checked atomic integers, and `start`/`wait`/`together`/`race` structured concurrency
-- Optional semicolons and nested block comments
-- Unicode identifiers and UTF-8 strings
-- Source-located lexer, parser, and runtime diagnostics
-- Explicit binding, parameter, array, and return type annotations
-- Built-in language test discovery with `assert(condition, message)`
-- Private-by-default modules with explicit `expose` declarations and namespaced access
-- Strict manifests, transitive exact-version dependencies, checksum-pinned deterministic dependency locks, complete reviewable authority locks, project-root confinement, formatting, and API docs
-- Verified versioned bytecode, portable application bundles, call-frame traces, and precise closure-environment collection
-- Typed application APIs for bounded file handles, paths, environment, processes, time, shape-derived JSON plus bounded typed data streams, TCP clients/listeners, HTTP clients/servers, certificate-verified TLS clients and certificate/key-configured secure WebSocket servers, and logging
-- Structured worker tasks, cooperative cancellation and deadlines, bounded channels, multi-stream OS readiness plus backpressure-aware adapters, a versioned compiler facade, schema-driven C11/C++17 bindings, capability/path-gated dynamic C libraries, bounded asynchronous host operations, and an isolated C ABI with owned native callbacks plus async event-loop wakeups
-- Incremental builds, VM and native standalone executables, deterministic complete-program native AOT objects plus optimized integer kernels, portable WASI and zero-import browser compiler/runtime guests with a JavaScript SDK, ABI v3 shared/static embedding libraries, SBOM-bearing release archives, LSP and VS Code support, debugging, profiling, coverage, property/fuzz tests, deterministic packages, and private registries
-- An integration-tested official package catalog for bounded SHA-256/HMAC, Argon2id password storage, secure random keys, random-nonce ChaCha20-Poly1305 authenticated encryption, compact HS256 JWT authentication, AWS Signature Version 4, W3C tracing, Prometheus metrics, deterministic compression, explicit-schema CSV and typed columnar tables, dense matrices, PCM16 audio, escaped SVG interfaces, descriptive statistics, parameterized SQL, Redis RESP2/RESP3 with TLS/AUTH/pipelines/pools/Cluster redirects, Discord REST, typed testing, pure routing, and structured validation, with generated public API docs and semantic compatibility rules
-- Safe declaration reflection and compiler facade v3 generation APIs that emit inspectable source instead of hidden text macros
-- Built-ins: `clock()`, `len(value)`, `type(value)`, `append(array, value)`, `assert(condition, message)`, `ok(value)`, and `err(value)`
+- **Visible authority.** A function that touches the network says
+  `needs Network`, and the project grants exactly which hosts. No ambient
+  permissions, ever.
+- **No exceptions, no nulls.** Failure is a typed value; `or give` forwards it,
+  `choose` handles every case, and the compiler checks both.
+- **Structured concurrency.** Tasks cannot outlive their scope; channels are
+  bounded; cleanup runs on success, failure, and crash alike.
+- **Native speed where it counts.** Edition 6 compiles whole integer programs to
+  machine code and `niv build --aot` emits a relocatable native object.
+- **One toolchain in one binary.** Formatter, language server, debugger,
+  profiler, coverage, docs, benchmarks, and package manager — all inside `niv`.
+- **A live signed registry.** All 25 official packages install with client-side
+  Ed25519 verification: `niv add nivren_stats 1.0.0`, then
+  `niv install --trusted https://violetweather.github.io/nivren-registry ./nivren-root.pub`.
 
-The implementation remains pre-1.0 until every open capability-audit row has executable evidence and the full platform, security, performance, compatibility, installer, documentation, and production-pilot gates pass together. Local Edition 4 work is not published until those gates are complete.
+Run `niv help` for the full command list, or browse the
+[examples](https://violetweather.github.io/nivren-site/examples).
 
-The supported OCI recipe under `containers/` builds a minimal non-root image with verified-TLS certificate roots. CI runs its default command on a read-only filesystem; no image is published before the complete 1.0 gate.
+## Building from source
 
-The executable Edition 4 beta-candidate specification lives in `spec/LANGUAGE-4-DRAFT.md`; the retained Edition 2 and Edition 3 specifications are historical compatibility references. Implementation-independent Edition 2, Edition 3, and Edition 4 vectors in `conformance/` are exercised against the external `niv` process by the black-box conformance runner.
+Requires Rust 1.88 or newer.
 
-## Editor support
-
-The first-party VS Code extension in `editors/vscode` provides syntax highlighting, live diagnostics, completion, formatting, and Unicode-correct rename through the built-in language server. Its bounded workspace index covers up to 4,096 Nivren files and 16 MiB of source, skips generated/dependency trees and symlinks, and lets rename update exposed declarations plus qualified references in open or closed importing modules without touching unrelated same-named bindings. The guided installer offers to install the release VSIX automatically when the `code` command is available. To build it yourself:
-
-```text
-cd editors/vscode
-npm ci
-npm run package
+```sh
+git clone https://github.com/violetweather/nivren.git
+cd nivren
+cargo build --release --workspace
+./target/release/niv version
 ```
 
-Install the resulting `.vsix` in VS Code. The extension runs `niv lsp`; set **Nivren: Server Path** if `niv` is not on `PATH`.
+`cargo test --workspace --all-targets` runs the full dual-engine suite.
 
-## Runtime observability
+## Learn more
 
-Run `niv profile <file-or-project>` to execute a program and report elapsed time plus bytecode-operation counts. Run `niv coverage <file-or-project>` to execute it and report hit and missed source lines. Both commands also accept self-contained `.nivb` bundles.
+- `docs/GETTING_STARTED.md` — install, verify, and write a first project
+- `docs/LANGUAGE.md` and `spec/LANGUAGE-5-DRAFT.md` — the language and its frozen grammar
+- `docs/PACKAGES.md` and `docs/REGISTRY_SECURITY.md` — packages and the signed registry
+- `docs/AOT.md` — native ahead-of-time objects
+- `docs/EMBEDDING.md` — the C ABI, and Swift/Kotlin wrappers (experimental)
+- `docs/RELEASES.md` — the release policy and the machine-checked 1.0 gate
+- `CONTRIBUTING.md` — how to contribute
+- `SECURITY.md` — how to report a vulnerability
 
-Use `niv debug <file-or-project>` for the interactive source debugger. It supports stepping, continuing, line breakpoints, scoped variable listing, individual variable inspection, and clean termination; type `help` at its prompt for the command list.
-
-Use `niv inspect <file-or-project> <output.jsonl>` for a flush-on-every-step `org.nivren.inspect.v1` event stream suitable for live viewers and operational tooling. It reports locations, operations, stack depth, variable names, final metrics, and heap counters while deliberately omitting source and variable values.
-
-## Robustness testing
-
-`cargo test --workspace --all-targets` includes deterministic property suites with shrinking for VM equivalence, formatting, and arbitrary frontend input. The `fuzz` package contains the `frontend` libFuzzer target; run it with `cargo +nightly fuzz run frontend`. CI performs bounded fuzz smoke tests and retains crash artifacts.
-
-## Packages and private registries
-
-`niv package [project]` creates a deterministic, source-only `.nivpkg` after compiling the project without running project code or lifecycle scripts. `niv package verify` validates an archive. `niv registry publish` and `niv registry fetch` operate on immutable, checksum-verified local or privately mounted v1 registries. See `docs/PACKAGES.md` for the bounded archive and registry protocol.
+Upgrading from a pre-1.0 edition? Retired spellings stop with a diagnostic that
+names the current form; `spec/EDITION-5-FIX-LEDGER.md` records every removal and
+its rationale.
 
 ## License
 
-Apache License 2.0.
+[Apache-2.0](LICENSE)

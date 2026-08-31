@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.0 — Edition 6
+
+Nivren 1.0: Edition 6, the runtime edition, stable. The grammar is the
+frozen Edition 5 grammar and the finality clause holds — no new syntax,
+keywords, operators, or capability names, ever — so from this release
+the compatibility promise is unconditional: existing source runs
+unchanged on every later Nivren.
+
+The 1.0 bar is internal evidence, stated without embellishment: the
+dual-engine test suites, fourteen conformance vectors, continuous
+fuzzing, six-platform CI with reproducible artifacts, and
+machine-checked release receipts (`niv release check`). An independent
+security audit and signing-recovery drill are 1.1 gates, not 1.0
+claims. The 1.0.x line carries fixes only; new work ships as 1.1 betas.
+
+Edition 6 highlights over the 0.10 beta line:
+
+- **The memory generation.** Every runtime value shrinks from 48 to
+  24 bytes, shapes share one field-name table so construction copies no
+  strings, typed JSON decodes allocate no path strings, and mimalloc
+  replaces the system allocator for the CLI.
+- **The native generation.** Whole integer programs — loops, recursive
+  calls, and flattened shapes — compile to machine code through the
+  Cranelift tier with hardware overflow checks, and `niv build --aot`
+  emits the planned program as one relocatable native object.
+- **Real hosts.** A live DAP debugger with breakpoints and stepping; a
+  bundled database host routing SQLite plus real PostgreSQL and MySQL
+  client connections; a wgpu-backed WebGPU compute host with a checked
+  CPU fallback; and a Windows WebView2 desktop host behind a locked
+  content-security policy. Deferred surfaces remain labeled
+  experimental wherever they are described.
+- **The live signed registry.** All 25 official packages published at
+  1.0.0 under a pinned Ed25519 root, with the `niv trust` signing chain
+  and client-side `niv install --trusted` verification.
+- **Typed problems.** Every standard-library failure carries the
+  builtin Problem shape.
+
+The public benchmark suite records Nivren ahead on most rows —
+including the compute rows it previously lost — while allocation churn
+and channel-heavy concurrency remain published open rows.
+
 ## Unreleased
 
 - **Edition 5 is a breaking update.** Edition 2, 3, and 4 sources are no longer supported surfaces: the Edition 5 fix ledger's accepted repairs land directly, with no compatibility fallbacks. Programs written for earlier editions must migrate their spellings. The retained Edition 2/3 black-box conformance suites are removed with this policy.

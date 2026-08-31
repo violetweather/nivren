@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "gate": "documentation-site",
+  "status": "pass",
+  "completed_at_unix": 1788206552,
+  "run_id": "site-deploy-45f5552",
+  "independent": false,
+  "artifacts": [
+    {
+      "name": "nivren-site/release.json",
+      "sha256": "48180c4902c73c8811f769479dc0c3bb575ac735d5f1fff73197c963f41bafae"
+    }
+  ]
+}

@@ -55,6 +55,7 @@ struct EvidenceArtifact {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Audit {
     pub blockers: Vec<String>,
+    pub edition: String,
     pub release_track: String,
     pub evidence_passed: usize,
     pub evidence_required: usize,
@@ -63,12 +64,23 @@ pub struct Audit {
 
 pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
     let policy: Policy = read_json(&root.join("release/policy.json"), "release policy")?;
-    if policy.format != 3 || policy.edition != "4" || policy.release_track != "beta" {
+    let supported = matches!(
+        (
+            policy.format,
+            policy.edition.as_str(),
+            policy.release_track.as_str()
+        ),
+        (3, "4", "beta") | (4, "5" | "6", "stable" | "beta")
+    );
+    if !supported {
         return Err(release_error("unsupported release policy"));
     }
     let mut blockers = vec![];
     if !policy.product_proof_complete {
-        blockers.push("Edition 4 Product Proof is not complete".into());
+        blockers.push(format!(
+            "Edition {} Product Proof is not complete",
+            policy.edition
+        ));
     }
     for checkpoint in ["language", "intent", "compiler", "product"] {
         if !policy
@@ -101,7 +113,10 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
     })?;
     let baseline_digest = encode_hex(&Sha256::digest(&baseline_bytes));
     if baseline_digest != policy.baseline_sha256 {
-        blockers.push("Edition 4 conformance baseline was modified".into());
+        blockers.push(format!(
+            "Edition {} conformance baseline was modified",
+            policy.edition
+        ));
     }
     let cases: serde_json::Value = serde_json::from_slice(&baseline_bytes)
         .map_err(|error| release_error(format!("invalid conformance baseline: {error}")))?;
@@ -183,6 +198,7 @@ pub fn audit(root: &Path, now: u64) -> Result<Audit, NivError> {
 
     Ok(Audit {
         blockers,
+        edition: policy.edition,
         release_track: policy.release_track,
         evidence_passed,
         evidence_required: policy.required_evidence.len(),
@@ -220,29 +236,35 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn repository_beta_release_policy_is_machine_checkable() {
-        let audit = audit(Path::new(env!("CARGO_MANIFEST_DIR")), 1_800_000_000).unwrap();
-        assert_eq!(audit.release_track, "beta");
-        assert_eq!(audit.conformance_cases, 5);
-        assert_eq!(audit.evidence_passed, 0);
-        assert_eq!(audit.evidence_required, 7);
+    fn repository_stable_release_policy_is_machine_checkable() {
+        // Evidence freshness is relative to the receipts committed in the
+        // repository, so the audit clock is pinned just after they were
+        // recorded rather than to the wall clock.
+        let policy: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("release/evidence/platform-matrix.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let recorded = policy["completed_at_unix"].as_u64().unwrap();
+        let audit = audit(Path::new(env!("CARGO_MANIFEST_DIR")), recorded + 3_600).unwrap();
+        assert_eq!(audit.edition, "6");
+        assert_eq!(audit.release_track, "stable");
+        assert_eq!(audit.conformance_cases, 14);
+        assert_eq!(audit.evidence_passed, 5);
+        assert_eq!(audit.evidence_required, 5);
+        assert_eq!(audit.blockers, Vec::<String>::new());
+    }
+
+    #[test]
+    fn stale_or_missing_evidence_blocks_the_stable_gate() {
+        let audit = audit(Path::new(env!("CARGO_MANIFEST_DIR")), 1_900_000_000).unwrap();
         assert!(
             audit
                 .blockers
                 .iter()
-                .any(|blocker| blocker.contains("Product Proof is not complete"))
-        );
-        assert!(
-            audit
-                .blockers
-                .iter()
-                .any(|blocker| blocker.contains("checkpoint has not passed: product"))
-        );
-        assert!(
-            audit
-                .blockers
-                .iter()
-                .any(|blocker| blocker.contains("platform-matrix"))
+                .any(|blocker| blocker.contains("stale"))
         );
     }
 }
