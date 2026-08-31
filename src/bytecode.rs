@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, VecDeque};
 
 #[cfg(feature = "host-runtime")]
-use nivren_jit::IntOp;
+use nivren_jit::{IntCondition, IntOp};
 
 use crate::ast::{Expr, Literal, MatchArm, Pattern, PromiseClause, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
@@ -161,41 +161,273 @@ pub fn compile(program: &[Stmt]) -> Result<Chunk, Vec<NivError>> {
 }
 
 #[cfg(feature = "host-runtime")]
+pub struct IntegerRootPlan {
+    pub slot_count: usize,
+    pub operations: Vec<IntOp>,
+    /// True when the chunk ends by printing the produced value; the caller
+    /// prints the returned integer and the chunk result is `none`.
+    pub prints_result: bool,
+    /// Top-level bindings, their slots, and their mutability, written back
+    /// after execution.
+    pub persistent: Vec<PersistentSlot>,
+}
+
+#[cfg(feature = "host-runtime")]
 pub fn integer_native_plan(parameters: &[String], body: &Chunk) -> Option<(usize, Vec<IntOp>)> {
+    let (slots, operations, _) = integer_operations(parameters, &body.code)?;
+    verify_integer_kinds(parameters.len(), &operations, false)?;
+    Some((slots, operations))
+}
+
+/// Plans a complete top-level chunk as native integer code. The chunk may
+/// end with a `Print` of the final value; every top-level binding is
+/// reported for environment write-back.
+#[cfg(feature = "host-runtime")]
+pub fn integer_root_plan(chunk: &Chunk) -> Option<IntegerRootPlan> {
+    let (code, prints_result) = match chunk.code.split_last() {
+        Some((last, rest)) if matches!(last.op, Op::Print) => (rest, true),
+        _ => (chunk.code.as_slice(), false),
+    };
+    let (slot_count, mut operations, persistent) = integer_operations(&[], code)?;
+    operations.push(IntOp::Return);
+    verify_integer_kinds(0, &operations, true)?;
+    Some(IntegerRootPlan {
+        slot_count,
+        operations,
+        prints_result,
+        persistent,
+    })
+}
+
+/// A top-level binding's name, slot, and mutability.
+#[cfg(feature = "host-runtime")]
+type PersistentSlot = (String, usize, bool);
+
+/// Lowers verified bytecode to integer operations one-to-one (scope markers
+/// become `Nop` so jump targets stay aligned). Returns the slot count, the
+/// operations, and the top-level binding slots.
+#[cfg(feature = "host-runtime")]
+#[allow(clippy::too_many_lines)]
+fn integer_operations(
+    parameters: &[String],
+    code: &[Instruction],
+) -> Option<(usize, Vec<IntOp>, Vec<PersistentSlot>)> {
     let mut slots = BTreeMap::new();
     for (index, parameter) in parameters.iter().enumerate() {
         slots.insert(parameter.clone(), u32::try_from(index).ok()?);
     }
-    let mut operations = Vec::new();
+    let mut next_slot = u32::try_from(parameters.len()).ok()?;
+    let mut scopes = vec![parameters.to_vec()];
+    let mut persistent = Vec::new();
+    let mut operations = Vec::with_capacity(code.len());
     let mut returned = false;
-    for instruction in &body.code {
+    let reachable = reachable_instructions(code);
+    for (index, instruction) in code.iter().enumerate() {
+        if !reachable[index] {
+            // Dead code (the implicit give-none tail after an explicit give)
+            // lowers to Nop so jump targets stay aligned.
+            operations.push(IntOp::Nop);
+            continue;
+        }
         let operation = match &instruction.op {
             Op::Constant(Literal::Int(value)) => IntOp::Constant(*value),
+            Op::Constant(Literal::Null) => IntOp::NullConstant,
             Op::Load(name) => IntOp::Load(*slots.get(name)?),
-            Op::Define { name, .. } => {
+            Op::Define { name, mutable } => {
                 if slots.contains_key(name) {
                     return None;
                 }
-                let slot = u32::try_from(slots.len()).ok()?;
+                let slot = next_slot;
+                next_slot = next_slot.checked_add(1)?;
                 slots.insert(name.clone(), slot);
+                scopes.last_mut()?.push(name.clone());
+                if scopes.len() == 1 {
+                    persistent.push((name.clone(), slot as usize, *mutable));
+                }
                 IntOp::Define(slot)
             }
             Op::Store(name) => IntOp::Store(*slots.get(name)?),
             Op::Pop => IntOp::Pop,
             Op::Unary(TokenKind::Minus) => IntOp::Negate,
+            Op::Unary(TokenKind::Bang) => IntOp::Not,
             Op::Binary(TokenKind::Plus) => IntOp::Add,
             Op::Binary(TokenKind::Minus) => IntOp::Subtract,
             Op::Binary(TokenKind::Star) => IntOp::Multiply,
+            Op::Binary(TokenKind::Slash) => IntOp::Divide,
+            Op::Binary(TokenKind::Percent) => IntOp::Modulo,
+            Op::Binary(TokenKind::EqualEqual) => IntOp::Compare(IntCondition::Equal),
+            Op::Binary(TokenKind::BangEqual) => IntOp::Compare(IntCondition::NotEqual),
+            Op::Binary(TokenKind::Less) => IntOp::Compare(IntCondition::Less),
+            Op::Binary(TokenKind::LessEqual) => IntOp::Compare(IntCondition::LessEqual),
+            Op::Binary(TokenKind::Greater) => IntOp::Compare(IntCondition::Greater),
+            Op::Binary(TokenKind::GreaterEqual) => IntOp::Compare(IntCondition::GreaterEqual),
+            Op::Jump(target) => IntOp::Jump(u32::try_from(*target).ok()?),
+            Op::JumpIfFalse(target) => IntOp::JumpIfFalse(u32::try_from(*target).ok()?),
+            Op::EnterScope => {
+                scopes.push(Vec::new());
+                IntOp::Nop
+            }
+            Op::ExitScope => {
+                // Block locals go out of scope; their slots stay allocated so
+                // indices remain stable, but the names stop resolving.
+                let ended = scopes.pop()?;
+                if scopes.is_empty() {
+                    return None;
+                }
+                for name in ended {
+                    slots.remove(&name);
+                }
+                IntOp::Nop
+            }
             Op::Return => {
                 returned = true;
-                operations.push(IntOp::Return);
-                break;
+                IntOp::Return
             }
             _ => return None,
         };
         operations.push(operation);
     }
-    returned.then_some((slots.len(), operations))
+    if !parameters.is_empty() && !returned {
+        return None;
+    }
+    Some((next_slot as usize, operations, persistent))
+}
+
+/// Instruction reachability over the plain jump structure: `Return` stops
+/// fall-through, `Jump` redirects it, and `JumpIfFalse` forks. Every other
+/// operation falls through.
+#[cfg(feature = "host-runtime")]
+fn reachable_instructions(code: &[Instruction]) -> Vec<bool> {
+    let mut reachable = vec![false; code.len()];
+    let mut worklist = vec![0usize];
+    while let Some(index) = worklist.pop() {
+        if index >= code.len() || reachable[index] {
+            continue;
+        }
+        reachable[index] = true;
+        match &code[index].op {
+            Op::Return => {}
+            Op::Jump(target) => worklist.push(*target),
+            Op::JumpIfFalse(target) => {
+                worklist.push(*target);
+                worklist.push(index + 1);
+            }
+            _ => worklist.push(index + 1),
+        }
+    }
+    reachable
+}
+
+/// Value kinds a planned chunk may move: checked 64-bit integers and the
+/// 0/1 booleans comparisons produce. The pass walks every reachable path,
+/// rejects any plan whose joins disagree, whose slots would hold booleans,
+/// or whose `Return` would give a boolean as an integer.
+#[cfg(feature = "host-runtime")]
+fn verify_integer_kinds(parameters: usize, operations: &[IntOp], root: bool) -> Option<()> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Int,
+        Bool,
+        /// The loop-seed null; only `Pop` may consume it.
+        Null,
+        /// A join of integer and null values; only `Pop` may consume it.
+        Word,
+    }
+    fn join(left: Kind, right: Kind) -> Option<Kind> {
+        match (left, right) {
+            (left, right) if left == right => Some(left),
+            (Kind::Bool, _) | (_, Kind::Bool) => None,
+            _ => Some(Kind::Word),
+        }
+    }
+    let _ = parameters;
+    let mut states: Vec<Option<Vec<Kind>>> = vec![None; operations.len()];
+    let mut worklist = vec![(0usize, Vec::new())];
+    while let Some((index, mut stack)) = worklist.pop() {
+        if index >= operations.len() {
+            // Control only falls off the end through the synthesized root
+            // return, which is always the final operation.
+            return None;
+        }
+        match &states[index] {
+            Some(existing) if *existing == stack => continue,
+            Some(existing) => {
+                if existing.len() != stack.len() {
+                    return None;
+                }
+                let mut joined = Vec::with_capacity(stack.len());
+                for (left, right) in existing.iter().zip(&stack) {
+                    joined.push(join(*left, *right)?);
+                }
+                if *existing == joined {
+                    continue;
+                }
+                states[index] = Some(joined.clone());
+                stack = joined;
+            }
+            None => states[index] = Some(stack.clone()),
+        }
+        match &operations[index] {
+            IntOp::Constant(_) | IntOp::Load(_) => stack.push(Kind::Int),
+            IntOp::NullConstant => stack.push(Kind::Null),
+            IntOp::Define(_) | IntOp::Store(_) => {
+                if *stack.last()? != Kind::Int {
+                    return None;
+                }
+            }
+            IntOp::Pop => {
+                stack.pop()?;
+            }
+            IntOp::Add | IntOp::Subtract | IntOp::Multiply | IntOp::Divide | IntOp::Modulo => {
+                if stack.pop()? != Kind::Int || stack.pop()? != Kind::Int {
+                    return None;
+                }
+                stack.push(Kind::Int);
+            }
+            IntOp::Compare(_) => {
+                if stack.pop()? != Kind::Int || stack.pop()? != Kind::Int {
+                    return None;
+                }
+                stack.push(Kind::Bool);
+            }
+            IntOp::Negate => {
+                if stack.pop()? != Kind::Int {
+                    return None;
+                }
+                stack.push(Kind::Int);
+            }
+            IntOp::Not => {
+                if stack.pop()? != Kind::Bool {
+                    return None;
+                }
+                stack.push(Kind::Bool);
+            }
+            IntOp::Nop => {}
+            IntOp::Jump(target) => {
+                worklist.push((*target as usize, stack));
+                continue;
+            }
+            IntOp::JumpIfFalse(target) => {
+                if *stack.last()? != Kind::Bool {
+                    return None;
+                }
+                worklist.push((*target as usize, stack.clone()));
+                worklist.push((index + 1, stack));
+                continue;
+            }
+            IntOp::Return => {
+                if stack.pop()? != Kind::Int {
+                    return None;
+                }
+                if root && !stack.is_empty() {
+                    return None;
+                }
+                continue;
+            }
+        }
+        worklist.push((index + 1, stack));
+    }
+    Some(())
 }
 
 struct Compiler {

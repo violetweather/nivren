@@ -1299,6 +1299,88 @@ impl Interpreter {
         Ok(value)
     }
 
+    /// Compiles and runs a whole top-level chunk as native integer code when
+    /// the JIT is enabled and the chunk lowers completely. Top-level bindings
+    /// are written back into the environment afterwards, and a chunk ending
+    /// in `show(value)` prints the produced integer.
+    #[cfg(feature = "host-runtime")]
+    fn try_root_native(&mut self, chunk: &Chunk) -> Result<Option<Value>, NivError> {
+        if self.jit_threshold == u32::MAX
+            || chunk.code.len() < 16
+            || self.debug_hook.is_some()
+            || self.metrics.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(plan) = crate::bytecode::integer_root_plan(chunk) else {
+            if std::env::var_os("NIVREN_ROOT_DEBUG").is_some() {
+                eprintln!("ROOT DEBUG: plan refused ({} ops)", chunk.code.len());
+                for (i, item) in chunk.code.iter().enumerate() {
+                    eprintln!("  {i}: {:?}", item.op);
+                }
+            }
+            return Ok(None);
+        };
+        {
+            let environment = self.environment.lock().unwrap();
+            if plan
+                .persistent
+                .iter()
+                .any(|(name, _, _)| environment.values.contains_key(name))
+            {
+                return Ok(None);
+            }
+        }
+        let compiled = match CompiledFunction::compile_root(plan.slot_count, &plan.operations) {
+            Ok(compiled) => compiled,
+            Err(reason) => {
+                if std::env::var_os("NIVREN_ROOT_DEBUG").is_some() {
+                    eprintln!("ROOT DEBUG: compile failed: {reason}");
+                }
+                return Ok(None);
+            }
+        };
+        self.jit_compilations = self.jit_compilations.saturating_add(1);
+        let mut slots = vec![0i64; plan.slot_count];
+        let span = Span { line: 1, column: 1 };
+        let value = match compiled.call_with_slots(&mut slots) {
+            Ok(value) => value,
+            Err(JitCallError::Overflow) => {
+                return Err(NivError::new("integer overflow", span.line, span.column));
+            }
+            Err(JitCallError::DivisionByZero) => {
+                return Err(NivError::new("division by zero", span.line, span.column));
+            }
+            Err(JitCallError::RemainderByZero) => {
+                return Err(NivError::new("remainder by zero", span.line, span.column));
+            }
+            Err(JitCallError::Arity) => return Ok(None),
+        };
+        self.jit_executions = self.jit_executions.saturating_add(1);
+        {
+            let mut environment = self.environment.lock().unwrap();
+            for (name, slot, mutable) in &plan.persistent {
+                environment.values.insert(
+                    name.clone(),
+                    Binding {
+                        value: Value::Int(slots[*slot]),
+                        mutable: *mutable,
+                    },
+                );
+            }
+        }
+        if plan.prints_result {
+            println!("{}", Value::Int(value));
+            return Ok(Some(Value::Null));
+        }
+        Ok(Some(Value::Int(value)))
+    }
+
+    #[cfg(not(feature = "host-runtime"))]
+    fn try_root_native(&mut self, _chunk: &Chunk) -> Result<Option<Value>, NivError> {
+        Ok(None)
+    }
+
     /// Arms the fast root frame for a top-level chunk when the chunk plans
     /// cleanly and none of its persistent names already exist.
     fn push_root_frame(&mut self, chunk: &Chunk) -> Option<FastRootSlots> {
@@ -1350,6 +1432,10 @@ impl Interpreter {
 
     pub fn run_bytecode(&mut self, chunk: &Chunk) -> Result<Value, NivError> {
         crate::bytecode::verify(chunk)?;
+        if let Some(value) = self.try_root_native(chunk)? {
+            self.collect(&[]);
+            return Ok(value);
+        }
         let root_slots = self.push_root_frame(chunk);
         let execution = self.execute_chunk(chunk);
         if let Some(plan) = &root_slots {
@@ -3191,6 +3277,12 @@ impl Interpreter {
             }
             Err(JitCallError::Overflow) => {
                 Err(NivError::new("integer overflow", span.line, span.column))
+            }
+            Err(JitCallError::DivisionByZero) => {
+                Err(NivError::new("division by zero", span.line, span.column))
+            }
+            Err(JitCallError::RemainderByZero) => {
+                Err(NivError::new("remainder by zero", span.line, span.column))
             }
             Err(JitCallError::Arity) => Ok(None),
         }

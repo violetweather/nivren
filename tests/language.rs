@@ -5889,6 +5889,69 @@ fn native_tier_supports_argument_lists_larger_than_the_inline_fast_path() {
 }
 
 #[test]
+fn hot_functions_with_loops_and_branches_tier_to_native_code() {
+    let source = "define triangle takes { limit is Int } gives Int { change total set 0; change index set 0; repeat index < limit { total = total + index; index = index + 1; } give total; } triangle(10); triangle(100)";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(2);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(4950));
+    assert_eq!(interpreter.jit_stats().executions, 1);
+    let mut cold = nivren::runtime::Interpreter::new();
+    cold.set_jit_threshold(u32::MAX);
+    assert_eq!(cold.run_bytecode(&chunk).unwrap(), Value::Int(4950));
+    assert_eq!(cold.jit_stats().executions, 0);
+
+    let divide = "define half takes { value is Int, by is Int } gives Int { when by > 0 { give value / by; } give value % by; } half(10, 2); half(84, 2)";
+    let program = nivren::parser::parse(nivren::lexer::scan(divide).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(2);
+    assert_eq!(interpreter.run_bytecode(&chunk).unwrap(), Value::Int(42));
+    assert_eq!(interpreter.jit_stats().executions, 1);
+
+    let by_zero = "define half takes { value is Int, by is Int } gives Int { give value / by; } half(10, 2); half(84, 0)";
+    let program = nivren::parser::parse(nivren::lexer::scan(by_zero).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(2);
+    let error = interpreter.run_bytecode(&chunk).unwrap_err();
+    assert!(error.message.contains("division by zero"));
+}
+
+#[test]
+fn integer_root_chunks_run_native_and_persist_top_level_bindings() {
+    let source = "change checksum set 0; change row set 0; repeat row < 100 { checksum = checksum + row % 7; row = row + 1; } checksum";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(16);
+    let hot = interpreter.run_bytecode(&chunk).unwrap();
+    let mut cold = nivren::runtime::Interpreter::new();
+    cold.set_jit_threshold(u32::MAX);
+    assert_eq!(cold.run_bytecode(&chunk).unwrap(), hot);
+    assert_eq!(cold.jit_stats().executions, 0);
+    assert_eq!(interpreter.jit_stats().executions, 1);
+
+    let overflow = "change value set 9223372036854775807; change count set 0; repeat count < 3 { value = value + 1; count = count + 1; } value";
+    let program = nivren::parser::parse(nivren::lexer::scan(overflow).unwrap()).unwrap();
+    nivren::typecheck::check(&program).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let mut interpreter = nivren::runtime::Interpreter::new();
+    interpreter.set_jit_threshold(16);
+    let error = interpreter.run_bytecode(&chunk).unwrap_err();
+    assert!(error.message.contains("integer overflow"));
+    let mut cold = nivren::runtime::Interpreter::new();
+    cold.set_jit_threshold(u32::MAX);
+    let error = cold.run_bytecode(&chunk).unwrap_err();
+    assert!(error.message.contains("integer overflow"));
+}
+
+#[test]
 fn integer_call_frames_preserve_recursion_and_mutable_locals_before_jit() {
     let source = "define fibonacci takes { value is Int } gives Int { when value < 2 { give value; } give fibonacci(value - 1) + fibonacci(value - 2); } define adjust takes { value is Int } gives Int { change result set value; result = result + 2; give result; } fibonacci(10) + adjust(40)";
     let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();

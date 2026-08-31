@@ -25,8 +25,38 @@ pub enum IntOp {
     Add,
     Subtract,
     Multiply,
+    /// Checked signed division; a zero divisor faults with code 2 and
+    /// `i64::MIN / -1` faults with code 1.
+    Divide,
+    /// Checked signed remainder; a zero divisor faults with code 3 and
+    /// `i64::MIN % -1` faults with code 1.
+    Modulo,
     Negate,
+    /// Boolean not over a 0/1 value.
+    Not,
+    /// Pops two integers and pushes the 0/1 comparison result.
+    Compare(IntCondition),
+    /// Unconditional branch to the operation index.
+    Jump(u32),
+    /// Peeks the 0/1 value on top of the stack (leaving it in place, like
+    /// the bytecode VM) and branches to the operation index when it is 0.
+    JumpIfFalse(u32),
+    /// Placeholder keeping operation indices aligned with source bytecode.
+    Nop,
+    /// The loop-seed null value: a machine zero whose kind analysis forbids
+    /// every use except `Pop` (and joins that stay unobserved).
+    NullConstant,
     Return,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntCondition {
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
 }
 
 pub struct CompiledFunction {
@@ -337,6 +367,7 @@ impl AotObject {
             parameters,
             slots,
             operations,
+            false,
         )?;
         module.finish().emit().map_err(|error| error.to_string())
     }
@@ -358,10 +389,36 @@ unsafe impl Sync for CompiledFunction {}
 pub enum CallError {
     Arity,
     Overflow,
+    DivisionByZero,
+    RemainderByZero,
+}
+
+fn fault_error(code: u8) -> CallError {
+    match code {
+        2 => CallError::DivisionByZero,
+        3 => CallError::RemainderByZero,
+        _ => CallError::Overflow,
+    }
 }
 
 impl CompiledFunction {
     pub fn compile(parameters: usize, slots: usize, operations: &[IntOp]) -> Result<Self, String> {
+        Self::compile_with(parameters, slots, operations, false)
+    }
+
+    /// Compiles with slot write-back: every `Return` first stores the final
+    /// value of every slot into the argument buffer, so a caller-owned
+    /// buffer of `slots` integers receives the chunk's top-level bindings.
+    pub fn compile_root(slots: usize, operations: &[IntOp]) -> Result<Self, String> {
+        Self::compile_with(slots, slots, operations, true)
+    }
+
+    fn compile_with(
+        parameters: usize,
+        slots: usize,
+        operations: &[IntOp],
+        writeback_slots: bool,
+    ) -> Result<Self, String> {
         if parameters > slots || slots > 4096 || operations.len() > 1_000_000 {
             return Err("invalid JIT function limits".into());
         }
@@ -378,139 +435,15 @@ impl CompiledFunction {
             .map_err(|error| error.to_string())?;
         let builder = JITBuilder::with_isa(isa, default_libcall_names());
         let mut module = JITModule::new(builder);
-        let pointer = module.target_config().pointer_type();
-        let mut signature = module.make_signature();
-        signature.params.push(AbiParam::new(pointer));
-        signature.params.push(AbiParam::new(pointer));
-        signature.returns.push(AbiParam::new(types::I64));
-        let function_id = module
-            .declare_function("nivren_hot", Linkage::Local, &signature)
-            .map_err(|error| error.to_string())?;
-        let mut context = module.make_context();
-        context.func.signature = signature;
-        context.func.name = UserFuncName::user(0, 0);
-        let mut builder_context = FunctionBuilderContext::new();
-        {
-            let mut function = FunctionBuilder::new(&mut context.func, &mut builder_context);
-            let entry = function.create_block();
-            let overflow = function.create_block();
-            function.append_block_params_for_function_params(entry);
-            function.switch_to_block(entry);
-            function.seal_block(entry);
-            let argument_pointer = function.block_params(entry)[0];
-            let overflow_pointer = function.block_params(entry)[1];
-            let mut variables = Vec::with_capacity(slots);
-            for slot in 0..slots {
-                let variable = function.declare_var(types::I64);
-                variables.push(variable);
-                let initial = if slot < parameters {
-                    function.ins().load(
-                        types::I64,
-                        MemFlags::trusted(),
-                        argument_pointer,
-                        i32::try_from(slot * 8).map_err(|_| "JIT slot offset overflow")?,
-                    )
-                } else {
-                    function.ins().iconst(types::I64, 0)
-                };
-                function.def_var(variable, initial);
-            }
-            let mut stack = Vec::new();
-            let mut returned = false;
-            for operation in operations {
-                match operation {
-                    IntOp::Constant(value) => {
-                        stack.push(function.ins().iconst(types::I64, *value));
-                    }
-                    IntOp::Load(slot) => {
-                        stack.push(function.use_var(slot_variable(&variables, *slot)?))
-                    }
-                    IntOp::Define(slot) | IntOp::Store(slot) => {
-                        let value = *stack.last().ok_or("JIT stack underflow")?;
-                        function.def_var(slot_variable(&variables, *slot)?, value);
-                    }
-                    IntOp::Pop => {
-                        stack.pop().ok_or("JIT stack underflow")?;
-                    }
-                    IntOp::Add | IntOp::Subtract | IntOp::Multiply => {
-                        let right = stack.pop().ok_or("JIT stack underflow")?;
-                        let left = stack.pop().ok_or("JIT stack underflow")?;
-                        let result = match operation {
-                            IntOp::Add => function.ins().iadd(left, right),
-                            IntOp::Subtract => function.ins().isub(left, right),
-                            IntOp::Multiply => function.ins().imul(left, right),
-                            _ => unreachable!(),
-                        };
-                        let overflowed = match operation {
-                            IntOp::Add => {
-                                let first = function.ins().bxor(left, result);
-                                let second = function.ins().bxor(right, result);
-                                let both = function.ins().band(first, second);
-                                function.ins().icmp_imm(
-                                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                                    both,
-                                    0,
-                                )
-                            }
-                            IntOp::Subtract => {
-                                let first = function.ins().bxor(left, right);
-                                let second = function.ins().bxor(left, result);
-                                let both = function.ins().band(first, second);
-                                function.ins().icmp_imm(
-                                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                                    both,
-                                    0,
-                                )
-                            }
-                            IntOp::Multiply => {
-                                let high = function.ins().smulhi(left, right);
-                                let sign = function.ins().sshr_imm(result, 63);
-                                function.ins().icmp(
-                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                                    high,
-                                    sign,
-                                )
-                            }
-                            _ => unreachable!(),
-                        };
-                        branch_if_overflow(&mut function, overflowed, overflow);
-                        stack.push(result);
-                    }
-                    IntOp::Negate => {
-                        let value = stack.pop().ok_or("JIT stack underflow")?;
-                        let overflowed = function.ins().icmp_imm(
-                            cranelift_codegen::ir::condcodes::IntCC::Equal,
-                            value,
-                            i64::MIN,
-                        );
-                        branch_if_overflow(&mut function, overflowed, overflow);
-                        stack.push(function.ins().ineg(value));
-                    }
-                    IntOp::Return => {
-                        let value = stack.pop().ok_or("JIT stack underflow")?;
-                        function.ins().return_(&[value]);
-                        returned = true;
-                        break;
-                    }
-                }
-            }
-            if !returned {
-                return Err("JIT function has no give".into());
-            }
-            function.switch_to_block(overflow);
-            function.seal_block(overflow);
-            let one = function.ins().iconst(types::I8, 1);
-            function
-                .ins()
-                .store(MemFlags::trusted(), one, overflow_pointer, 0);
-            let zero = function.ins().iconst(types::I64, 0);
-            function.ins().return_(&[zero]);
-            function.finalize();
-        }
-        module
-            .define_function(function_id, &mut context)
-            .map_err(|error| error.to_string())?;
-        module.clear_context(&mut context);
+        let function_id = define_integer_function(
+            &mut module,
+            "nivren_hot",
+            Linkage::Local,
+            parameters,
+            slots,
+            operations,
+            writeback_slots,
+        )?;
         module
             .finalize_definitions()
             .map_err(|error| error.to_string())?;
@@ -532,12 +465,28 @@ impl CompiledFunction {
         if arguments.len() != self.parameters {
             return Err(CallError::Arity);
         }
-        let mut overflow = 0u8;
-        let value = unsafe { (self.function)(arguments.as_ptr(), &mut overflow) };
-        if overflow == 0 {
+        let mut fault = 0u8;
+        let value = unsafe { (self.function)(arguments.as_ptr(), &mut fault) };
+        if fault == 0 {
             Ok(value)
         } else {
-            Err(CallError::Overflow)
+            Err(fault_error(fault))
+        }
+    }
+
+    /// Calls a root compilation, reading initial slot values from `slots`
+    /// and writing every slot's final value back into it on success.
+    #[inline]
+    pub fn call_with_slots(&self, slots: &mut [i64]) -> Result<i64, CallError> {
+        if slots.len() != self.parameters {
+            return Err(CallError::Arity);
+        }
+        let mut fault = 0u8;
+        let value = unsafe { (self.function)(slots.as_ptr(), &mut fault) };
+        if fault == 0 {
+            Ok(value)
+        } else {
+            Err(fault_error(fault))
         }
     }
 }
@@ -552,17 +501,74 @@ impl Drop for CompiledFunction {
     }
 }
 
-fn branch_if_overflow(
+fn branch_if_fault(
     function: &mut FunctionBuilder<'_>,
     condition: cranelift_codegen::ir::Value,
-    overflow: cranelift_codegen::ir::Block,
+    fault: cranelift_codegen::ir::Block,
+    code: i64,
 ) {
     let next = function.create_block();
-    function.ins().brif(condition, overflow, &[], next, &[]);
+    let code = function.ins().iconst(types::I64, code);
+    function
+        .ins()
+        .brif(condition, fault, &[code.into()], next, &[]);
     function.switch_to_block(next);
     function.seal_block(next);
 }
 
+/// Stack effect of one operation: values popped and pushed. `Define` and
+/// `Store` peek without popping, mirroring the bytecode VM.
+fn int_op_effect(operation: &IntOp) -> (usize, usize) {
+    match operation {
+        IntOp::Constant(_) | IntOp::NullConstant | IntOp::Load(_) => (0, 1),
+        IntOp::Define(_) | IntOp::Store(_) | IntOp::Nop | IntOp::Jump(_) => (0, 0),
+        IntOp::Pop | IntOp::Return => (1, 0),
+        IntOp::JumpIfFalse(_) => (0, 0),
+        IntOp::Add
+        | IntOp::Subtract
+        | IntOp::Multiply
+        | IntOp::Divide
+        | IntOp::Modulo
+        | IntOp::Compare(_) => (2, 1),
+        IntOp::Negate | IntOp::Not => (1, 1),
+    }
+}
+
+/// Computes the value-stack depth entering every operation, or fails when
+/// control-flow paths disagree, jump targets fall outside the program, or a
+/// stack underflows. Unreachable operations report `None`.
+fn int_stack_depths(operations: &[IntOp]) -> Result<Vec<Option<usize>>, String> {
+    let mut depths: Vec<Option<usize>> = vec![None; operations.len()];
+    let mut worklist = vec![(0usize, 0usize)];
+    while let Some((index, depth)) = worklist.pop() {
+        if index >= operations.len() {
+            return Err("JIT control flow escapes the program".into());
+        }
+        match depths[index] {
+            Some(existing) if existing == depth => continue,
+            Some(_) => return Err("JIT stack depths disagree at a join".into()),
+            None => depths[index] = Some(depth),
+        }
+        let operation = &operations[index];
+        let (pops, pushes) = int_op_effect(operation);
+        if depth < pops {
+            return Err("JIT stack underflow".into());
+        }
+        let next_depth = depth - pops + pushes;
+        match operation {
+            IntOp::Jump(target) => worklist.push((*target as usize, next_depth)),
+            IntOp::JumpIfFalse(target) => {
+                worklist.push((*target as usize, next_depth));
+                worklist.push((index + 1, next_depth));
+            }
+            IntOp::Return => {}
+            _ => worklist.push((index + 1, next_depth)),
+        }
+    }
+    Ok(depths)
+}
+
+#[allow(clippy::too_many_lines)]
 fn define_integer_function<M: Module>(
     module: &mut M,
     name: &str,
@@ -570,7 +576,9 @@ fn define_integer_function<M: Module>(
     parameters: usize,
     slots: usize,
     operations: &[IntOp],
-) -> Result<(), String> {
+    writeback_slots: bool,
+) -> Result<cranelift_module::FuncId, String> {
+    let depths = int_stack_depths(operations)?;
     let pointer = module.target_config().pointer_type();
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(pointer));
@@ -586,12 +594,12 @@ fn define_integer_function<M: Module>(
     {
         let mut function = FunctionBuilder::new(&mut context.func, &mut builder_context);
         let entry = function.create_block();
-        let overflow = function.create_block();
+        let fault = function.create_block();
         function.append_block_params_for_function_params(entry);
+        function.append_block_param(fault, types::I64);
         function.switch_to_block(entry);
-        function.seal_block(entry);
         let argument_pointer = function.block_params(entry)[0];
-        let overflow_pointer = function.block_params(entry)[1];
+        let fault_pointer = function.block_params(entry)[1];
         let mut variables = Vec::with_capacity(slots);
         for slot in 0..slots {
             let variable = function.declare_var(types::I64);
@@ -601,31 +609,87 @@ fn define_integer_function<M: Module>(
                     types::I64,
                     MemFlags::trusted(),
                     argument_pointer,
-                    i32::try_from(slot * 8).map_err(|_| "AOT slot offset overflow")?,
+                    i32::try_from(slot * 8).map_err(|_| "JIT slot offset overflow")?,
                 )
             } else {
                 function.ins().iconst(types::I64, 0)
             };
             function.def_var(variable, initial);
         }
-        let mut stack = Vec::new();
-        let mut returned = false;
-        for operation in operations {
+
+        // One Cranelift block per branch target and per branch fall-through,
+        // with the entering stack carried as block parameters.
+        let mut block_starts = std::collections::BTreeSet::new();
+        for (index, operation) in operations.iter().enumerate() {
             match operation {
-                IntOp::Constant(value) => stack.push(function.ins().iconst(types::I64, *value)),
+                IntOp::Jump(target) => {
+                    block_starts.insert(*target as usize);
+                }
+                IntOp::JumpIfFalse(target) => {
+                    block_starts.insert(*target as usize);
+                    block_starts.insert(index + 1);
+                }
+                _ => {}
+            }
+        }
+        let mut blocks = std::collections::BTreeMap::new();
+        for index in &block_starts {
+            if let Some(Some(depth)) = depths.get(*index).copied() {
+                let block = function.create_block();
+                for _ in 0..depth {
+                    function.append_block_param(block, types::I64);
+                }
+                blocks.insert(*index, block);
+            }
+        }
+        let block_args = |stack: &[cranelift_codegen::ir::Value]| {
+            stack
+                .iter()
+                .map(|value| cranelift_codegen::ir::BlockArg::from(*value))
+                .collect::<Vec<_>>()
+        };
+
+        let mut stack: Vec<cranelift_codegen::ir::Value> = Vec::new();
+        let mut terminated = false;
+        let mut in_dead_code = false;
+        for (index, operation) in operations.iter().enumerate() {
+            if let Some(block) = blocks.get(&index) {
+                if !terminated && !in_dead_code {
+                    function.ins().jump(*block, &block_args(&stack));
+                }
+                function.switch_to_block(*block);
+                stack = function.block_params(*block).to_vec();
+                terminated = false;
+                in_dead_code = false;
+            } else if terminated || depths[index].is_none() {
+                // Dead code that no branch targets: emit nothing.
+                in_dead_code = true;
+                continue;
+            }
+            if in_dead_code {
+                continue;
+            }
+            match operation {
+                IntOp::Nop => {}
+                IntOp::Constant(value) => {
+                    stack.push(function.ins().iconst(types::I64, *value));
+                }
+                IntOp::NullConstant => {
+                    stack.push(function.ins().iconst(types::I64, 0));
+                }
                 IntOp::Load(slot) => {
-                    stack.push(function.use_var(slot_variable(&variables, *slot)?))
+                    stack.push(function.use_var(slot_variable(&variables, *slot)?));
                 }
                 IntOp::Define(slot) | IntOp::Store(slot) => {
-                    let value = *stack.last().ok_or("AOT stack underflow")?;
+                    let value = *stack.last().ok_or("JIT stack underflow")?;
                     function.def_var(slot_variable(&variables, *slot)?, value);
                 }
                 IntOp::Pop => {
-                    stack.pop().ok_or("AOT stack underflow")?;
+                    stack.pop().ok_or("JIT stack underflow")?;
                 }
                 IntOp::Add | IntOp::Subtract | IntOp::Multiply => {
-                    let right = stack.pop().ok_or("AOT stack underflow")?;
-                    let left = stack.pop().ok_or("AOT stack underflow")?;
+                    let right = stack.pop().ok_or("JIT stack underflow")?;
+                    let left = stack.pop().ok_or("JIT stack underflow")?;
                     let result = match operation {
                         IntOp::Add => function.ins().iadd(left, right),
                         IntOp::Subtract => function.ins().isub(left, right),
@@ -664,45 +728,140 @@ fn define_integer_function<M: Module>(
                         }
                         _ => unreachable!(),
                     };
-                    branch_if_overflow(&mut function, overflowed, overflow);
+                    branch_if_fault(&mut function, overflowed, fault, 1);
+                    stack.push(result);
+                }
+                IntOp::Divide | IntOp::Modulo => {
+                    let right = stack.pop().ok_or("JIT stack underflow")?;
+                    let left = stack.pop().ok_or("JIT stack underflow")?;
+                    let zero_code = if matches!(operation, IntOp::Divide) {
+                        2
+                    } else {
+                        3
+                    };
+                    let zero = function.ins().icmp_imm(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        right,
+                        0,
+                    );
+                    branch_if_fault(&mut function, zero, fault, zero_code);
+                    let minimum = function.ins().icmp_imm(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        left,
+                        i64::MIN,
+                    );
+                    let negative_one = function.ins().icmp_imm(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        right,
+                        -1,
+                    );
+                    let overflowed = function.ins().band(minimum, negative_one);
+                    branch_if_fault(&mut function, overflowed, fault, 1);
+                    let result = if matches!(operation, IntOp::Divide) {
+                        function.ins().sdiv(left, right)
+                    } else {
+                        function.ins().srem(left, right)
+                    };
                     stack.push(result);
                 }
                 IntOp::Negate => {
-                    let value = stack.pop().ok_or("AOT stack underflow")?;
+                    let value = stack.pop().ok_or("JIT stack underflow")?;
                     let overflowed = function.ins().icmp_imm(
                         cranelift_codegen::ir::condcodes::IntCC::Equal,
                         value,
                         i64::MIN,
                     );
-                    branch_if_overflow(&mut function, overflowed, overflow);
+                    branch_if_fault(&mut function, overflowed, fault, 1);
                     stack.push(function.ins().ineg(value));
                 }
+                IntOp::Not => {
+                    let value = stack.pop().ok_or("JIT stack underflow")?;
+                    stack.push(function.ins().bxor_imm(value, 1));
+                }
+                IntOp::Compare(condition) => {
+                    let right = stack.pop().ok_or("JIT stack underflow")?;
+                    let left = stack.pop().ok_or("JIT stack underflow")?;
+                    let code = match condition {
+                        IntCondition::Equal => cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        IntCondition::NotEqual => cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                        IntCondition::Less => {
+                            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan
+                        }
+                        IntCondition::LessEqual => {
+                            cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual
+                        }
+                        IntCondition::Greater => {
+                            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan
+                        }
+                        IntCondition::GreaterEqual => {
+                            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual
+                        }
+                    };
+                    let flag = function.ins().icmp(code, left, right);
+                    stack.push(function.ins().uextend(types::I64, flag));
+                }
+                IntOp::Jump(target) => {
+                    let block = blocks
+                        .get(&(*target as usize))
+                        .ok_or("JIT jump target is unreachable")?;
+                    function.ins().jump(*block, &block_args(&stack));
+                    terminated = true;
+                }
+                IntOp::JumpIfFalse(target) => {
+                    let condition = *stack.last().ok_or("JIT stack underflow")?;
+                    let target_block = blocks
+                        .get(&(*target as usize))
+                        .ok_or("JIT jump target is unreachable")?;
+                    let next_block = blocks
+                        .get(&(index + 1))
+                        .ok_or("JIT branch fall-through is unreachable")?;
+                    let arguments = block_args(&stack);
+                    function.ins().brif(
+                        condition,
+                        *next_block,
+                        &arguments,
+                        *target_block,
+                        &arguments,
+                    );
+                    terminated = true;
+                }
                 IntOp::Return => {
-                    let value = stack.pop().ok_or("AOT stack underflow")?;
+                    let value = stack.pop().ok_or("JIT stack underflow")?;
+                    if writeback_slots {
+                        for (slot, variable) in variables.iter().enumerate() {
+                            let current = function.use_var(*variable);
+                            function.ins().store(
+                                MemFlags::trusted(),
+                                current,
+                                argument_pointer,
+                                i32::try_from(slot * 8).map_err(|_| "JIT slot offset overflow")?,
+                            );
+                        }
+                    }
                     function.ins().return_(&[value]);
-                    returned = true;
-                    break;
+                    terminated = true;
                 }
             }
         }
-        if !returned {
-            return Err("AOT function has no give".into());
+        if !terminated && !in_dead_code {
+            return Err("JIT function has no give".into());
         }
-        function.switch_to_block(overflow);
-        function.seal_block(overflow);
-        let one = function.ins().iconst(types::I8, 1);
+        function.switch_to_block(fault);
+        let code = function.block_params(fault)[0];
+        let code = function.ins().ireduce(types::I8, code);
         function
             .ins()
-            .store(MemFlags::trusted(), one, overflow_pointer, 0);
+            .store(MemFlags::trusted(), code, fault_pointer, 0);
         let zero = function.ins().iconst(types::I64, 0);
         function.ins().return_(&[zero]);
+        function.seal_all_blocks();
         function.finalize();
     }
     module
         .define_function(function_id, &mut context)
         .map_err(|error| error.to_string())?;
     module.clear_context(&mut context);
-    Ok(())
+    Ok(function_id)
 }
 
 #[cfg(test)]
@@ -724,6 +883,82 @@ mod tests {
         } else {
             i64::try_from(pc + 1).unwrap()
         }
+    }
+
+    #[test]
+    fn native_loops_compare_divide_and_report_faults() {
+        use super::IntCondition;
+        // total = 0; index = 0; while index < limit { total += index; index += 1 } return total / 2
+        // total = 0; index = 0; while index < limit { total += index;
+        // index += 1 } return total / 2 — with the VM's branch shape: the
+        // branch peeks its condition, so both continuations pop it.
+        let ops = vec![
+            IntOp::Constant(0),
+            IntOp::Define(1), // total
+            IntOp::Pop,
+            IntOp::Constant(0),
+            IntOp::Define(2), // index
+            IntOp::Pop,
+            // 6: loop head
+            IntOp::Load(2),
+            IntOp::Load(0), // limit parameter
+            IntOp::Compare(IntCondition::Less),
+            IntOp::JumpIfFalse(21),
+            IntOp::Pop, // 10: drop the condition on the loop path
+            IntOp::Load(1),
+            IntOp::Load(2),
+            IntOp::Add,
+            IntOp::Store(1),
+            IntOp::Pop,
+            IntOp::Load(2),
+            IntOp::Constant(1),
+            IntOp::Add,
+            IntOp::Store(2),
+            IntOp::Pop, // 20
+            IntOp::Jump(6),
+        ];
+        let mut ops = ops;
+        ops[21] = IntOp::Jump(6);
+        ops.push(IntOp::Pop); // 22: drop the condition on the exit path
+        ops.push(IntOp::Load(1));
+        ops.push(IntOp::Constant(2));
+        ops.push(IntOp::Divide);
+        ops.push(IntOp::Return);
+        ops[9] = IntOp::JumpIfFalse(22);
+        let compiled = CompiledFunction::compile(1, 3, &ops).unwrap();
+        // sum 0..10 = 45; 45 / 2 = 22
+        assert_eq!(compiled.call(&[10]).unwrap(), 22);
+        assert_eq!(compiled.call(&[0]).unwrap(), 0);
+
+        let divide_by_zero = vec![
+            IntOp::Load(0),
+            IntOp::Constant(0),
+            IntOp::Divide,
+            IntOp::Return,
+        ];
+        let compiled = CompiledFunction::compile(1, 1, &divide_by_zero).unwrap();
+        assert_eq!(compiled.call(&[7]), Err(CallError::DivisionByZero));
+
+        let remainder_by_zero = vec![
+            IntOp::Load(0),
+            IntOp::Constant(0),
+            IntOp::Modulo,
+            IntOp::Return,
+        ];
+        let compiled = CompiledFunction::compile(1, 1, &remainder_by_zero).unwrap();
+        assert_eq!(compiled.call(&[7]), Err(CallError::RemainderByZero));
+
+        let writeback = vec![
+            IntOp::Constant(41),
+            IntOp::Constant(1),
+            IntOp::Add,
+            IntOp::Store(0),
+            IntOp::Return,
+        ];
+        let compiled = CompiledFunction::compile_root(1, &writeback).unwrap();
+        let mut slots = [0i64];
+        assert_eq!(compiled.call_with_slots(&mut slots).unwrap(), 42);
+        assert_eq!(slots[0], 42);
     }
 
     #[test]
