@@ -7537,6 +7537,98 @@ answer
 }
 
 #[test]
+fn user_iterate_adopters_drive_each_loops_in_both_engines() {
+    let source = r#"
+shape Counter holds {
+    current is Int
+    limit is Int
+}
+shape CounterStep holds {
+    item is Int
+    next is Counter
+}
+define counter_advance takes { state is Counter } gives CounterStep? {
+    when state.current > state.limit {
+        give none
+    }
+    give CounterStep with {
+        item set state.current
+        next set Counter with { current set state.current + 1, limit set state.limit }
+    }
+}
+protocol Iterate { define advance(state: Self) gives CounterStep? }
+adopt Iterate for Counter { advance = counter_advance }
+change total set 0
+each value in Counter with { current set 1, limit set 4 } {
+    change total to total + value
+}
+total
+"#;
+    assert_eq!(eval_tree(source), Value::Int(10));
+    assert_eq!(eval_vm(source), Value::Int(10));
+}
+
+#[test]
+fn text_holes_may_contain_string_literals_in_both_engines() {
+    let source = r#"
+keep table set std.map.single("kind", "demo")
+text "value {std.map.get(table, "kind") ?? "?"} end"
+"#;
+    let expected = Value::String("value demo end".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn u128_completes_the_unsigned_family_in_both_engines() {
+    let source = r#"
+define compute takes { } gives String or String {
+    keep huge set std.u128.parse("340282366920938463463374607431768211455") or give
+    keep one set std.u128.from_int(1) or give
+    keep smaller set huge - one
+    give ok(std.u128.format(smaller))
+}
+choose compute with {} {
+    case Ok carries value => value
+    case Err carries message => message
+}
+"#;
+    let expected = Value::String("340282366920938463463374607431768211454".into());
+    assert_eq!(eval_tree(source), expected);
+    assert_eq!(eval_vm(source), expected);
+}
+
+#[test]
+fn edition_five_projects_opt_into_strict_gates() {
+    let manifest = nivren::project::Manifest::parse(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\nedition = \"5\"\n",
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    assert_eq!(manifest.edition, 5);
+    assert!(manifest.source().contains("edition = \"5\""));
+    let default = nivren::project::Manifest::parse(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\n",
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    assert_eq!(default.edition, 4);
+    let error = nivren::project::Manifest::parse(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\nedition = \"3\"\n",
+        std::path::PathBuf::from("."),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown edition"));
+    let program = nivren::parser::parse(
+        nivren::lexer::scan(r#"std.host.invoke("nivren.echo", "{}")"#).unwrap(),
+    )
+    .unwrap();
+    assert!(nivren::typecheck::check_with_edition(&program, 4).is_ok());
+    let errors = nivren::typecheck::check_with_edition(&program, 5).unwrap_err();
+    assert!(errors[0].to_string().contains("trusted"));
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();

@@ -246,8 +246,16 @@ impl Lexer {
     }
 
     fn string(&mut self) {
+        // A string directly after the contextual word `text` is a text
+        // literal: quotes inside its `{…}` holes belong to hole expressions
+        // and do not end the literal.
+        let hole_aware = matches!(
+            self.tokens.last(),
+            Some(token) if matches!(&token.kind, TokenKind::Identifier(name) if name == "text")
+        );
+        let mut depth = 0usize;
         let mut value = String::new();
-        while !self.is_at_end() && self.peek() != '"' {
+        while !(self.is_at_end() || self.peek() == '"' && depth == 0) {
             let c = self.advance();
             if c == '\n' {
                 self.line += 1;
@@ -266,6 +274,35 @@ impl Lexer {
                     '\\' => '\\',
                     other => other,
                 });
+            } else if hole_aware && c == '{' {
+                value.push('{');
+                if self.peek() == '{' {
+                    value.push(self.advance());
+                } else {
+                    depth += 1;
+                }
+            } else if hole_aware && c == '}' && depth > 0 {
+                depth -= 1;
+                value.push('}');
+            } else if hole_aware && c == '"' {
+                // A nested string inside a hole passes through verbatim so
+                // the hole's own lexer sees it unchanged.
+                value.push('"');
+                while !self.is_at_end() && self.peek() != '"' {
+                    let nested = self.advance();
+                    if nested == '\n' {
+                        self.line += 1;
+                        self.column = 1;
+                    }
+                    value.push(nested);
+                    if nested == '\\' && !self.is_at_end() {
+                        value.push(self.advance());
+                    }
+                }
+                if !self.is_at_end() {
+                    self.advance();
+                    value.push('"');
+                }
             } else {
                 value.push(c);
             }

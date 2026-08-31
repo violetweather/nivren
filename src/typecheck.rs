@@ -35,6 +35,7 @@ enum Coverage {
 enum Type {
     Int,
     UInt,
+    U128,
     Float,
     String,
     Bytes,
@@ -86,6 +87,7 @@ impl Type {
         match self {
             Self::Int => "Int".into(),
             Self::UInt => "UInt".into(),
+            Self::U128 => "U128".into(),
             Self::Float => "Float".into(),
             Self::String => "String".into(),
             Self::Bytes => "Bytes".into(),
@@ -156,7 +158,18 @@ struct ProtocolMemberType {
 }
 
 pub fn check(program: &[Stmt]) -> Result<(), Vec<NivError>> {
+    check_with_edition(program, 4)
+}
+
+/// Checks a program under a declared edition. Edition 5 opts into the
+/// strict gates: the project's own top-level code loses the historical
+/// grandfathered access to the systems boundary and must mark itself
+/// `trusted "reason"` to call `std.native` or `std.host`.
+pub fn check_with_edition(program: &[Stmt], edition: u8) -> Result<(), Vec<NivError>> {
     let mut checker = Checker::new();
+    if edition >= 5 {
+        checker.trusted_scope = false;
+    }
     checker.statements(program);
     if checker.errors.is_empty() {
         Ok(())
@@ -753,6 +766,33 @@ impl Checker {
                                 ),
                             ),
                             ("format", function(vec![Type::Int], Type::String)),
+                        ]),
+                    ),
+                    (
+                        "u128",
+                        module(vec![
+                            (
+                                "parse",
+                                function(
+                                    vec![Type::String],
+                                    Type::Result(Box::new(Type::U128), Box::new(Type::String)),
+                                ),
+                            ),
+                            ("format", function(vec![Type::U128], Type::String)),
+                            (
+                                "from_int",
+                                function(
+                                    vec![Type::Int],
+                                    Type::Result(Box::new(Type::U128), Box::new(Type::String)),
+                                ),
+                            ),
+                            (
+                                "to_int",
+                                function(
+                                    vec![Type::U128],
+                                    Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+                                ),
+                            ),
                         ]),
                     ),
                     (
@@ -2233,12 +2273,20 @@ impl Checker {
                     Type::String => Type::String,
                     Type::Unknown => Type::Unknown,
                     other => {
-                        self.errors.push(NivError::new(
-                            format!("{} is not iterable", other.name()),
-                            span.line,
-                            span.column,
-                        ));
-                        Type::Unknown
+                        if matches!(&other, Type::Record(_, _))
+                            && self
+                                .adoptions
+                                .contains(&("Iterate".to_string(), other.name()))
+                        {
+                            Type::Unknown
+                        } else {
+                            self.errors.push(NivError::new(
+                                format!("{} is not iterable", other.name()),
+                                span.line,
+                                span.column,
+                            ));
+                            Type::Unknown
+                        }
                     }
                 };
                 self.in_scope(|checker| {
@@ -2999,6 +3047,7 @@ impl Checker {
                             Type::String
                                 | Type::Int
                                 | Type::UInt
+                                | Type::U128
                                 | Type::Float
                                 | Type::Bool
                                 | Type::BigInt
@@ -4077,6 +4126,7 @@ impl Checker {
             TypeRef::Named(name, span) => match name.as_str() {
                 "Int" | "Number" => Type::Int,
                 "UInt" => Type::UInt,
+                "U128" => Type::U128,
                 "Float" => Type::Float,
                 "String" => Type::String,
                 "Bytes" => Type::Bytes,
@@ -4146,6 +4196,7 @@ impl Checker {
         match (left, right) {
             (Type::Int, Type::Int) => Type::Int,
             (Type::UInt, Type::UInt) => Type::UInt,
+            (Type::U128, Type::U128) => Type::U128,
             (Type::Float, Type::Float) => Type::Float,
             (Type::BigInt, Type::BigInt) => Type::BigInt,
             (Type::Decimal, Type::Decimal) => Type::Decimal,
@@ -4189,6 +4240,7 @@ impl Checker {
             Type::Unknown => true,
             Type::Int
             | Type::UInt
+            | Type::U128
             | Type::Float
             | Type::BigInt
             | Type::Decimal
@@ -4451,6 +4503,7 @@ fn derive_data_type_at(
     match ty {
         Type::Int
         | Type::UInt
+        | Type::U128
         | Type::Float
         | Type::String
         | Type::Bytes

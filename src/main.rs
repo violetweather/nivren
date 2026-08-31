@@ -2902,7 +2902,7 @@ fn compile_project(
     let manifest = nivren::project::Manifest::load(path).map_err(|error| vec![error])?;
     verify_dependency_lock(&manifest).map_err(|error| vec![error])?;
     let program = nivren::modules::load_project(&manifest.root, &manifest.entry_path())?;
-    nivren::typecheck::check(&program)?;
+    nivren::typecheck::check_with_edition(&program, manifest.edition)?;
     let chunk = nivren::bytecode::compile(&program)?;
     Ok((manifest, chunk))
 }

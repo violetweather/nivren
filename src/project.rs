@@ -26,6 +26,10 @@ pub struct Manifest {
     /// Declared `payload_bytes` limit: the Edition 5 named override for the
     /// 16 MiB default payload cap, honored by interpreter-owned bounds.
     pub payload_limit: Option<u64>,
+    /// The declared language edition (`edition = "5"` under `[package]`).
+    /// Edition 4 remains the default; Edition 5 opts into the strict gates,
+    /// including the trusted-module rule for the project's own scripts.
+    pub edition: u8,
 }
 
 impl Manifest {
@@ -91,7 +95,7 @@ impl Manifest {
                 .split_once('=')
                 .ok_or_else(|| project_error("expected a key = \"value\" pair", line_number))?;
             let key = key.trim();
-            if section == "package" && !matches!(key, "name" | "version" | "entry") {
+            if section == "package" && !matches!(key, "name" | "version" | "entry" | "edition") {
                 return Err(project_error(
                     format!("unknown package key '{key}'"),
                     line_number,
@@ -269,6 +273,16 @@ impl Manifest {
                 1,
             ));
         }
+        let edition = match values.get("edition").map(String::as_str) {
+            None | Some("4") => 4,
+            Some("5") => 5,
+            Some(other) => {
+                return Err(project_error(
+                    format!("unknown edition '{other}'; declare edition = \"4\" or \"5\""),
+                    1,
+                ));
+            }
+        };
         let entry = PathBuf::from(required(&values, "entry")?);
         if entry.is_absolute()
             || entry
@@ -292,6 +306,7 @@ impl Manifest {
             instruction_limit,
             memory_limit,
             payload_limit,
+            edition,
         })
     }
 
@@ -321,10 +336,15 @@ impl Manifest {
 
     pub fn source(&self) -> String {
         let mut output = format!(
-            "[package]\nname = \"{}\"\nversion = \"{}\"\nentry = \"{}\"\n",
+            "[package]\nname = \"{}\"\nversion = \"{}\"\nentry = \"{}\"\n{}",
             self.name,
             self.version,
-            self.entry.to_string_lossy()
+            self.entry.to_string_lossy(),
+            if self.edition >= 5 {
+                format!("edition = \"{}\"\n", self.edition)
+            } else {
+                String::new()
+            }
         );
         if !self.dependencies.is_empty() {
             output.push_str("\n[dependencies]\n");

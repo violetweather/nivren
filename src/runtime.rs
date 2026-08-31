@@ -180,6 +180,7 @@ macro_rules! evaluate_part {
 pub enum Value {
     Int(i64),
     UInt(u64),
+    U128(u128),
     /// A checked declaration built by `std.source` inside a generator; the
     /// expansion pass splices the carried statement into the module.
     SourceDeclaration(Arc<Stmt>),
@@ -232,6 +233,7 @@ impl Value {
         match self {
             Self::Int(_) => "Int",
             Self::UInt(_) => "UInt",
+            Self::U128(_) => "U128",
             Self::SourceDeclaration(_) => "source.Declaration",
             Self::Float(_) => "Float",
             Self::String(_) => "String",
@@ -281,6 +283,7 @@ impl PartialEq for Value {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a == b,
             (Self::UInt(a), Self::UInt(b)) => a == b,
+            (Self::U128(a), Self::U128(b)) => a == b,
             (Self::SourceDeclaration(a), Self::SourceDeclaration(b)) => Arc::ptr_eq(a, b),
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
@@ -343,6 +346,7 @@ impl Display for Value {
         match self {
             Self::Int(number) => write!(formatter, "{number}"),
             Self::UInt(number) => write!(formatter, "{number}"),
+            Self::U128(number) => write!(formatter, "{number}"),
             Self::SourceDeclaration(_) => write!(formatter, "<source declaration>"),
             Self::Float(number) => write!(formatter, "{number}"),
             Self::String(string) => write!(formatter, "{string}"),
@@ -1676,13 +1680,16 @@ impl Interpreter {
                         "each within iterator",
                         *span,
                     )?,
-                    other => {
-                        return Err(NivError::new(
-                            format!("{} is not iterable", other.type_name()),
-                            span.line,
-                            span.column,
-                        ));
-                    }
+                    other => match self.drain_iterate_adopter(&other, *span)? {
+                        Some(items) => items,
+                        None => {
+                            return Err(NivError::new(
+                                format!("{} is not iterable", other.type_name()),
+                                span.line,
+                                span.column,
+                            ));
+                        }
+                    },
                 };
                 let mut last = Value::Null;
                 for value in values {
@@ -2352,6 +2359,7 @@ impl Interpreter {
             Value::String(text) => Ok(text.clone()),
             Value::Int(_)
             | Value::UInt(_)
+            | Value::U128(_)
             | Value::Bool(_)
             | Value::BigInt(_)
             | Value::Decimal(_)
@@ -2398,6 +2406,68 @@ impl Interpreter {
         }
     }
 
+    /// Drains a user `Iterate` adopter through the persistent unfold
+    /// contract: `advance(state)` gives `none` to finish or a step shape
+    /// holding `item` (the yielded value) and `next` (the following state).
+    /// Returns `None` when the value adopts no `Iterate` protocol.
+    fn drain_iterate_adopter(
+        &mut self,
+        value: &Value,
+        span: Span,
+    ) -> Result<Option<Vec<Value>>, NivError> {
+        if !matches!(value, Value::Record(_)) {
+            return Ok(None);
+        }
+        let key = (
+            "Iterate".to_string(),
+            "advance".to_string(),
+            value.type_name().to_string(),
+        );
+        let Some(implementation) = self.protocol_dispatch.get(&key).cloned() else {
+            return Ok(None);
+        };
+        let mut state = value.clone();
+        let mut items = vec![];
+        loop {
+            let step = self.call(implementation.clone(), vec![state], span)?;
+            match step {
+                Value::Null => break,
+                Value::Record(record) => {
+                    let (Some(item), Some(next)) = (
+                        record.field_indices.get("item").copied(),
+                        record.field_indices.get("next").copied(),
+                    ) else {
+                        return Err(NivError::new(
+                            "an Iterate step holds 'item' and 'next' fields",
+                            span.line,
+                            span.column,
+                        ));
+                    };
+                    items.push(record.fields[item].1.clone());
+                    state = record.fields[next].1.clone();
+                }
+                other => {
+                    return Err(NivError::new(
+                        format!(
+                            "Iterate.advance gives none or a step shape, found {}",
+                            other.type_name()
+                        ),
+                        span.line,
+                        span.column,
+                    ));
+                }
+            }
+            if items.len() > 1_000_000 {
+                return Err(NivError::new(
+                    "Iterate materialization refuses more than 1000000 values",
+                    span.line,
+                    span.column,
+                ));
+            }
+        }
+        Ok(Some(items))
+    }
+
     /// Whether `variant` is a declared case of the named choice type. The
     /// type value is found by its full name first, then by its final path
     /// segment; an unknown type conservatively reports no such case.
@@ -2427,6 +2497,7 @@ impl Interpreter {
             TokenKind::Plus => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => checked_int(a.checked_add(b), span),
                 (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
+                (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     Ok(Value::BigInt(Arc::new(a.as_ref() + b.as_ref())))
@@ -2448,6 +2519,7 @@ impl Interpreter {
                 match (left, right) {
                     (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
                     (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
+                    (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
                     (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                     (Value::BigInt(a), Value::BigInt(b)) => {
                         bigint_binary(a.as_ref(), operator, b.as_ref(), span)
@@ -2468,6 +2540,7 @@ impl Interpreter {
             | TokenKind::LessEqual => match (left, right) {
                 (Value::Int(a), Value::Int(b)) => int_binary(a, operator, b, span),
                 (Value::UInt(a), Value::UInt(b)) => uint_binary(a, operator, b, span),
+                (Value::U128(a), Value::U128(b)) => u128_binary(a, operator, b, span),
                 (Value::Float(a), Value::Float(b)) => float_binary(a, operator, b, span),
                 (Value::BigInt(a), Value::BigInt(b)) => {
                     bigint_binary(a.as_ref(), operator, b.as_ref(), span)
@@ -4583,13 +4656,16 @@ impl Interpreter {
             Value::Iterator(iterator) => {
                 self.drain_iterator(&Value::Iterator(iterator), "each within iterator", span)?
             }
-            other => {
-                return Err(NivError::new(
-                    format!("{} is not iterable", other.type_name()),
-                    span.line,
-                    span.column,
-                ));
-            }
+            other => match self.drain_iterate_adopter(&other, span)? {
+                Some(items) => items,
+                None => {
+                    return Err(NivError::new(
+                        format!("{} is not iterable", other.type_name()),
+                        span.line,
+                        span.column,
+                    ));
+                }
+            },
         };
         let mut last = Value::Null;
         for value in values {
@@ -5074,6 +5150,7 @@ fn mark_value(value: &Value, marked: &mut std::collections::HashSet<usize>) {
         Value::LockGuard(guard) => mark_value(&guard.lock.value.lock().unwrap(), marked),
         Value::Int(_)
         | Value::UInt(_)
+        | Value::U128(_)
         | Value::SourceDeclaration(_)
         | Value::Float(_)
         | Value::String(_)
@@ -5555,7 +5632,7 @@ fn negate(value: Value, span: Span) -> Result<Value, NivError> {
             .checked_sub(number)
             .map(Value::Decimal)
             .ok_or_else(|| NivError::new("decimal overflow", span.line, span.column)),
-        Value::UInt(_) => Err(NivError::new(
+        Value::UInt(_) | Value::U128(_) => Err(NivError::new(
             "unsigned values have no negation; convert with std.uint.to_int first",
             span.line,
             span.column,
@@ -5626,6 +5703,80 @@ fn uint_binary(a: u64, operator: &TokenKind, b: u64, span: Span) -> Result<Value
         TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
         _ => unreachable!(),
     }
+}
+
+fn u128_binary(a: u128, operator: &TokenKind, b: u128, span: Span) -> Result<Value, NivError> {
+    let checked = |value: Option<u128>| {
+        value
+            .map(Value::U128)
+            .ok_or_else(|| NivError::new("unsigned integer overflow", span.line, span.column))
+    };
+    match operator {
+        TokenKind::Plus => checked(a.checked_add(b)),
+        TokenKind::Minus => checked(a.checked_sub(b)),
+        TokenKind::Star => checked(a.checked_mul(b)),
+        TokenKind::Slash if b == 0 => {
+            Err(NivError::new("division by zero", span.line, span.column))
+        }
+        TokenKind::Slash => checked(a.checked_div(b)),
+        TokenKind::Percent if b == 0 => {
+            Err(NivError::new("remainder by zero", span.line, span.column))
+        }
+        TokenKind::Percent => checked(a.checked_rem(b)),
+        TokenKind::Greater => Ok(Value::Bool(a > b)),
+        TokenKind::GreaterEqual => Ok(Value::Bool(a >= b)),
+        TokenKind::Less => Ok(Value::Bool(a < b)),
+        TokenKind::LessEqual => Ok(Value::Bool(a <= b)),
+        _ => unreachable!(),
+    }
+}
+
+fn native_u128_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let source = expect_string(&arguments[0], "std.u128.parse", span)?;
+    if source.len() > 40 {
+        return Ok(result_error("U128 text exceeds 40 bytes"));
+    }
+    Ok(match source.parse::<u128>() {
+        Ok(value) => Value::Ok(Arc::new(Value::U128(value))),
+        Err(_) => result_error("invalid or out-of-range U128"),
+    })
+}
+
+fn native_u128_format(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    match &arguments[0] {
+        Value::U128(value) => Ok(Value::String(value.to_string())),
+        other => Err(expected_value("std.u128.format", "U128", other, span)),
+    }
+}
+
+fn native_u128_from_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::Int(value) = arguments[0] else {
+        return Err(expected_value(
+            "std.u128.from_int",
+            "Int",
+            &arguments[0],
+            span,
+        ));
+    };
+    Ok(match u128::try_from(value) {
+        Ok(value) => Value::Ok(Arc::new(Value::U128(value))),
+        Err(_) => result_error("negative Int cannot become U128"),
+    })
+}
+
+fn native_u128_to_int(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
+    let Value::U128(value) = &arguments[0] else {
+        return Err(expected_value(
+            "std.u128.to_int",
+            "U128",
+            &arguments[0],
+            span,
+        ));
+    };
+    Ok(match i64::try_from(*value) {
+        Ok(value) => Value::Ok(Arc::new(Value::Int(value))),
+        Err(_) => result_error("U128 exceeds the Int range"),
+    })
 }
 
 fn native_uint_parse(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -6293,6 +6444,15 @@ fn standard_library() -> Value {
                 native_u64_format,
                 native_u64_to_int,
             ),
+        ),
+        (
+            "u128".into(),
+            native_module(&[
+                ("parse", 1, native_u128_parse, None),
+                ("format", 1, native_u128_format, None),
+                ("from_int", 1, native_u128_from_int, None),
+                ("to_int", 1, native_u128_to_int, None),
+            ]),
         ),
         (
             "i128".into(),
@@ -12870,6 +13030,7 @@ fn transferable(value: &Value) -> bool {
     match value {
         Value::Int(_)
         | Value::UInt(_)
+        | Value::U128(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -13159,6 +13320,7 @@ fn stable_key(value: &Value) -> bool {
     match value {
         Value::Int(_)
         | Value::UInt(_)
+        | Value::U128(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
@@ -13208,7 +13370,12 @@ fn stable_key(value: &Value) -> bool {
 fn estimated_value_bytes(value: &Value) -> u64 {
     const HANDLE_BYTES: u64 = 64;
     match value {
-        Value::Int(_) | Value::UInt(_) | Value::Float(_) | Value::Bool(_) | Value::Null => 16,
+        Value::Int(_)
+        | Value::UInt(_)
+        | Value::U128(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::Null => 16,
         Value::SourceDeclaration(_) => HANDLE_BYTES,
         Value::Enum(value) => value.payload.as_ref().map_or(16, |payload| {
             16u64.saturating_add(estimated_value_bytes(payload))
