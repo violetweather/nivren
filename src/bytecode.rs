@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "host-runtime")]
 use nivren_jit::IntOp;
 
-use crate::ast::{Expr, Literal, MatchArm, Pattern, Span, Stmt, TextPiece, TypeRef};
+use crate::ast::{Expr, Literal, MatchArm, Pattern, PromiseClause, Span, Stmt, TextPiece, TypeRef};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
 
@@ -134,6 +134,9 @@ pub enum Op {
     /// Marks the visible execution boundary while leaving the result at the
     /// top of the stack.
     Perform,
+    /// Activates promise clauses for the rest of the running chunk's dynamic
+    /// extent, re-enforced at every capability gate.
+    Promise(Vec<PromiseClause>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -314,8 +317,11 @@ impl Compiler {
             Stmt::Skip(span) => {
                 self.emit(Op::LoopExit { skip: true }, *span);
             }
-            Stmt::Promise { span, .. }
-            | Stmt::Trusted { span, .. }
+            Stmt::Promise { clauses, span } => {
+                self.emit(Op::Promise(clauses.clone()), *span);
+                self.emit(Op::Constant(Literal::Null), *span);
+            }
+            Stmt::Trusted { span, .. }
             | Stmt::Generator { span, .. }
             | Stmt::Expand { span, .. } => {
                 self.emit(Op::Constant(Literal::Null), *span);
@@ -876,7 +882,7 @@ fn stack_effect(op: &Op) -> isize {
         | Op::IfCarries { .. }
         | Op::DefinePattern { .. }
         | Op::Using { .. } => 0,
-        Op::Prepare(_) | Op::Perform => 0,
+        Op::Prepare(_) | Op::Perform | Op::Promise(_) => 0,
     }
 }
 
@@ -928,6 +934,7 @@ pub fn source_map(chunk: &Chunk, source: &str) -> String {
             Op::AdoptProtocol { .. } => "adopt_protocol",
             Op::Prepare(_) => "prepare",
             Op::Perform => "perform",
+            Op::Promise(_) => "promise",
         }
     }
     fn walk(chunk: &Chunk, prefix: &str, mappings: &mut Vec<serde_json::Value>) {

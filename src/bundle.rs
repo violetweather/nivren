@@ -1,4 +1,4 @@
-use crate::ast::{Literal, Pattern, Span};
+use crate::ast::{Literal, Pattern, PromiseClause, Span};
 use crate::bytecode::{BYTECODE_VERSION, BytecodeArm, Chunk, Instruction, Op, verify};
 use crate::error::NivError;
 use crate::lexer::TokenKind;
@@ -247,6 +247,16 @@ impl Writer {
                         self.string(expected)?;
                     }
                     None => self.u8(0),
+                }
+            }
+            Op::Promise(clauses) => {
+                self.u8(37);
+                self.len(clauses.len())?;
+                for clause in clauses {
+                    self.string(&clause.capability)?;
+                    self.u8(u8::from(clause.never));
+                    self.strings(&clause.boundaries)?;
+                    self.span(clause.span)?;
                 }
             }
         }
@@ -537,6 +547,23 @@ impl Reader<'_> {
                     None
                 },
             },
+            37 => Op::Promise({
+                let count = self.count()?;
+                let mut clauses = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let capability = self.string()?;
+                    let never = self.u8()? != 0;
+                    let boundaries = self.strings()?;
+                    let span = self.span()?;
+                    clauses.push(PromiseClause {
+                        capability,
+                        never,
+                        boundaries,
+                        span,
+                    });
+                }
+                clauses
+            }),
             _ => return Err(bundle_error("unknown bytecode instruction")),
         };
         Ok(Instruction { op, span })

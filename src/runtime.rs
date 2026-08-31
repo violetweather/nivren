@@ -966,6 +966,9 @@ pub struct Interpreter {
     /// When present, authorized effects are satisfied from the recorded
     /// trace instead of touching the outside world.
     effect_replay: Option<Arc<Mutex<VecDeque<EffectRecord>>>>,
+    /// Promises active in the running dynamic extent; effects check them
+    /// again at the capability gate so even unchecked bytecode honors them.
+    active_promises: Vec<crate::ast::PromiseClause>,
     native_execution_depth: usize,
     native_compilations: usize,
     native_executions: usize,
@@ -1149,6 +1152,7 @@ impl Interpreter {
             run_samples: false,
             effect_recorder: None,
             effect_replay: None,
+            active_promises: vec![],
             native_execution_depth: 0,
             native_compilations: 0,
             native_executions: 0,
@@ -1595,7 +1599,11 @@ impl Interpreter {
             }
             Stmt::Stop(_) => Ok(Flow::Stop),
             Stmt::Skip(_) => Ok(Flow::Skip),
-            Stmt::Promise { .. } | Stmt::Trusted { .. } => Ok(Flow::Continue(Value::Null)),
+            Stmt::Promise { clauses, .. } => {
+                self.active_promises.extend(clauses.iter().cloned());
+                Ok(Flow::Continue(Value::Null))
+            }
+            Stmt::Trusted { .. } => Ok(Flow::Continue(Value::Null)),
             Stmt::Generator { span, .. } | Stmt::Expand { span, .. } => Err(NivError::new(
                 "generator expansion runs before execution",
                 span.line,
@@ -1931,6 +1939,7 @@ impl Interpreter {
 
     fn execute_block(&mut self, statements: &[Stmt], environment: Env) -> Result<Flow, NivError> {
         let previous = std::mem::replace(&mut self.environment, environment);
+        let promise_mark = self.active_promises.len();
         let result = (|| {
             let mut last = Value::Null;
             for statement in statements {
@@ -1941,6 +1950,7 @@ impl Interpreter {
             }
             Ok(Flow::Continue(last))
         })();
+        self.active_promises.truncate(promise_mark);
         self.environment = previous;
         result
     }
@@ -2522,6 +2532,21 @@ impl Interpreter {
                                 .push(format!("{capability}:{}", function.name));
                         }
                         return effect_json_to_value(&entry.result, span);
+                    }
+                    if let Some(clause) = self
+                        .active_promises
+                        .iter()
+                        .rev()
+                        .find(|clause| clause.capability == capability && clause.never)
+                    {
+                        return Err(NivError::new(
+                            format!(
+                                "this effect needs {capability}, but an active 'promise never {}' renounces it",
+                                clause.capability
+                            ),
+                            span.line,
+                            span.column,
+                        ));
                     }
                     if self
                         .capabilities
@@ -3827,14 +3852,32 @@ impl Interpreter {
     fn execute_chunk_vm(&mut self, chunk: &Chunk) -> Result<VmFlow, NivError> {
         let mut stack = Vec::new();
         let mut instruction = 0usize;
+        let promise_mark = self.active_promises.len();
+        let finish = |interpreter: &mut Self| {
+            interpreter.active_promises.truncate(promise_mark);
+        };
         while instruction < chunk.code.len() {
-            match self.execute_bytecode_step(chunk, &mut stack, instruction)? {
-                BytecodeStep::Next(next) => instruction = next,
-                BytecodeStep::Return(value) => return Ok(VmFlow::Return(value)),
-                BytecodeStep::Stop => return Ok(VmFlow::Stop),
-                BytecodeStep::Skip => return Ok(VmFlow::Skip),
+            match self.execute_bytecode_step(chunk, &mut stack, instruction) {
+                Ok(BytecodeStep::Next(next)) => instruction = next,
+                Ok(BytecodeStep::Return(value)) => {
+                    finish(self);
+                    return Ok(VmFlow::Return(value));
+                }
+                Ok(BytecodeStep::Stop) => {
+                    finish(self);
+                    return Ok(VmFlow::Stop);
+                }
+                Ok(BytecodeStep::Skip) => {
+                    finish(self);
+                    return Ok(VmFlow::Skip);
+                }
+                Err(error) => {
+                    finish(self);
+                    return Err(error);
+                }
             }
         }
+        finish(self);
         if self.is_cancelled() {
             return Err(NivError::new("task cancelled", 1, 1));
         }
@@ -4170,6 +4213,9 @@ impl Interpreter {
                     let mut metrics = metrics.lock().unwrap();
                     metrics.perform_boundaries = metrics.perform_boundaries.saturating_add(1);
                 }
+            }
+            Op::Promise(clauses) => {
+                self.active_promises.extend(clauses.iter().cloned());
             }
             Op::Match(arms) => {
                 let subject = stack.pop().unwrap();
@@ -5277,6 +5323,7 @@ fn operation_name(operation: &Op) -> &'static str {
         Op::MakeText(_) => "text",
         Op::DefinePattern { .. } => "define_pattern",
         Op::Sample { .. } => "sample",
+        Op::Promise(_) => "promise",
         Op::Using { .. } => "using",
     }
 }

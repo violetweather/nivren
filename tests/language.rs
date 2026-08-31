@@ -7418,6 +7418,41 @@ text "at {value}"
 }
 
 #[test]
+fn promises_are_enforced_again_at_runtime_in_both_engines() {
+    let source = r#"
+promise never Time
+std.time.sleep(0.0)
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .run_bytecode(&chunk)
+        .unwrap_err();
+    assert!(error.to_string().contains("promise never Time"));
+    let error = nivren::runtime::Interpreter::new()
+        .run(&program)
+        .unwrap_err();
+    assert!(error.to_string().contains("promise never Time"));
+    let scoped = r#"
+define quiet takes { } gives Int {
+    promise never Time
+    give 1
+}
+keep first set quiet with {}
+std.time.sleep(0.0)
+first
+"#;
+    let program = nivren::parser::parse(nivren::lexer::scan(scoped).unwrap()).unwrap();
+    let chunk = nivren::bytecode::compile(&program).unwrap();
+    assert_eq!(
+        nivren::runtime::Interpreter::new()
+            .run_bytecode(&chunk)
+            .unwrap(),
+        Value::Int(1)
+    );
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
