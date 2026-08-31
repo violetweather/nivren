@@ -1069,12 +1069,6 @@ impl Interpreter {
         let globals = Arc::new(Mutex::new(Scope::default()));
         for function in [
             NativeFunction {
-                name: "clock",
-                arity: 0,
-                call: native_clock,
-                capability: None,
-            },
-            NativeFunction {
                 name: "len",
                 arity: 1,
                 call: native_len,
@@ -3207,12 +3201,12 @@ impl Interpreter {
             Value::Function(function) if function.params.is_empty() => arguments[0].clone(),
             Value::Function(_) => {
                 return Err(NivError::new(
-                    "std.task.spawn requires a function with no parameters",
+                    "std.tasks.spawn requires a function with no parameters",
                     span.line,
                     span.column,
                 ));
             }
-            other => return Err(expected_value("std.task.spawn", "Function", other, span)),
+            other => return Err(expected_value("std.tasks.spawn", "Function", other, span)),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
@@ -3368,7 +3362,7 @@ impl Interpreter {
     }
 
     fn task_await(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let task = expect_task(&arguments[0], "std.task.await", span)?;
+        let task = expect_task(&arguments[0], "std.tasks.await", span)?;
         let handle = task.lock().unwrap().take().ok_or_else(|| {
             NivError::new("task has already been awaited", span.line, span.column)
         })?;
@@ -3377,8 +3371,8 @@ impl Interpreter {
     }
 
     fn task_await_for(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let task = expect_task(&arguments[0], "std.task.await_for", span)?;
-        let timeout = expect_duration(&arguments[1], "std.task.await_for", span)?;
+        let task = expect_task(&arguments[0], "std.tasks.await_for", span)?;
+        let timeout = expect_duration(&arguments[1], "std.tasks.await_for", span)?;
         let deadline = Instant::now() + timeout;
         loop {
             let observed = self.event_loop.generation();
@@ -3408,7 +3402,7 @@ impl Interpreter {
     fn task_cancel(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let task = match &arguments[0] {
             Value::Task(task) => task,
-            other => return Err(expected_value("std.task.cancel", "Task", other, span)),
+            other => return Err(expected_value("std.tasks.cancel", "Task", other, span)),
         };
         task.cancelled.store(true, Ordering::Release);
         self.record_task_cancellations(1);
@@ -3416,8 +3410,8 @@ impl Interpreter {
     }
 
     fn task_all(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let tasks = task_array(&arguments[0], "std.task.all", span)?;
-        ensure_pending_tasks(&tasks, "std.task.all", span)?;
+        let tasks = task_array(&arguments[0], "std.tasks.all", span)?;
+        ensure_pending_tasks(&tasks, "std.tasks.all", span)?;
         self.record_task_joins(tasks.len());
         let mut values = Vec::with_capacity(tasks.len());
         for task in tasks {
@@ -3437,15 +3431,15 @@ impl Interpreter {
     }
 
     fn task_race(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let tasks = task_array(&arguments[0], "std.task.race", span)?;
+        let tasks = task_array(&arguments[0], "std.tasks.race", span)?;
         if tasks.is_empty() {
             return Err(NivError::new(
-                "std.task.race requires at least one task",
+                "std.tasks.race requires at least one task",
                 span.line,
                 span.column,
             ));
         }
-        ensure_pending_tasks(&tasks, "std.task.race", span)?;
+        ensure_pending_tasks(&tasks, "std.tasks.race", span)?;
         loop {
             let observed = self.event_loop.generation();
             if let Some(winner) = tasks.iter().position(|task| {
@@ -3486,7 +3480,7 @@ impl Interpreter {
             Value::Int(value) if (0..=65_536).contains(&value) => value as usize,
             _ => {
                 return Err(NivError::new(
-                    "std.channel.create capacity must be an Int from 0 through 65536",
+                    "std.channels.create capacity must be an Int from 0 through 65536",
                     span.line,
                     span.column,
                 ));
@@ -3791,7 +3785,7 @@ impl Interpreter {
     }
 
     fn channel_send(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let channel = expect_channel(&arguments[0], "std.channel.send", span)?;
+        let channel = expect_channel(&arguments[0], "std.channels.send", span)?;
         if !transferable(&arguments[1]) {
             return Err(NivError::new(
                 "channel payload is not transferable",
@@ -3799,7 +3793,7 @@ impl Interpreter {
                 span.column,
             ));
         }
-        let timeout = expect_duration(&arguments[2], "std.channel.send", span)?;
+        let timeout = expect_duration(&arguments[2], "std.channels.send", span)?;
         let deadline = Instant::now() + timeout;
         let mut value = arguments[1].clone();
         loop {
@@ -3818,8 +3812,8 @@ impl Interpreter {
     }
 
     fn channel_receive(&mut self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-        let channel = expect_channel(&arguments[0], "std.channel.receive", span)?;
-        let timeout = expect_duration(&arguments[1], "std.channel.receive", span)?;
+        let channel = expect_channel(&arguments[0], "std.channels.receive", span)?;
+        let timeout = expect_duration(&arguments[1], "std.channels.receive", span)?;
         Ok(
             match channel.receiver.lock().unwrap().recv_timeout(timeout) {
                 Ok(value) => Value::Ok(Arc::new(value)),
@@ -4517,7 +4511,7 @@ impl Interpreter {
             for (name, binding) in &scope.values {
                 if !matches!(
                     name.as_str(),
-                    "clock" | "len" | "type" | "append" | "assert" | "ok" | "err" | "std"
+                    "len" | "type" | "append" | "assert" | "ok" | "err" | "std"
                 ) {
                     let rendered = binding.value.to_string();
                     let mut value = rendered.chars().take(200).collect::<String>();
@@ -6082,19 +6076,6 @@ fn native_err(arguments: Vec<Value>, _: Span) -> Result<Value, NivError> {
 fn standard_library() -> Value {
     let modules = HashMap::from([
         (
-            "fs".into(),
-            native_module(&[
-                ("read", 1, native_fs_read, Some("FileRead")),
-                ("write", 2, native_fs_write, Some("FileWrite")),
-                ("exists", 1, native_fs_exists, Some("FileRead")),
-                ("open_read", 1, native_fs_open_read, Some("FileRead")),
-                ("open_write", 1, native_fs_open_write, Some("FileWrite")),
-                ("read_open", 2, native_fs_read_open, Some("FileRead")),
-                ("write_open", 2, native_fs_write_open, Some("FileWrite")),
-                ("close", 1, native_fs_close, None),
-            ]),
-        ),
-        (
             "files".into(),
             named_native_module(&[
                 ("read", "read", 1, native_fs_read, Some("FileRead")),
@@ -6160,7 +6141,6 @@ fn standard_library() -> Value {
         (
             "time".into(),
             native_module(&[
-                ("now", 0, native_clock, Some("Time")),
                 ("sleep", 1, native_sleep, Some("Time")),
                 ("from_unix", 2, native_time_from_unix, None),
                 ("parse", 1, native_time_parse, None),
@@ -6575,10 +6555,6 @@ fn standard_library() -> Value {
             ]),
         ),
         (
-            "http".into(),
-            native_module(&[("get", 2, native_http_get, Some("Network"))]),
-        ),
-        (
             "web".into(),
             native_module(&[
                 ("get", 2, native_http_get, Some("Network")),
@@ -6636,17 +6612,6 @@ fn standard_library() -> Value {
             ]),
         ),
         (
-            "task".into(),
-            native_module(&[
-                ("spawn", 1, native_intrinsic, Some("Task")),
-                ("await", 1, native_intrinsic, Some("Task")),
-                ("await_for", 2, native_intrinsic, Some("Task")),
-                ("cancel", 1, native_intrinsic, Some("Task")),
-                ("all", 1, native_intrinsic, Some("Task")),
-                ("race", 1, native_intrinsic, Some("Task")),
-            ]),
-        ),
-        (
             "tasks".into(),
             native_module(&[
                 ("spawn", 1, native_intrinsic, Some("Task")),
@@ -6655,14 +6620,6 @@ fn standard_library() -> Value {
                 ("cancel", 1, native_intrinsic, Some("Task")),
                 ("all", 1, native_intrinsic, Some("Task")),
                 ("race", 1, native_intrinsic, Some("Task")),
-            ]),
-        ),
-        (
-            "channel".into(),
-            native_module(&[
-                ("create", 1, native_intrinsic, Some("Channel")),
-                ("send", 3, native_intrinsic, Some("Channel")),
-                ("receive", 2, native_intrinsic, Some("Channel")),
             ]),
         ),
         (
@@ -6989,7 +6946,7 @@ fn native_library_close(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
 }
 
 fn native_fs_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let path = expect_string(&arguments[0], "std.fs.read", span)?;
+    let path = expect_string(&arguments[0], "std.files.read", span)?;
     Ok(match fs::read_to_string(path) {
         Ok(contents) => Value::Ok(Arc::new(Value::String(contents))),
         Err(error) => result_error(error),
@@ -6997,8 +6954,8 @@ fn native_fs_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> 
 }
 
 fn native_fs_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let path = expect_string(&arguments[0], "std.fs.write", span)?;
-    let contents = expect_string(&arguments[1], "std.fs.write", span)?;
+    let path = expect_string(&arguments[0], "std.files.write", span)?;
+    let contents = expect_string(&arguments[1], "std.files.write", span)?;
     Ok(match fs::write(path, contents) {
         Ok(()) => Value::Ok(Arc::new(Value::Null)),
         Err(error) => result_error(error),
@@ -7006,7 +6963,7 @@ fn native_fs_write(arguments: Vec<Value>, span: Span) -> Result<Value, NivError>
 }
 
 fn native_fs_exists(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let path = expect_string(&arguments[0], "std.fs.exists", span)?;
+    let path = expect_string(&arguments[0], "std.files.exists", span)?;
     Ok(Value::Bool(Path::new(path).exists()))
 }
 
@@ -7205,6 +7162,12 @@ fn native_time_add_seconds(arguments: Vec<Value>, span: Span) -> Result<Value, N
 }
 
 fn native_time_monotonic(_arguments: Vec<Value>, _span: Span) -> Result<Value, NivError> {
+    // A pinned deterministic test clock overrides the process origin so
+    // `niv test --time` stays reproducible.
+    let fixed = TEST_CLOCK_BITS.load(Ordering::SeqCst);
+    if fixed != LIVE_CLOCK {
+        return Ok(Value::Float(f64::from_bits(fixed)));
+    }
     static ORIGIN: std::sync::LazyLock<std::time::Instant> =
         std::sync::LazyLock::new(std::time::Instant::now);
     Ok(Value::Float(ORIGIN.elapsed().as_secs_f64()))
@@ -10497,8 +10460,8 @@ fn native_net_accept(arguments: Vec<Value>, span: Span) -> Result<Value, NivErro
 }
 
 fn native_http_get(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
-    let url = expect_string(&arguments[0], "std.http.get", span)?;
-    let timeout = expect_duration(&arguments[1], "std.http.get", span)?;
+    let url = expect_string(&arguments[0], "std.web.get", span)?;
+    let timeout = expect_duration(&arguments[1], "std.web.get", span)?;
     Ok(match http_get(url, timeout) {
         Ok(body) => Value::Ok(Arc::new(Value::String(body))),
         Err(error) => result_error(error),

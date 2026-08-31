@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn explain_is_deterministic_and_orders_effects() {
-        let source = "define read_both takes { left is String right is String } gives String or String needs FileRead { keep first set perform std.fs.read with { path set left } or give\nkeep second set perform std.fs.read with { path set right } or give\ngive ok(first + second) }";
+        let source = "define read_both takes { left is String right is String } gives String or String needs FileRead { keep first set perform std.files.read with { path set left } or give\nkeep second set perform std.files.read with { path set right } or give\ngive ok(first + second) }";
         let program = program(source);
         let first = analyze(&program, Optimization::Enabled);
         let second = analyze(&program, Optimization::Enabled);

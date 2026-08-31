@@ -5,7 +5,7 @@ takes {
 gives String or String
 needs FileRead
 {
-    keep contents set perform std.fs.read with {
+    keep contents set perform std.files.read with {
         path set path
     } or give
     give ok(contents)

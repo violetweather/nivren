@@ -1944,7 +1944,7 @@ fn project_capabilities_are_explicit_validated_and_runtime_enforced() {
     );
 
     let program = nivren::parser::parse(
-        nivren::lexer::scan("std.fs.exists(\"definitely-missing\")").unwrap(),
+        nivren::lexer::scan("std.files.exists(\"definitely-missing\")").unwrap(),
     )
     .unwrap();
     nivren::typecheck::check(&program).unwrap();
@@ -2337,7 +2337,7 @@ fn cli_test_profiles_and_deterministic_time_are_explicit() {
     fs::write(project.join("main.niv"), "42").unwrap();
     fs::write(
         tests.join("clock_test.niv"),
-        "assert with { condition set perform clock with { } == 1700000000.25 message set \"fixed test time\" }",
+        "assert with { condition set perform std.time.monotonic with { } == 1700000000.25 message set \"fixed test time\" }",
     )
     .unwrap();
     let niv = env!("CARGO_BIN_EXE_niv");
@@ -3139,13 +3139,13 @@ fn typed_standard_library_handles_files_paths_time_and_process_errors() {
     let file = directory.join("message.txt");
     let path = file.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
-        "keep writeResult: Result<Null, String> = std.fs.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ Ok(value) => yes, Err(error) => no }}, \"write\"); keep readResult: Result<String, String> = std.fs.read(\"{path}\"); keep text = choose (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(std.fs.exists(\"{path}\"), \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
+        "keep writeResult: Result<Null, String> = std.files.write(\"{path}\", \"hello\"); assert(choose (writeResult) {{ Ok(value) => yes, Err(error) => no }}, \"write\"); keep readResult: Result<String, String> = std.files.read(\"{path}\"); keep text = choose (readResult) {{ Ok(value) => value, Err(error) => error }}; assert(std.files.exists(\"{path}\"), \"exists\"); assert((std.path.basename(\"{path}\") ?? \"\") == \"message.txt\", \"basename\"); std.time.sleep(0.0); text"
     );
     assert_eq!(eval_vm(&source), Value::String("hello".into()));
 
     let process = "keep result: Result<String, String> = std.process.run(\"nivren-command-that-does-not-exist-4f3d\", []); choose (result) { Ok(output) => no, Err(error) => yes }";
     assert_eq!(eval_vm(process), Value::Bool(true));
-    assert!(nivren::check("std.fs.read(42)").is_err());
+    assert!(nivren::check("std.files.read(42)").is_err());
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -5227,13 +5227,13 @@ choose roundtrip() {{ Ok(contents) => contents, Err(problem) => problem }}
 
 #[test]
 fn structured_tasks_cancel_and_exchange_channel_values() {
-    let source = "keep channel = std.channel.create(1); define producer() gives Int needs Channel { keep sent = std.channel.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.task.spawn(producer); keep received = std.channel.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.task.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
+    let source = "keep channel = std.channels.create(1); define producer() gives Int needs Channel { keep sent = std.channels.send(channel, 42, 2.0); give choose (sent) { Ok(value) => 1, Err(error) => 0 }; } keep task = std.tasks.spawn(producer); keep received = std.channels.receive(channel, 2.0); keep value = choose (received) { Ok(item) => item, Err(error) => 0 }; keep completed = std.tasks.await(task); assert(choose (completed) { Ok(code) => code == 1, Err(error) => no }, \"task completion\"); value";
     assert_eq!(eval_vm(source), Value::Int(42));
 
-    let cancellation = "define forever() gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.task.spawn(forever); std.task.cancel(task); keep result = std.task.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
+    let cancellation = "define forever() gives Int { change value = 0; repeat (value < 9223372036854775807) { value = value + 1; } give value; } keep task = std.tasks.spawn(forever); std.tasks.cancel(task); keep result = std.tasks.await(task); choose (result) { Ok(value) => no, Err(error) => yes }";
     assert_eq!(eval_vm(cancellation), Value::Bool(true));
-    assert!(nivren::check("std.task.spawn(42)").is_err());
-    assert!(nivren::run("std.task.spawn(42)").is_err());
+    assert!(nivren::check("std.tasks.spawn(42)").is_err());
+    assert!(nivren::run("std.tasks.spawn(42)").is_err());
 }
 
 #[test]

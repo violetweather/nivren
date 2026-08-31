@@ -6,7 +6,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "",
-        "clock:;len:value;type:value;append:values,value;assert:condition,message;ok:value;err:problem",
+        "len:value;type:value;append:values,value;assert:condition,message;ok:value;err:problem",
     );
     add(
         &mut labels,
@@ -42,7 +42,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "std.bytes",
         "from_string:value;from_values:values;to_string:bytes;length:bytes;get:bytes,index;slice:bytes,offset,length",
     );
-    for module in ["std.channel", "std.channels"] {
+    for module in ["std.channels"] {
         add(
             &mut labels,
             module,
@@ -70,7 +70,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "hex:bytes;unhex:source;base64:bytes;unbase64:source;base64url:bytes;unbase64url:source",
     );
     add(&mut labels, "std.env", "get:name");
-    for module in ["std.files", "std.fs"] {
+    for module in ["std.files"] {
         add(
             &mut labels,
             module,
@@ -89,7 +89,6 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "std.host",
         "invoke:name,request;invoke_async:name,request;open:kind,request;call:handle,name,request;close:handle",
     );
-    add(&mut labels, "std.http", "get:url,timeout");
     add(
         &mut labels,
         "std.iter",
@@ -158,7 +157,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
         "std.set",
         "single:value;add:set,value;contains:set,value;remove:set,value;length:set;values:set",
     );
-    for module in ["std.task", "std.tasks"] {
+    for module in ["std.tasks"] {
         add(
             &mut labels,
             module,
@@ -173,7 +172,7 @@ static LABELS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     add(
         &mut labels,
         "std.time",
-        "now:;sleep:seconds;now_zoned:zone;from_unix:seconds,zone;parse:source;format:value;in_zone:value,zone;unix:value;add_seconds:value,seconds;monotonic:;year:value;month:value;day:value;hour:value;minute:value;second:value;weekday:value;difference_seconds:left,right",
+        "sleep:seconds;now_zoned:zone;from_unix:seconds,zone;parse:source;format:value;in_zone:value,zone;unix:value;add_seconds:value,seconds;monotonic:;year:value;month:value;day:value;hour:value;minute:value;second:value;weekday:value;difference_seconds:left,right",
     );
     add(
         &mut labels,

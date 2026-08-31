@@ -279,7 +279,6 @@ impl Checker {
                 },
             );
         };
-        native("clock", vec![], Type::Float);
         native("len", vec![unknown.clone()], Type::Int);
         native("type", vec![unknown.clone()], Type::String);
         native("append", vec![unknown.clone(), unknown], Type::Unknown);
@@ -318,59 +317,6 @@ impl Checker {
             "std".into(),
             Binding {
                 ty: module(vec![
-                    (
-                        "fs",
-                        module(vec![
-                            (
-                                "read",
-                                effect(vec![Type::String], string_result.clone(), "FileRead"),
-                            ),
-                            (
-                                "write",
-                                effect(vec![Type::String, Type::String], null_result, "FileWrite"),
-                            ),
-                            ("exists", effect(vec![Type::String], Type::Bool, "FileRead")),
-                            (
-                                "open_read",
-                                effect(
-                                    vec![Type::String],
-                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
-                                    "FileRead",
-                                ),
-                            ),
-                            (
-                                "open_write",
-                                effect(
-                                    vec![Type::String],
-                                    Type::Result(Box::new(Type::File), Box::new(Type::String)),
-                                    "FileWrite",
-                                ),
-                            ),
-                            (
-                                "read_open",
-                                effect(
-                                    vec![Type::File, Type::Int],
-                                    string_result.clone(),
-                                    "FileRead",
-                                ),
-                            ),
-                            (
-                                "write_open",
-                                effect(
-                                    vec![Type::File, Type::String],
-                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
-                                    "FileWrite",
-                                ),
-                            ),
-                            (
-                                "close",
-                                function(
-                                    vec![Type::File],
-                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
-                                ),
-                            ),
-                        ]),
-                    ),
                     (
                         "files",
                         module(vec![
@@ -481,7 +427,6 @@ impl Checker {
                     (
                         "time",
                         module(vec![
-                            ("now", effect(vec![], Type::Float, "Time")),
                             ("sleep", effect(vec![Type::Float], Type::Null, "Time")),
                             (
                                 "from_unix",
@@ -1249,17 +1194,6 @@ impl Checker {
                         ]),
                     ),
                     (
-                        "http",
-                        module(vec![(
-                            "get",
-                            effect(
-                                vec![Type::String, Type::Float],
-                                string_result.clone(),
-                                "Network",
-                            ),
-                        )]),
-                    ),
-                    (
                         "web",
                         module(vec![
                             (
@@ -1438,84 +1372,7 @@ impl Checker {
                             ),
                         ]),
                     ),
-                    (
-                        "task",
-                        module(vec![
-                            (
-                                "spawn",
-                                effect(
-                                    vec![Type::Function(
-                                        vec![],
-                                        vec![],
-                                        vec![],
-                                        Box::new(Type::Unknown),
-                                        vec!["$effects".into()],
-                                    )],
-                                    Type::Task,
-                                    "Task",
-                                ),
-                            ),
-                            (
-                                "await",
-                                effect(
-                                    vec![Type::Task],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Task",
-                                ),
-                            ),
-                            (
-                                "await_for",
-                                effect(
-                                    vec![Type::Task, Type::Float],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Task",
-                                ),
-                            ),
-                            ("cancel", effect(vec![Type::Task], Type::Null, "Task")),
-                            (
-                                "all",
-                                effect(
-                                    vec![Type::Array(Box::new(Type::Task))],
-                                    Type::Result(
-                                        Box::new(Type::Array(Box::new(Type::Unknown))),
-                                        Box::new(Type::String),
-                                    ),
-                                    "Task",
-                                ),
-                            ),
-                            (
-                                "race",
-                                effect(
-                                    vec![Type::Array(Box::new(Type::Task))],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Task",
-                                ),
-                            ),
-                        ]),
-                    ),
                     ("tasks", task_module(&effect)),
-                    (
-                        "channel",
-                        module(vec![
-                            ("create", effect(vec![Type::Int], Type::Channel, "Channel")),
-                            (
-                                "send",
-                                effect(
-                                    vec![Type::Channel, Type::Unknown, Type::Float],
-                                    Type::Result(Box::new(Type::Null), Box::new(Type::String)),
-                                    "Channel",
-                                ),
-                            ),
-                            (
-                                "receive",
-                                effect(
-                                    vec![Type::Channel, Type::Float],
-                                    Type::Result(Box::new(Type::Unknown), Box::new(Type::String)),
-                                    "Channel",
-                                ),
-                            ),
-                        ]),
-                    ),
                     ("channels", channel_module(&effect)),
                     (
                         "locks",
