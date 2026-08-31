@@ -518,7 +518,7 @@ fn decode_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N], NivEr
     Ok(bytes)
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub fn encode_hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         write!(&mut output, "{byte:02x}").unwrap();
