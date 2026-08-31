@@ -825,8 +825,9 @@ fn authority_check(path: &str) -> ExitCode {
             println!("authority lock is current");
             ExitCode::SUCCESS
         }
-        Ok(_) => {
+        Ok(actual) => {
             eprintln!("error: authority lock is stale; review and run 'niv authority lock'");
+            eprint!("{}", nivren::package::authority_diff(&actual, &expected));
             ExitCode::FAILURE
         }
         Err(_) => {

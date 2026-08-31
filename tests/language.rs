@@ -7480,6 +7480,19 @@ text "{chunk}{chunk}{chunk}"
 }
 
 #[test]
+fn authority_diffs_show_added_and_removed_grants() {
+    let old = "package = \"app\"\n[dependency.web]\nNetwork = \"host:api.example.com\"\n";
+    let new = "package = \"app\"\n[dependency.web]\nNetwork = \"host:api.example.com,host:evil.example.com\"\n";
+    let diff = nivren::package::authority_diff(old, new);
+    assert!(diff.contains("- Network = \"host:api.example.com\""));
+    assert!(diff.contains("+ Network = \"host:api.example.com,host:evil.example.com\""));
+    assert!(
+        nivren::package::authority_diff(old, old).contains("formatting-only")
+            || nivren::package::authority_diff(old, old).is_empty()
+    );
+}
+
+#[test]
 fn the_verifier_rejects_loop_exit_bytecode_outside_a_loop_body() {
     let program = nivren::parser::parse(nivren::lexer::scan("stop").unwrap()).unwrap();
     let error = nivren::bytecode::compile(&program).unwrap_err();
