@@ -13,6 +13,8 @@ use nivren::runtime::{Interpreter, Value};
 
 /// The interpreter allocates managed values constantly; mimalloc turns those
 /// small allocations from system-heap calls into fast thread-local bumps.
+/// Wasm targets keep their host allocator — the dependency is not built there.
+#[cfg(not(target_family = "wasm"))]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

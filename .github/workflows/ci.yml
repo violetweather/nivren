@@ -116,6 +116,7 @@ jobs:
             --leak-check=full \
             --show-leak-kinds=definite,indirect \
             --errors-for-leak-kinds=definite,indirect \
+            --suppressions=tools/valgrind.supp \
             target/debug/niv run --native proofs/edition4/intent_snapshot.niv
 
   wasm:
