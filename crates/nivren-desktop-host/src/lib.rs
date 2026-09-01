@@ -9,6 +9,9 @@ const MAXIMUM_TITLE_CHARS: usize = 256;
 const MAXIMUM_IDENTIFIER_CHARS: usize = 128;
 const MAXIMUM_COMMAND_CHARS: usize = 128;
 const MAXIMUM_PAYLOAD_BYTES: usize = 1_048_576;
+// Only the Windows WebView2 host round-trips live bridge messages; other
+// platforms report their experimental status without a bridge to wait on.
+#[cfg(windows)]
 const BRIDGE_TIMEOUT_SECONDS: u64 = 10;
 
 /// One requested desktop window, matching the `nivren_desktop` package's

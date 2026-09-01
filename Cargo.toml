@@ -36,6 +36,11 @@ jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-fa
 num-bigint = "0.5.1"
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 mio = { version = "1.2.2", features = ["os-poll", "net"], optional = true }
+
+# mimalloc carries a C build that cannot target WebAssembly, and the Wasm
+# guests never use the CLI's global allocator, so the dependency is gated to
+# non-Wasm targets.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 mimalloc = "0.1.52"
 
 [dev-dependencies]

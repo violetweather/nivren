@@ -60,6 +60,9 @@ DOCUMENTS = (
     "crates/nivren-ffi/include/nivren.h",
 )
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Crate versions may carry semver build metadata after "+" (for example ash
+# 0.38.0+1.3.281); "+" is safe in archive member names on every platform.
+SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$")
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
@@ -142,7 +145,7 @@ def dependency_licenses(prefix: str, binary: Path) -> list[tuple[str, bytes, int
     for name, version, license_expression, directory, license_file in sorted(
         packages, key=lambda package: (package[0].encode(), package[1].encode())
     ):
-        if not SAFE_COMPONENT.fullmatch(name) or not SAFE_COMPONENT.fullmatch(version):
+        if not SAFE_COMPONENT.fullmatch(name) or not SAFE_VERSION.fullmatch(version):
             fail(f"unsafe dependency identity: {name!r} {version!r}")
         candidates = {
             child.resolve()

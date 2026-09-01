@@ -1,0 +1,14 @@
+# Valgrind suppressions for the hardened native CLI run.
+#
+# mimalloc's process initialisation probes /sys for transparent-huge-page
+# support and scans the read buffer with its own strnlen; valgrind cannot see
+# the kernel's write into that buffer and reports an uninitialised read. The
+# probe is inside mimalloc itself, runs once before main, and touches no
+# Nivren data. Remove when upstream mimalloc initialises the probe buffer
+# (mimalloc issue tracker: unix_detect_thp).
+{
+   mimalloc-thp-detection-probe
+   Memcheck:Cond
+   ...
+   fun:unix_detect_thp
+}
