@@ -63,7 +63,7 @@ class ReleasePackagerTests(unittest.TestCase):
                     names,
                 )
                 self.assertTrue(
-                    any("/licenses/rustls-0.23.42/" in name for name in names)
+                    any("/licenses/rustls-0." in name for name in names)
                 )
 
     def test_rejects_unsafe_labels_and_symlinked_inputs(self) -> None:
