@@ -4355,7 +4355,7 @@ fn official_redis_secure_connection_verifies_certificates() {
 
     let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
     for vm in [false, true] {
-        let rcgen::CertifiedKey { cert, key_pair } =
+        let rcgen::CertifiedKey { cert, signing_key: key_pair } =
             rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let certificate_pem = cert.pem();
         let certificate = cert.der().clone();
@@ -4914,14 +4914,14 @@ fn secure_websocket_listeners_serve_verified_tls_in_both_engines() {
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
 
-        let rcgen::CertifiedKey { cert, key_pair } =
+        let rcgen::CertifiedKey { cert, signing_key: key_pair } =
             rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let certificate_pem = cert.pem();
         let private_key_pem = key_pair.serialize_pem();
         let trusted_certificate = cert.der().clone();
         let rcgen::CertifiedKey {
             cert: client_cert,
-            key_pair: client_key,
+            signing_key: client_key,
         } = rcgen::generate_simple_self_signed(vec!["nivren-client".into()]).unwrap();
         let client_ca_pem = client_cert.pem();
         let client_certificate = client_cert.der().clone();
@@ -4995,7 +4995,7 @@ fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
     for bytecode in [false, true] {
         let rcgen::CertifiedKey {
             cert: server_cert,
-            key_pair: server_key,
+            signing_key: server_key,
         } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let server_certificate_pem = server_cert.pem();
         let server_certificate = server_cert.der().clone();
@@ -5004,7 +5004,7 @@ fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
         );
         let rcgen::CertifiedKey {
             cert: client_cert,
-            key_pair: client_key,
+            signing_key: client_key,
         } = rcgen::generate_simple_self_signed(vec!["nivren-client".into()]).unwrap();
         let client_certificate_pem = client_cert.pem();
         let client_private_key_pem = client_key.serialize_pem();
