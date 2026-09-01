@@ -4355,8 +4355,10 @@ fn official_redis_secure_connection_verifies_certificates() {
 
     let redis = fs::read_to_string("packages/nivren_redis/src/main.niv").unwrap();
     for vm in [false, true] {
-        let rcgen::CertifiedKey { cert, signing_key: key_pair } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let certificate_pem = cert.pem();
         let certificate = cert.der().clone();
         let private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
@@ -4914,8 +4916,10 @@ fn secure_websocket_listeners_serve_verified_tls_in_both_engines() {
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
 
-        let rcgen::CertifiedKey { cert, signing_key: key_pair } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let certificate_pem = cert.pem();
         let private_key_pem = key_pair.serialize_pem();
         let trusted_certificate = cert.der().clone();

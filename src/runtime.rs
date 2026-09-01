@@ -14760,8 +14760,10 @@ mod tests {
             Value::String("no".into()),
         )]);
         assert!(tls_client_stream("localhost", connected_stream(), Some(&bypass)).is_err());
-        let rcgen::CertifiedKey { cert, signing_key: key_pair } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let roots = Arc::new(vec![(
             Value::String("additional_root_pem".into()),
             Value::String(cert.pem()),

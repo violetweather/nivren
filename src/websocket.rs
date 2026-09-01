@@ -499,8 +499,10 @@ mod tests {
 
     #[test]
     fn tls_client_and_server_verify_and_exchange_text_frames() {
-        let rcgen::CertifiedKey { cert, signing_key: key_pair } =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let certificate = cert.der().clone();
         let private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
             rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()),
