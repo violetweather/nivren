@@ -1,10 +1,18 @@
 # cargo-audit configuration.
 #
-# `cargo audit` reads Cargo.lock, which records every optional dependency in the
-# resolved universe even when no enabled feature pulls it into a build. An entry
-# here means the advisory does not reach any artifact Nivren produces, not that
-# the finding is unimportant. Each entry must state how that was verified and be
-# removed as soon as the dependency can actually be dropped.
+# `cargo audit` reads Cargo.lock, which records every optional and
+# platform-specific dependency in the resolved universe even when no Nivren
+# build ever compiles it. An entry here means the advisory does not reach any
+# artifact Nivren produces, or names a finished crate that upstream keeps but
+# no longer publishes updates for. Each entry states how that was verified and
+# must be removed as soon as the dependency can actually be dropped.
+#
+# Verification method for the "never compiled" entries below: the desktop
+# webview stack (`tao`, `wry`) is a `[target.'cfg(windows)'.dependencies]`
+# entry of crates/nivren-desktop-host, and inside those crates the GTK bindings
+# are Linux-only and the HTML parser (`kuchikiki`) is Android-only. Nivren
+# targets Windows, macOS, and Linux, so `cargo tree -i <crate> --target all`
+# shows the chains but no build on a tier-one platform compiles them.
 
 [advisories]
 ignore = [
@@ -21,4 +29,54 @@ ignore = [
     # upstream no longer supports. Drop this entry when rust_decimal moves to
     # rkyv 0.8.17 or later, or when the optional dependency is removed.
     "RUSTSEC-2026-0235",
+
+    # RUSTSEC-2024-0411 .. RUSTSEC-2024-0420 — the gtk-rs GTK3 bindings
+    # (gdkwayland-sys, gdk, atk, gdkx11-sys, gtk, atk-sys, gdkx11, gdk-sys,
+    # gtk3-macros, gtk-sys) are no longer maintained, and
+    # RUSTSEC-2024-0429 — unsound iterator impls in glib 0.18.
+    #
+    # All reach the lockfile only through tao/wry's Linux webview backend,
+    # which is never compiled: tao and wry are Windows-only dependencies of
+    # nivren-desktop-host, and no Nivren build targets GTK. Drop these when
+    # tao/wry move to GTK4 or the desktop host stops depending on them.
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    "RUSTSEC-2024-0429",
+
+    # RUSTSEC-2024-0370 — proc-macro-error is unmaintained.
+    #
+    # Only glib-macros and gtk3-macros depend on it; both belong to the
+    # never-compiled GTK chain above.
+    "RUSTSEC-2024-0370",
+
+    # RUSTSEC-2025-0057 — fxhash is unmaintained, and
+    # RUSTSEC-2026-0097 — rand 0.7 is unsound with a custom logger.
+    #
+    # Both reach the lockfile only through wry's `kuchikiki` HTML parser,
+    # which wry enables for `cfg(target_os = "android")` alone. Nivren has no
+    # Android target, so neither crate is ever compiled.
+    "RUSTSEC-2025-0057",
+    "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2024-0384 — instant is unmaintained.
+    #
+    # An unconditional dependency of tao, so it is compiled into the Windows
+    # desktop host. It is a finished clock shim with no I/O surface; only tao
+    # upstream can replace it. Drop when tao does.
+    "RUSTSEC-2024-0384",
+
+    # RUSTSEC-2024-0436 — paste is unmaintained.
+    #
+    # Compiled only on macOS through wgpu-hal's `metal` backend. It is a
+    # finished proc macro that runs at build time and emits no runtime code
+    # of its own; only metal-rs upstream can drop it. Drop when it does.
+    "RUSTSEC-2024-0436",
 ]

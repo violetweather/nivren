@@ -39,6 +39,16 @@ regression test. No language or package-format change.
   peer hold a connection open indefinitely one byte at a time. A WebSocket
   now shuts its socket when the peer closes.
 
+Dependency advisories:
+
+- `mysql` moves from 26 to 28, which takes `lru` to 0.16.4 and closes
+  RUSTSEC-2026-0002. RUSTSEC-2026-0253 (`lru` ≥ 0.18.2) stays open until
+  the MySQL driver moves again.
+- `.cargo/audit.toml` documents the sixteen advisories that name crates no
+  Nivren build compiles (the Linux GTK3 and Android HTML-parser chains
+  behind the Windows-only webview stack) or finished build-time crates
+  (`instant`, `paste`), each with the verification that justifies it.
+
 ## 1.0.0 — Edition 6
 
 Nivren 1.0: Edition 6, the runtime edition, stable. The grammar is the
