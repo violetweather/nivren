@@ -46,6 +46,10 @@ pub struct RegistryStatus {
     pub expires_at: u64,
     pub revoked_keys: BTreeSet<String>,
     pub frozen_packages: BTreeMap<String, String>,
+    /// SHA-256 of the canonical advisory list served beside this status, so a
+    /// host cannot drop or trim advisories while serving a valid status.
+    #[serde(default)]
+    pub advisories_sha256: String,
     pub signature: String,
 }
 
@@ -279,9 +283,15 @@ pub fn verify_release(
         &authorization_bytes(authorization),
         &authorization.signature,
     )?;
+    validate_status(status)?;
     verify(&root_public_key, &status_bytes(status), &status.signature)?;
     if status.generation < minimum_status_generation {
         return Err(trust_error("registry status generation was rolled back"));
+    }
+    if status.advisories_sha256 != advisories_sha256(advisories) {
+        return Err(trust_error(
+            "registry advisory list does not match the signed status",
+        ));
     }
     if status.expires_at < now || status.issued_at > now.saturating_add(300) {
         return Err(trust_error("registry status is stale or future-dated"));
@@ -321,6 +331,7 @@ pub fn verify_release(
         return Err(trust_error("release provenance does not match the package"));
     }
     for advisory in advisories {
+        validate_advisory(advisory)?;
         verify(
             &root_public_key,
             &advisory_bytes(advisory),
@@ -390,49 +401,108 @@ fn provenance_bytes(value: &ReleaseProvenance) -> Vec<u8> {
     )
 }
 
+// Collections are encoded as a length-prefixed count followed by
+// length-prefixed elements. Joining elements with a separator byte let two
+// different sets (`["A", "B"]` and `["A\0B"]`) sign to identical bytes, which
+// turned a signed revocation or advisory into a forgeable one.
 fn status_bytes(value: &RegistryStatus) -> Vec<u8> {
-    let revoked = value
-        .revoked_keys
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\0");
+    let revoked = canonical_list(value.revoked_keys.iter().map(String::as_bytes));
     let frozen = value
         .frozen_packages
         .iter()
-        .map(|(package, reason)| format!("{package}\0{reason}"))
-        .collect::<Vec<_>>()
-        .join("\0");
+        .map(|(package, reason)| canonical(b"frozen", &[package.as_bytes(), reason.as_bytes()]))
+        .collect::<Vec<_>>();
+    let frozen = canonical_list(frozen.iter().map(Vec::as_slice));
     canonical(
-        b"nivren.registry-status.v1",
+        b"nivren.registry-status.v2",
         &[
             &value.generation.to_le_bytes(),
             &value.issued_at.to_le_bytes(),
             &value.expires_at.to_le_bytes(),
-            revoked.as_bytes(),
-            frozen.as_bytes(),
+            &revoked,
+            &frozen,
+            value.advisories_sha256.as_bytes(),
         ],
     )
 }
 
 fn advisory_bytes(value: &Advisory) -> Vec<u8> {
-    let affected = value
-        .affected_versions
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\0");
+    let affected = canonical_list(value.affected_versions.iter().map(String::as_bytes));
     canonical(
-        b"nivren.advisory.v1",
+        b"nivren.advisory.v2",
         &[
             value.id.as_bytes(),
             value.package.as_bytes(),
-            affected.as_bytes(),
+            &affected,
             value.severity.as_bytes(),
             value.summary.as_bytes(),
             &[u8::from(value.withdrawn)],
         ],
     )
+}
+
+/// The digest a signed status commits to for the advisory list served with it.
+pub fn advisories_sha256(advisories: &[Advisory]) -> String {
+    let items = advisories.iter().map(advisory_bytes).collect::<Vec<_>>();
+    let mut bytes = canonical(b"nivren.advisory-list.v1", &[]);
+    bytes.extend(canonical_list(items.iter().map(Vec::as_slice)));
+    sha256(&bytes)
+}
+
+fn canonical_list<'a>(items: impl Iterator<Item = &'a [u8]>) -> Vec<u8> {
+    let items = items.collect::<Vec<_>>();
+    let mut bytes = Vec::new();
+    append(
+        &mut bytes,
+        &u64::try_from(items.len()).unwrap().to_le_bytes(),
+    );
+    for item in items {
+        append(&mut bytes, item);
+    }
+    bytes
+}
+
+fn safe_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+}
+
+fn validate_status(value: &RegistryStatus) -> Result<(), NivError> {
+    if value
+        .revoked_keys
+        .iter()
+        .any(|key| decode_key(key).is_err())
+        || value
+            .frozen_packages
+            .iter()
+            .any(|(package, reason)| !valid_publisher(package) || !safe_text(reason, 1024))
+        || value.advisories_sha256.len() != 64
+        || !value
+            .advisories_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(trust_error("registry status contains invalid entries"));
+    }
+    Ok(())
+}
+
+fn validate_advisory(value: &Advisory) -> Result<(), NivError> {
+    if !safe_text(&value.id, 128)
+        || !valid_publisher(&value.package)
+        || value
+            .affected_versions
+            .iter()
+            .any(|version| !safe_text(version, 64))
+        || !safe_text(&value.severity, 64)
+        || value.summary.len() > 4096
+        || value
+            .summary
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+    {
+        return Err(trust_error("advisory contains invalid entries"));
+    }
+    Ok(())
 }
 
 fn admin_action_bytes(value: &RegistryAdminAction) -> Vec<u8> {
@@ -577,4 +647,73 @@ impl<'a> EnvelopeReader<'a> {
 
 fn trust_error(message: impl Into<String>) -> NivError {
     NivError::new(message, 1, 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(revoked: &[&str]) -> RegistryStatus {
+        RegistryStatus {
+            generation: 1,
+            issued_at: 1,
+            expires_at: 2,
+            revoked_keys: revoked.iter().map(|key| (*key).to_string()).collect(),
+            frozen_packages: BTreeMap::new(),
+            advisories_sha256: advisories_sha256(&[]),
+            signature: String::new(),
+        }
+    }
+
+    fn advisory(affected: &[&str]) -> Advisory {
+        Advisory {
+            id: "NIV-1".into(),
+            package: "library".into(),
+            affected_versions: affected.iter().map(|value| (*value).to_string()).collect(),
+            severity: "high".into(),
+            summary: "test".into(),
+            withdrawn: false,
+            signature: String::new(),
+        }
+    }
+
+    #[test]
+    fn set_elements_cannot_collide_through_separator_bytes() {
+        let key_a = "a".repeat(64);
+        let key_b = "b".repeat(64);
+        let merged = format!("{key_a}\0{key_b}");
+        assert_ne!(
+            status_bytes(&status(&[&key_a, &key_b])),
+            status_bytes(&status(&[&merged]))
+        );
+        assert_ne!(
+            advisory_bytes(&advisory(&["1.0.0", "1.0.1"])),
+            advisory_bytes(&advisory(&["1.0.0\u{0}1.0.1"]))
+        );
+    }
+
+    #[test]
+    fn statuses_and_advisories_with_control_bytes_are_rejected() {
+        let key_a = "a".repeat(64);
+        assert!(validate_status(&status(&[&key_a])).is_ok());
+        assert!(validate_status(&status(&[&format!("{key_a}\0{key_a}")])).is_err());
+        let mut bad_digest = status(&[]);
+        bad_digest.advisories_sha256.clear();
+        assert!(validate_status(&bad_digest).is_err());
+        assert!(validate_advisory(&advisory(&["1.0.0"])).is_ok());
+        assert!(validate_advisory(&advisory(&["1.0.0\u{0}1.0.1"])).is_err());
+    }
+
+    #[test]
+    fn advisory_list_digest_tracks_every_entry() {
+        let one = advisory(&["1.0.0"]);
+        let mut withdrawn = one.clone();
+        withdrawn.withdrawn = true;
+        assert_ne!(advisories_sha256(&[]), advisories_sha256(&[one.clone()]));
+        assert_ne!(
+            advisories_sha256(&[one.clone()]),
+            advisories_sha256(&[withdrawn])
+        );
+        assert_eq!(advisories_sha256(&[one.clone()]), advisories_sha256(&[one]));
+    }
 }

@@ -2,7 +2,7 @@
   "format": 4,
   "edition": "6",
   "release_track": "stable",
-  "expected_version": "1.0.0",
+  "expected_version": "1.0.1",
   "product_proof_complete": true,
   "completed_checkpoints": [
     "language",

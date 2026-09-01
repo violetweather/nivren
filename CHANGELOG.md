@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.1 — security fixes
+
+Six findings from the 1.0.0 internal security review, each with a
+regression test. No language or package-format change.
+
+- **Network scope target.** The `Network` grant check now takes its target
+  from a fixed argument position per operation instead of scanning every
+  string argument for a URL, which let a program satisfy
+  `host:api.example.com` by placing that URL in a WebSocket *path* while
+  connecting anywhere. WebSocket paths are also validated before any
+  connection is attempted.
+- **Native scope split.** `std.native.open` accepts only `path:` grants; a
+  `kind:` grant serves `std.host.*` handles alone, so a database grant can
+  no longer load a library by bare name through the OS search path. The new
+  `kind:*` scope grants every host handle kind.
+- **C ABI default deny.** `nivren_run_utf8`, `nivren_run_native_utf8`,
+  `nivren_run_async_utf8`, and the mobile wrappers run source with only
+  Task, Channel, Time, Log, and Random; `nivren_run_host_utf8` adds `Native`
+  for host handles but not library loading. The new
+  `nivren_run_utf8_with_capabilities` takes an explicit grant list (`*`
+  restores the previous fully trusted behaviour).
+- **Registry signature canonicalization v2.** Status revocation sets, frozen
+  packages, and advisory version sets are length-prefixed element by element
+  instead of joined with a NUL separator, so two different sets can no longer
+  sign to identical bytes; entries containing control bytes are rejected
+  outright. Registry statuses and advisories must be re-signed.
+- **Signed advisory list.** `RegistryStatus` carries `advisories_sha256`, the
+  digest of the advisory list served beside it, and `niv install --trusted`
+  refuses a list that does not match. `niv trust sign-status` takes the
+  served `advisories.json` as an optional fourth argument to fill it in.
+- **SQLite confinement.** The bundled database host installs an authorizer
+  that denies `ATTACH`/`DETACH` and opens connections without URI filenames,
+  so statements cannot reach files outside the configured root.
+- **Read deadlines.** HTTP request and response reads, WebSocket handshakes,
+  and WebSocket frames run under one wall-clock deadline (the socket's
+  configured timeout) instead of renewing a per-read allowance, which let a
+  peer hold a connection open indefinitely one byte at a time. A WebSocket
+  now shuts its socket when the peer closes.
+
 ## 1.0.0 — Edition 6
 
 Nivren 1.0: Edition 6, the runtime edition, stable. The grammar is the

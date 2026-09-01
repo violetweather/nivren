@@ -2,7 +2,7 @@
   "name": "nivren",
   "displayName": "Nivren",
   "description": "Language support for Nivren",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "nivren-lang",
   "license": "Apache-2.0",
   "engines": {

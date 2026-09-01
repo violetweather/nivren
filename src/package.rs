@@ -1188,6 +1188,7 @@ mod tests {
                 expires_at: now + 3600,
                 revoked_keys: BTreeSet::new(),
                 frozen_packages: BTreeMap::new(),
+                advisories_sha256: crate::trust::advisories_sha256(&[]),
                 signature: String::new(),
             },
         );
