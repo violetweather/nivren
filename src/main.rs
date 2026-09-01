@@ -218,7 +218,12 @@ fn main() -> ExitCode {
         [command, action, input, secret, output]
             if command == "trust" && action == "sign-status" =>
         {
-            trust_sign_status(input, secret, output)
+            trust_sign_status(input, secret, output, None)
+        }
+        [command, action, input, secret, output, advisories]
+            if command == "trust" && action == "sign-status" =>
+        {
+            trust_sign_status(input, secret, output, Some(advisories))
         }
         [command, action, input, secret, output]
             if command == "trust" && action == "sign-advisory" =>
@@ -438,12 +443,29 @@ fn trust_attest(
     })())
 }
 
-fn trust_sign_status(input: &str, secret: &str, output: &str) -> ExitCode {
+fn trust_sign_status(
+    input: &str,
+    secret: &str,
+    output: &str,
+    advisories: Option<&str>,
+) -> ExitCode {
     trust_result((|| {
         let text = fs::read_to_string(input)
             .map_err(|error| format!("cannot read status {input}: {error}"))?;
-        let status: nivren::trust::RegistryStatus = serde_json::from_str(&text)
+        let mut status: nivren::trust::RegistryStatus = serde_json::from_str(&text)
             .map_err(|error| format!("invalid registry status: {error}"))?;
+        if let Some(advisories) = advisories {
+            let text = fs::read_to_string(advisories)
+                .map_err(|error| format!("cannot read advisories {advisories}: {error}"))?;
+            let advisories: Vec<nivren::trust::Advisory> = serde_json::from_str(&text)
+                .map_err(|error| format!("invalid advisories: {error}"))?;
+            status.advisories_sha256 = nivren::trust::advisories_sha256(&advisories);
+        } else if status.advisories_sha256.is_empty() {
+            return Err(
+                "status has no advisories_sha256; pass the served advisories.json as the fourth argument"
+                    .to_string(),
+            );
+        }
         let root_secret = read_secret_key(secret)?;
         let signed = nivren::trust::sign_status(root_secret, status);
         let encoded = serde_json::to_vec_pretty(&signed)
@@ -3327,7 +3349,7 @@ Registry trust operations:
   niv trust keygen <secret-output>
   niv trust authorize <publisher> <publisher-key-file> <repository> <workflow> <expires-unix> <root-secret-file> <output.json>
   niv trust attest <file.nivpkg> <publisher> <repository> <workflow> <commit> <publisher-secret-file> <output.json>
-  niv trust sign-status <status.json> <root-secret-file> <output.json>
+  niv trust sign-status <status.json> <root-secret-file> <output.json> [advisories.json]
   niv trust sign-advisory <advisory.json> <root-secret-file> <output.json>"
     );
     println!(

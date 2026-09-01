@@ -6,6 +6,150 @@ use std::thread::JoinHandle;
 
 pub const NIVREN_ABI_VERSION: u32 = 3;
 
+/// What every entry point grants unless the embedder passes an explicit
+/// capability list: pure computation plus structured concurrency, clocks,
+/// logging, and OS entropy. Files, the network, processes, the environment,
+/// and native code loading all stay closed.
+const DEFAULT_CAPABILITIES: &[&str] = &["Task", "Channel", "Time", "Log", "Random"];
+
+const ALL_CAPABILITIES: &[&str] = &[
+    "FileRead",
+    "FileWrite",
+    "Environment",
+    "Time",
+    "Process",
+    "Network",
+    "Task",
+    "Channel",
+    "Log",
+    "Random",
+    "Native",
+];
+
+fn interpreter(capabilities: &[&str], scopes: &[(&str, &str)]) -> nivren::runtime::Interpreter {
+    nivren::runtime::Interpreter::new()
+        .with_capabilities(capabilities.iter().map(|name| (*name).to_string()))
+        .with_capability_scopes(
+            scopes
+                .iter()
+                .map(|(name, scope)| ((*name).to_string(), (*scope).to_string())),
+        )
+}
+
+/// Default interpreter for entry points that take a host callback: the host
+/// itself is the authority boundary for `std.host.*`, so `Native` is granted
+/// for every handle kind, but never as a path grant that would let source
+/// load foreign libraries through `std.native.open`.
+fn host_interpreter() -> nivren::runtime::Interpreter {
+    let mut capabilities = DEFAULT_CAPABILITIES.to_vec();
+    capabilities.push("Native");
+    interpreter(&capabilities, &[("Native", "kind:*")])
+}
+
+/// Granted capability names plus the `(capability, scope)` pairs that bound
+/// them.
+type CapabilityGrant = (Vec<String>, Vec<(String, String)>);
+
+/// Parses the embedder's capability list: comma- or newline-separated
+/// entries of `Name` or `Name=scope`, or `*` for every capability unscoped.
+fn parse_capabilities(text: &str) -> Result<CapabilityGrant, String> {
+    let mut capabilities = Vec::new();
+    let mut scopes = Vec::new();
+    for entry in text
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        if entry == "*" {
+            capabilities.extend(ALL_CAPABILITIES.iter().map(|name| (*name).to_string()));
+            continue;
+        }
+        let (name, scope) = match entry.split_once('=') {
+            Some((name, scope)) => (name.trim(), Some(scope.trim())),
+            None => (entry, None),
+        };
+        if !ALL_CAPABILITIES.contains(&name) {
+            return Err(format!("unknown capability '{name}'"));
+        }
+        if let Some(scope) = scope {
+            if scope.is_empty() || scope.len() > 4096 || scope.chars().any(char::is_control) {
+                return Err(format!("invalid scope for capability '{name}'"));
+            }
+            scopes.push((name.to_string(), scope.to_string()));
+        }
+        capabilities.push(name.to_string());
+    }
+    Ok((capabilities, scopes))
+}
+
+fn run_source(
+    source: &str,
+    mut interpreter: nivren::runtime::Interpreter,
+) -> Result<nivren::runtime::Value, Vec<nivren::error::NivError>> {
+    let tokens = nivren::lexer::scan(source)?;
+    let program = nivren::parser::parse(tokens)?;
+    let program = nivren::expand::expand_program(program)?;
+    nivren::typecheck::check(&program)?;
+    let chunk = nivren::bytecode::compile(&program)?;
+    interpreter
+        .run_bytecode(&chunk)
+        .map_err(|error| vec![error])
+}
+
+fn host_closure(
+    callback: NivrenHostCallback,
+    free_callback: NivrenHostFree,
+    context_address: usize,
+) -> impl Fn(&str, &str) -> Result<String, String> + Send + Sync + 'static {
+    move |name: &str, request: &str| {
+        // SAFETY: The exported function contract keeps callbacks and the
+        // opaque context valid for this synchronous execution.
+        let returned = unsafe {
+            callback(
+                name.as_ptr(),
+                name.len(),
+                request.as_ptr(),
+                request.len(),
+                context_address as *mut c_void,
+            )
+        };
+        let invalid = returned.data.is_null() && returned.length != 0;
+        let bytes = if invalid || returned.length == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: The callback contract provides a readable returned
+            // range until its paired free callback is invoked below.
+            unsafe { std::slice::from_raw_parts(returned.data, returned.length) }.to_vec()
+        };
+        let status = returned.status;
+        // SAFETY: This is exactly the unchanged callback-owned buffer.
+        unsafe { free_callback(returned, context_address as *mut c_void) };
+        if invalid {
+            return Err("native host returned a null buffer with nonzero length".into());
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|error| format!("native host response is not UTF-8: {error}"))?;
+        if status == 0 { Ok(text) } else { Err(text) }
+    }
+}
+
+fn result_buffer(
+    result: Result<nivren::runtime::Value, Vec<nivren::error::NivError>>,
+) -> NivrenBuffer {
+    match result {
+        Ok(value) => NivrenBuffer::new(value.to_string().into_bytes(), 0),
+        Err(errors) => NivrenBuffer::new(
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes(),
+            1,
+        ),
+    }
+}
+
 #[repr(C)]
 pub struct NivrenBuffer {
     pub data: *mut u8,
@@ -142,6 +286,11 @@ pub unsafe extern "C" fn nivren_compile_utf8(source: *const u8, length: usize) -
 
 /// Executes one UTF-8 Nivren source buffer.
 ///
+/// The program runs with only the default capabilities (Task, Channel, Time,
+/// Log, Random): it cannot touch files, the network, processes, the
+/// environment, or native code. Use `nivren_run_utf8_with_capabilities` to
+/// grant more.
+///
 /// Status 0 is success, 1 is a language error, 2 is invalid host input, and 3
 /// is a caught internal panic. The caller owns the returned allocation and must
 /// release it exactly once with `nivren_buffer_free`.
@@ -156,17 +305,73 @@ pub unsafe extern "C" fn nivren_run_utf8(source: *const u8, length: usize) -> Ni
         Ok(source) => source,
         Err(error) => return error,
     };
-    match catch_unwind(AssertUnwindSafe(|| nivren::run(source))) {
-        Ok(Ok(value)) => NivrenBuffer::new(value.to_string().into_bytes(), 0),
-        Ok(Err(errors)) => NivrenBuffer::new(
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .into_bytes(),
-            1,
-        ),
+    match catch_unwind(AssertUnwindSafe(|| {
+        run_source(source, interpreter(DEFAULT_CAPABILITIES, &[]))
+    })) {
+        Ok(result) => result_buffer(result),
+        Err(_) => NivrenBuffer::error("internal Nivren panic", 3),
+    }
+}
+
+/// Executes one UTF-8 Nivren source buffer with an explicit capability grant
+/// and an optional host callback.
+///
+/// `capabilities` is a UTF-8 list, separated by commas or newlines, of entries
+/// such as `FileRead=path:./data`, `Network=host:api.example.com`,
+/// `Native=kind:database`, or a bare capability name for an unscoped grant.
+/// `*` grants every capability without scopes; that is the pre-1.0.1
+/// behaviour and should only be used for source the host fully trusts.
+/// Anything not listed is denied at runtime. Pass `callback` and
+/// `free_callback` together to serve `std.host.*`, or both null for none.
+///
+/// # Safety
+///
+/// `source` and `capabilities` follow the pointer contract of
+/// `nivren_run_utf8`; callbacks follow the contract of `nivren_run_host_utf8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nivren_run_utf8_with_capabilities(
+    source: *const u8,
+    length: usize,
+    capabilities: *const u8,
+    capabilities_length: usize,
+    callback: Option<NivrenHostCallback>,
+    free_callback: Option<NivrenHostFree>,
+    context: *mut c_void,
+) -> NivrenBuffer {
+    let source = match unsafe { decode_source(source, length) } {
+        Ok(source) => source,
+        Err(error) => return error,
+    };
+    let capabilities = match unsafe { decode_source(capabilities, capabilities_length) } {
+        Ok(capabilities) => capabilities,
+        Err(error) => return error,
+    };
+    let (capabilities, scopes) = match parse_capabilities(capabilities) {
+        Ok(parsed) => parsed,
+        Err(error) => return NivrenBuffer::error(&error, 2),
+    };
+    let host = match (callback, free_callback) {
+        (Some(callback), Some(free_callback)) => {
+            Some(host_closure(callback, free_callback, context as usize))
+        }
+        (None, None) => None,
+        _ => {
+            return NivrenBuffer::error(
+                "host callback and free callback must be passed together",
+                2,
+            );
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut interpreter = nivren::runtime::Interpreter::new()
+            .with_capabilities(capabilities)
+            .with_capability_scopes(scopes);
+        if let Some(host) = host {
+            interpreter = interpreter.with_host_callback(host);
+        }
+        run_source(source, interpreter)
+    })) {
+        Ok(result) => result_buffer(result),
         Err(_) => NivrenBuffer::error("internal Nivren panic", 3),
     }
 }
@@ -190,7 +395,7 @@ pub unsafe extern "C" fn nivren_run_native_utf8(source: *const u8, length: usize
             let program = nivren::parser::parse(tokens)?;
             nivren::typecheck::check(&program)?;
             let chunk = nivren::bytecode::compile(&program)?;
-            nivren::runtime::Interpreter::new()
+            interpreter(DEFAULT_CAPABILITIES, &[])
                 .run_native(&chunk)
                 .map_err(|error| vec![error])
         },
@@ -215,11 +420,18 @@ pub unsafe extern "C" fn nivren_run_native_utf8(source: *const u8, length: usize
 /// returned bytes immediately and then calls `free_callback` exactly once.
 /// Callback status 0 is success; any other status becomes a Nivren `Err`.
 ///
+/// The program gets the default capabilities plus `Native` for host handles
+/// of every kind. It cannot load foreign libraries through `std.native.open`,
+/// touch files, the network, processes, or the environment; use
+/// `nivren_run_utf8_with_capabilities` to grant more.
+///
 /// # Safety
 ///
 /// Source follows `nivren_run_utf8`. Callback pointers must remain valid for
-/// this synchronous call. Returned callback buffers must remain readable until
-/// `free_callback` is invoked. `context` is passed through unchanged.
+/// this synchronous call and may be invoked concurrently from worker threads
+/// started by the program, so they must be thread-safe. Returned callback
+/// buffers must remain readable until `free_callback` is invoked. `context`
+/// is passed through unchanged.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nivren_run_host_utf8(
     source_pointer: *const u8,
@@ -235,57 +447,18 @@ pub unsafe extern "C" fn nivren_run_host_utf8(
     let (Some(callback), Some(free_callback)) = (callback, free_callback) else {
         return NivrenBuffer::error("host callback and free callback are required", 2);
     };
-    let context_address = context as usize;
+    let host = host_closure(callback, free_callback, context as usize);
     match catch_unwind(AssertUnwindSafe(|| {
         let tokens = nivren::lexer::scan(source)?;
         let program = nivren::parser::parse(tokens)?;
         nivren::typecheck::check(&program)?;
         let chunk = nivren::bytecode::compile(&program)?;
-        let host = move |name: &str, request: &str| {
-            // SAFETY: The exported function contract keeps callbacks and the
-            // opaque context valid for this synchronous execution.
-            let returned = unsafe {
-                callback(
-                    name.as_ptr(),
-                    name.len(),
-                    request.as_ptr(),
-                    request.len(),
-                    context_address as *mut c_void,
-                )
-            };
-            let invalid = returned.data.is_null() && returned.length != 0;
-            let bytes = if invalid || returned.length == 0 {
-                Vec::new()
-            } else {
-                // SAFETY: The callback contract provides a readable returned
-                // range until its paired free callback is invoked below.
-                unsafe { std::slice::from_raw_parts(returned.data, returned.length) }.to_vec()
-            };
-            let status = returned.status;
-            // SAFETY: This is exactly the unchanged callback-owned buffer.
-            unsafe { free_callback(returned, context_address as *mut c_void) };
-            if invalid {
-                return Err("native host returned a null buffer with nonzero length".into());
-            }
-            let text = String::from_utf8(bytes)
-                .map_err(|error| format!("native host response is not UTF-8: {error}"))?;
-            if status == 0 { Ok(text) } else { Err(text) }
-        };
-        nivren::runtime::Interpreter::new()
+        host_interpreter()
             .with_host_callback(host)
             .run_bytecode(&chunk)
             .map_err(|error| vec![error])
     })) {
-        Ok(Ok(value)) => NivrenBuffer::new(value.to_string().into_bytes(), 0),
-        Ok(Err(errors)) => NivrenBuffer::new(
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .into_bytes(),
-            1,
-        ),
+        Ok(result) => result_buffer(result),
         Err(_) => NivrenBuffer::error("internal Nivren panic", 3),
     }
 }
@@ -369,7 +542,7 @@ pub unsafe extern "C" fn nivren_run_async_utf8(
                         .collect::<Vec<_>>()
                         .join("\n")
                 })?;
-                nivren::runtime::Interpreter::new()
+                interpreter(DEFAULT_CAPABILITIES, &[])
                     .with_cancellation(worker_cancellation)
                     .run_bytecode(&chunk)
                     .map(|value| value.to_string())
@@ -469,7 +642,7 @@ mod tests {
         NivrenBuffer, nivren_abi_version, nivren_async_run_cancel, nivren_async_run_finished,
         nivren_async_run_free, nivren_buffer_free, nivren_check_utf8, nivren_compile_utf8,
         nivren_format_utf8, nivren_run_async_utf8, nivren_run_host_utf8, nivren_run_native_utf8,
-        nivren_run_utf8,
+        nivren_run_utf8, nivren_run_utf8_with_capabilities,
     };
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -671,6 +844,86 @@ read()
         assert_eq!(invalid_frees, 1);
         // SAFETY: This is the unchanged, not-yet-freed returned buffer.
         unsafe { nivren_buffer_free(invalid_callback) };
+    }
+
+    #[test]
+    fn c_boundary_denies_ambient_authority_by_default() {
+        let environment = b"std.env.get(\"PATH\")";
+        // SAFETY: The byte slice remains readable for the call.
+        let denied = unsafe { nivren_run_utf8(environment.as_ptr(), environment.len()) };
+        assert_eq!(denied.status, 1);
+        assert!(output(&denied).contains("does not allow Environment"));
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(denied) };
+
+        let library = b"std.native.open(\"kernel32.dll\")";
+        let mut frees = 0usize;
+        // SAFETY: Callback functions and the counter context remain live.
+        let hosted = unsafe {
+            nivren_run_host_utf8(
+                library.as_ptr(),
+                library.len(),
+                Some(host),
+                Some(host_free),
+                (&mut frees as *mut usize).cast(),
+            )
+        };
+        assert_eq!(hosted.status, 1, "{}", output(&hosted));
+        assert!(output(&hosted).contains("outside the project grant"));
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(hosted) };
+
+        let grant = b"Environment=name:PATH";
+        // SAFETY: Both byte slices remain readable for the call.
+        let allowed = unsafe {
+            nivren_run_utf8_with_capabilities(
+                environment.as_ptr(),
+                environment.len(),
+                grant.as_ptr(),
+                grant.len(),
+                None,
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(allowed.status, 0, "{}", output(&allowed));
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(allowed) };
+
+        let other = b"std.env.get(\"HOME\")";
+        // SAFETY: Both byte slices remain readable for the call.
+        let scoped = unsafe {
+            nivren_run_utf8_with_capabilities(
+                other.as_ptr(),
+                other.len(),
+                grant.as_ptr(),
+                grant.len(),
+                None,
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(scoped.status, 1);
+        assert!(output(&scoped).contains("outside the project grant"));
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(scoped) };
+
+        let unknown = b"Teleport";
+        // SAFETY: Both byte slices remain readable for the call.
+        let rejected = unsafe {
+            nivren_run_utf8_with_capabilities(
+                environment.as_ptr(),
+                environment.len(),
+                unknown.as_ptr(),
+                unknown.len(),
+                None,
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rejected.status, 2);
+        // SAFETY: This is the unchanged, not-yet-freed returned buffer.
+        unsafe { nivren_buffer_free(rejected) };
     }
 
     #[test]

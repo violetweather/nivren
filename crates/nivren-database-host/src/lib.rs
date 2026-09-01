@@ -140,8 +140,13 @@ impl DatabaseHost {
     }
 
     fn open_sqlite(&self, configuration: &str) -> Result<Connection, String> {
+        // No SQLITE_OPEN_URI: a `file:` URI could name any path or VFS, and
+        // the root confinement below only reasons about plain paths.
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let connection = if configuration.starts_with("memory://") {
-            Connection::open_in_memory()
+            Connection::open_in_memory_with_flags(flags)
         } else {
             let relative = configuration
                 .strip_prefix("sqlite:")
@@ -163,12 +168,26 @@ impl DatabaseHost {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("cannot create SQLite directory: {error}"))?;
             }
-            Connection::open(path)
+            Connection::open_with_flags(path, flags)
         }
         .map_err(|error| format!("cannot open SQLite database: {error}"))?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;")
             .map_err(|error| format!("cannot secure SQLite connection: {error}"))?;
+        // Statements are program-controlled, so the path confinement of the
+        // initial open must also hold for every later statement: ATTACH names
+        // an arbitrary file and would step straight out of the root.
+        connection
+            .authorizer(Some(
+                |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                    rusqlite::hooks::AuthAction::Attach { .. }
+                    | rusqlite::hooks::AuthAction::Detach { .. } => {
+                        rusqlite::hooks::Authorization::Deny
+                    }
+                    _ => rusqlite::hooks::Authorization::Allow,
+                },
+            ))
+            .map_err(|error| format!("cannot install SQLite authorizer: {error}"))?;
         Ok(connection)
     }
 
@@ -589,6 +608,19 @@ mod tests {
             host.dispatch("nivren.handle.call:execute", &mismatched)
                 .is_err()
         );
+        let escape = root.join("escaped.db");
+        let attach = envelope(
+            &handle,
+            &request(
+                "execute",
+                &format!("ATTACH DATABASE '{}' AS outside", escape.display()),
+            ),
+        );
+        let denied = host
+            .dispatch("nivren.handle.call:execute", &attach)
+            .unwrap_err();
+        assert!(denied.contains("not authorized"), "{denied}");
+        assert!(!escape.exists());
         host.dispatch("nivren.handle.close", &handle).unwrap();
         let _ = std::fs::remove_dir(&root);
     }

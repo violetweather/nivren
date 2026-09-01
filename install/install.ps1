@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.0.1",
     [ValidateSet("", "stable", "beta", "nightly")]
     [string]$Channel = "",
     [string]$ChannelKey = "",

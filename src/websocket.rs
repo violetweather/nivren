@@ -1,9 +1,12 @@
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, digest};
 use ring::rand::{SecureRandom, SystemRandom};
+
+use crate::runtime::{DeadlineSocket, arm_read_deadline};
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_MESSAGE: usize = 16 * 1024 * 1024;
@@ -44,6 +47,24 @@ impl Write for Transport {
             Self::Plain(stream) => stream.lock().unwrap().flush(),
             Self::Tls(stream) => stream.flush(),
             Self::TlsServer(stream) => stream.flush(),
+        }
+    }
+}
+
+impl DeadlineSocket for Transport {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        match self {
+            Self::Plain(stream) => stream.lock().unwrap().read_timeout(),
+            Self::Tls(stream) => stream.sock.read_timeout(),
+            Self::TlsServer(stream) => stream.sock.read_timeout(),
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.lock().unwrap().set_read_timeout(timeout),
+            Self::Tls(stream) => stream.sock.set_read_timeout(timeout),
+            Self::TlsServer(stream) => stream.sock.set_read_timeout(timeout),
         }
     }
 }
@@ -207,46 +228,21 @@ impl WebSocket {
         if maximum == 0 || maximum > MAX_MESSAGE {
             return Err("WebSocket receive limit must be from 1 through 16777216 bytes".into());
         }
-        let mut message = Vec::new();
-        let mut fragmented = false;
-        loop {
-            let mut stream = self.stream.lock().unwrap();
-            let frame = read_frame(
-                &mut *stream,
-                !self.mask_outgoing,
-                maximum.saturating_sub(message.len()),
-            )?;
-            match frame.opcode {
-                0 if fragmented => message.extend_from_slice(&frame.payload),
-                1 if !fragmented => message.extend_from_slice(&frame.payload),
-                8 => {
-                    if !self.closed {
-                        write_frame(&mut *stream, 8, &frame.payload, self.mask_outgoing)?;
-                    }
-                    self.closed = true;
-                    return Err("WebSocket peer closed the connection".into());
-                }
-                9 => {
-                    write_frame(&mut *stream, 10, &frame.payload, self.mask_outgoing)?;
-                    continue;
-                }
-                10 => continue,
-                2 => {
-                    return Err(
-                        "binary WebSocket messages are not supported by receive_text".into(),
-                    );
-                }
-                _ => return Err("invalid WebSocket message sequence".into()),
-            }
-            if message.len() > maximum {
-                return Err("WebSocket message exceeds receive limit".into());
-            }
-            fragmented = !frame.fin;
-            if !fragmented {
-                return String::from_utf8(message)
-                    .map_err(|_| "WebSocket text message is not UTF-8".into());
-            }
-        }
+        let mut stream = self.stream.lock().unwrap();
+        // The socket's read timeout bounds the whole message rather than each
+        // frame header or payload read, so a peer cannot stall the receiver
+        // indefinitely by trickling bytes.
+        let previous = stream.read_timeout().map_err(io_error)?;
+        let deadline = previous.map(|timeout| Instant::now() + timeout);
+        let result = receive_message(
+            &mut stream,
+            self.mask_outgoing,
+            &mut self.closed,
+            maximum,
+            deadline,
+        );
+        let _ = stream.set_read_timeout(previous);
+        result
     }
 
     pub fn close(&mut self) -> Result<(), String> {
@@ -267,8 +263,60 @@ struct Frame {
     payload: Vec<u8>,
 }
 
-fn read_frame(stream: &mut impl Read, expect_mask: bool, maximum: usize) -> Result<Frame, String> {
+fn receive_message(
+    stream: &mut Transport,
+    mask_outgoing: bool,
+    closed: &mut bool,
+    maximum: usize,
+    deadline: Option<Instant>,
+) -> Result<String, String> {
+    let mut message = Vec::new();
+    let mut fragmented = false;
+    loop {
+        let frame = read_frame(
+            stream,
+            !mask_outgoing,
+            maximum.saturating_sub(message.len()),
+            deadline,
+        )?;
+        match frame.opcode {
+            0 if fragmented => message.extend_from_slice(&frame.payload),
+            1 if !fragmented => message.extend_from_slice(&frame.payload),
+            8 => {
+                let _ = write_frame(stream, 8, &frame.payload, mask_outgoing);
+                *closed = true;
+                stream.shutdown();
+                return Err("WebSocket peer closed the connection".into());
+            }
+            9 => {
+                write_frame(stream, 10, &frame.payload, mask_outgoing)?;
+                continue;
+            }
+            10 => continue,
+            2 => {
+                return Err("binary WebSocket messages are not supported by receive_text".into());
+            }
+            _ => return Err("invalid WebSocket message sequence".into()),
+        }
+        if message.len() > maximum {
+            return Err("WebSocket message exceeds receive limit".into());
+        }
+        fragmented = !frame.fin;
+        if !fragmented {
+            return String::from_utf8(message)
+                .map_err(|_| "WebSocket text message is not UTF-8".into());
+        }
+    }
+}
+
+fn read_frame(
+    stream: &mut (impl Read + DeadlineSocket),
+    expect_mask: bool,
+    maximum: usize,
+    deadline: Option<Instant>,
+) -> Result<Frame, String> {
     let mut head = [0_u8; 2];
+    arm_read_deadline(stream, deadline)?;
     stream.read_exact(&mut head).map_err(io_error)?;
     if head[0] & 0x70 != 0 {
         return Err("WebSocket extensions were not negotiated".into());
@@ -282,10 +330,12 @@ fn read_frame(stream: &mut impl Read, expect_mask: bool, maximum: usize) -> Resu
     let mut length = usize::from(head[1] & 0x7f);
     if length == 126 {
         let mut bytes = [0; 2];
+        arm_read_deadline(stream, deadline)?;
         stream.read_exact(&mut bytes).map_err(io_error)?;
         length = usize::from(u16::from_be_bytes(bytes));
     } else if length == 127 {
         let mut bytes = [0; 8];
+        arm_read_deadline(stream, deadline)?;
         stream.read_exact(&mut bytes).map_err(io_error)?;
         let wide = u64::from_be_bytes(bytes);
         length = usize::try_from(wide).map_err(|_| "WebSocket frame is too large")?;
@@ -298,9 +348,11 @@ fn read_frame(stream: &mut impl Read, expect_mask: bool, maximum: usize) -> Resu
     }
     let mut mask = [0; 4];
     if masked {
+        arm_read_deadline(stream, deadline)?;
         stream.read_exact(&mut mask).map_err(io_error)?;
     }
     let mut payload = vec![0; length];
+    arm_read_deadline(stream, deadline)?;
     stream.read_exact(&mut payload).map_err(io_error)?;
     if masked {
         for (index, byte) in payload.iter_mut().enumerate() {
@@ -352,18 +404,27 @@ fn write_frame(
     stream.flush().map_err(io_error)
 }
 
-fn read_headers(stream: &mut impl Read) -> Result<String, String> {
-    let mut bytes = vec![];
-    while !bytes.ends_with(b"\r\n\r\n") {
-        if bytes.len() >= 64 * 1024 {
-            return Err("WebSocket handshake headers exceed 64 KiB".into());
+fn read_headers(stream: &mut (impl Read + DeadlineSocket)) -> Result<String, String> {
+    // One deadline covers the entire handshake so a peer cannot hold the
+    // connection open by sending header bytes one at a time.
+    let previous = stream.read_timeout().map_err(io_error)?;
+    let deadline = previous.map(|timeout| Instant::now() + timeout);
+    let result = (|| {
+        let mut bytes = vec![];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            if bytes.len() >= 64 * 1024 {
+                return Err("WebSocket handshake headers exceed 64 KiB".into());
+            }
+            let mut byte = [0];
+            arm_read_deadline(stream, deadline)?;
+            stream.read_exact(&mut byte).map_err(io_error)?;
+            bytes.push(byte[0]);
         }
-        let mut byte = [0];
-        stream.read_exact(&mut byte).map_err(io_error)?;
-        bytes.push(byte[0]);
-    }
-    String::from_utf8(bytes[..bytes.len() - 4].to_vec())
-        .map_err(|_| "WebSocket handshake is not UTF-8".into())
+        String::from_utf8(bytes[..bytes.len() - 4].to_vec())
+            .map_err(|_| "WebSocket handshake is not UTF-8".into())
+    })();
+    let _ = stream.set_read_timeout(previous);
+    result
 }
 
 fn parse_headers<'a>(

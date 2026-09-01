@@ -1,6 +1,6 @@
 [package]
 name = "nivren-database-host"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ repository = "https://github.com/violetweather/nivren"
 [dependencies]
 mysql = { version = "26.0.1", default-features = false, features = ["minimal"] }
 postgres = "0.19.10"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

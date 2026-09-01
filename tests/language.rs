@@ -4995,6 +4995,90 @@ choose serve() {{ case Ok carries message => message, case Err carries problem =
 }
 
 #[test]
+fn network_scope_targets_are_positional_and_reads_have_deadlines() {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    // A URL inside the WebSocket *path* argument must not satisfy the host
+    // scope for a connection that actually goes to a different host.
+    let smuggled = nivren::parser::parse(
+        nivren::lexer::scan(
+            "std.web.websocket_connect(\"192.0.2.1\", 9, \"http://127.0.0.1/\", 0.05)",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let denied = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["Network".into()])
+        .with_capability_scopes([(String::from("Network"), String::from("host:127.0.0.1"))])
+        .run(&smuggled)
+        .unwrap_err();
+    assert!(
+        denied.message.contains("outside the project grant"),
+        "{}",
+        denied.message
+    );
+
+    // The scoped host itself stays reachable; a refused connection is an
+    // ordinary typed failure, not a grant error.
+    let scoped = nivren::parser::parse(
+        nivren::lexer::scan("std.web.websocket_connect(\"127.0.0.1\", 9, \"/\", 0.05)").unwrap(),
+    )
+    .unwrap();
+    let outcome = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["Network".into()])
+        .with_capability_scopes([(String::from("Network"), String::from("host:127.0.0.1"))])
+        .run(&scoped)
+        .unwrap();
+    assert!(matches!(outcome, nivren::runtime::Value::Err(_)));
+
+    // A host-handle kind grant never turns into a library search.
+    let library =
+        nivren::parser::parse(nivren::lexer::scan("std.native.open(\"database\")").unwrap())
+            .unwrap();
+    let denied = nivren::runtime::Interpreter::new()
+        .with_capabilities(vec!["Native".into()])
+        .with_capability_scopes([(String::from("Native"), String::from("kind:database"))])
+        .run(&library)
+        .unwrap_err();
+    assert!(
+        denied.message.contains("outside the project grant"),
+        "{}",
+        denied.message
+    );
+
+    // A server that trickles one byte per read must not hold the client
+    // past its configured timeout.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n");
+        for _ in 0..40 {
+            if stream.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let started = std::time::Instant::now();
+    let result = nivren::runtime::http_get_binary(
+        &format!("http://127.0.0.1:{port}/slow"),
+        Duration::from_millis(400),
+        4096,
+    );
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "slow server held the client for {:?}",
+        started.elapsed()
+    );
+    let _ = server.join();
+}
+
+#[test]
 fn secure_websocket_clients_present_verified_mtls_identity_in_both_engines() {
     for bytecode in [false, true] {
         let rcgen::CertifiedKey {
@@ -6402,6 +6486,7 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
             expires_at: 2_000,
             revoked_keys: BTreeSet::new(),
             frozen_packages: BTreeMap::new(),
+            advisories_sha256: nivren::trust::advisories_sha256(&[]),
             signature: String::new(),
         },
     );
@@ -6636,20 +6721,49 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
             signature: String::new(),
         },
     );
+    let advisory_status = nivren::trust::sign_status(
+        root_secret,
+        nivren::trust::RegistryStatus {
+            generation: 1,
+            issued_at: 1_000,
+            expires_at: 2_000,
+            revoked_keys: BTreeSet::new(),
+            frozen_packages: BTreeMap::new(),
+            advisories_sha256: nivren::trust::advisories_sha256(std::slice::from_ref(&advisory)),
+            signature: String::new(),
+        },
+    );
     assert!(
         nivren::trust::verify_release(
             &package,
             &provenance,
             &authorization,
-            &status,
-            &[advisory],
+            &advisory_status,
+            std::slice::from_ref(&advisory),
             root_public,
             1_100,
             1,
         )
         .unwrap_err()
         .message
-        .contains("advisory")
+        .contains("blocked by advisory")
+    );
+    // A host that serves the valid status but drops the advisory list must
+    // fail closed instead of quietly un-yanking the release.
+    assert!(
+        nivren::trust::verify_release(
+            &package,
+            &provenance,
+            &authorization,
+            &advisory_status,
+            &[],
+            root_public,
+            1_100,
+            1,
+        )
+        .unwrap_err()
+        .message
+        .contains("does not match the signed status")
     );
 
     let revoked = nivren::trust::sign_status(
@@ -6660,6 +6774,7 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
             expires_at: 2_000,
             revoked_keys: BTreeSet::from([publisher_key]),
             frozen_packages: BTreeMap::new(),
+            advisories_sha256: nivren::trust::advisories_sha256(&[]),
             signature: String::new(),
         },
     );

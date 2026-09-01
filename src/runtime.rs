@@ -3030,7 +3030,7 @@ impl Interpreter {
                             span.column,
                         ));
                     }
-                    self.authorize_scope(capability, &arguments, span)?;
+                    self.authorize_scope(capability, function.name, &arguments, span)?;
                     if let Some(metrics) = &self.metrics {
                         metrics
                             .lock()
@@ -3396,11 +3396,16 @@ impl Interpreter {
     fn authorize_scope(
         &self,
         capability: &str,
+        operation: &str,
         arguments: &[Value],
         span: Span,
     ) -> Result<(), NivError> {
         let Some(scope) = self.capability_scopes.get(capability) else {
             return Ok(());
+        };
+        let string_argument = |index: usize| match arguments.get(index) {
+            Some(Value::String(value)) => Some(value.as_str()),
+            _ => None,
         };
         let allowed = match (capability, arguments.first()) {
             ("FileRead" | "FileWrite", Some(Value::String(target))) => scope
@@ -3412,32 +3417,20 @@ impl Interpreter {
                     Value::TcpListener(_)
                     | Value::TlsListener(_)
                     | Value::TcpStream(_)
+                    | Value::TlsStream(_)
                     | Value::WebSocket(_),
                 ),
             ) => true,
             ("Network", _) => {
-                let target = arguments
-                    .iter()
-                    .filter_map(|value| match value {
-                        Value::String(value) => Some(value.as_str()),
-                        _ => None,
-                    })
-                    .find(|value| value.starts_with("http://") || value.starts_with("https://"))
-                    .or_else(|| {
-                        arguments.first().and_then(|value| match value {
-                            Value::String(value) => Some(value.as_str()),
-                            _ => None,
-                        })
-                    });
-                let method = arguments.first().and_then(|value| match value {
-                    Value::String(value)
-                        if value.starts_with("http://") || value.starts_with("https://") =>
-                    {
-                        Some("GET")
-                    }
-                    Value::String(value) => Some(value.as_str()),
-                    _ => None,
-                });
+                // The scoped target sits at a fixed argument position for each
+                // operation. Scanning every argument for a URL let a program
+                // smuggle an in-scope URL through an unrelated parameter such
+                // as a WebSocket path while connecting somewhere else.
+                let (target, method) = match operation {
+                    "get" => (string_argument(0), Some("GET")),
+                    "request" => (string_argument(1), string_argument(0)),
+                    _ => (string_argument(0), None),
+                };
                 target.is_some_and(|target| network_scope_allows(scope, target, method))
             }
             // A resource handle was created by an already-authorized call;
@@ -3460,10 +3453,18 @@ impl Interpreter {
                 process_scope_allows(scope, target, first_argument)
             }
             ("Native", Some(Value::String(target))) => {
-                scope
-                    .strip_prefix("path:")
-                    .is_some_and(|scope| path_is_within(target, scope))
-                    || scope.strip_prefix("kind:") == Some(target.as_str())
+                if operation == "open" {
+                    // std.native.open loads foreign code: only an explicit
+                    // path grant may name the library. A host-handle kind
+                    // must never turn into a bare-name library search.
+                    scope
+                        .strip_prefix("path:")
+                        .is_some_and(|scope| path_is_within(target, scope))
+                } else {
+                    scope
+                        .strip_prefix("kind:")
+                        .is_some_and(|kind| kind == "*" || kind == target.as_str())
+                }
             }
             ("Native", Some(Value::NativeHandle(_) | Value::NativeLibrary(_))) => true,
             _ => false,
@@ -11535,6 +11536,9 @@ fn native_websocket_connect(arguments: Vec<Value>, span: Span) -> Result<Value, 
     let port = expect_port(&arguments[1], "std.web.websocket_connect", span)?;
     let path = expect_string(&arguments[2], "std.web.websocket_connect", span)?;
     let timeout = expect_duration(&arguments[3], "std.web.websocket_connect", span)?;
+    if !valid_websocket_path(path) {
+        return Ok(result_error("invalid WebSocket host or path"));
+    }
     Ok(
         match connect_tcp(host, port, timeout)
             .and_then(|stream| crate::websocket::WebSocket::connect(stream, host, path))
@@ -11556,6 +11560,9 @@ fn native_websocket_secure_connect(arguments: Vec<Value>, span: Span) -> Result<
         "std.web.websocket_secure_connect options",
         span,
     )?;
+    if !valid_websocket_path(path) {
+        return Ok(result_error("invalid WebSocket host or path"));
+    }
     Ok(
         match connect_tcp(host, port, timeout)
             .and_then(|stream| tls_client_stream(host, stream, Some(options)))
@@ -12722,7 +12729,7 @@ fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, St
 }
 
 fn exchange_http(
-    stream: &mut (impl Read + Write),
+    stream: &mut (impl Read + Write + DeadlineSocket),
     request: &str,
     maximum: usize,
 ) -> Result<Vec<u8>, String> {
@@ -12730,11 +12737,29 @@ fn exchange_http(
         .write_all(request.as_bytes())
         .map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;
+    // The connect timeout doubles as the budget for the whole response so a
+    // server dripping bytes cannot hold the caller for hours.
+    let previous = stream.read_timeout().map_err(|error| error.to_string())?;
+    let deadline = previous.map(|timeout| Instant::now() + timeout);
+    let limit = maximum + 64 * 1024 + 1;
     let mut bytes = vec![];
-    stream
-        .take((maximum + 64 * 1024 + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
+    let result = loop {
+        if bytes.len() >= limit {
+            break Err("HTTP response exceeds size limit".to_string());
+        }
+        if let Err(error) = arm_read_deadline(stream, deadline) {
+            break Err(error);
+        }
+        let mut chunk = [0; 16 * 1024];
+        let wanted = chunk.len().min(limit - bytes.len());
+        match stream.read(&mut chunk[..wanted]) {
+            Ok(0) => break Ok(()),
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error) => break Err(error.to_string()),
+        }
+    };
+    let _ = stream.set_read_timeout(previous);
+    result?;
     if bytes.len() > maximum + 64 * 1024 {
         return Err("HTTP response exceeds size limit".into());
     }
@@ -12748,7 +12773,83 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+/// A socket whose read timeout can be re-armed so a whole operation runs
+/// under one deadline instead of granting a slow peer a fresh allowance per
+/// read.
+pub trait DeadlineSocket {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>>;
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl DeadlineSocket for TcpStream {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        TcpStream::read_timeout(self)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+}
+
+#[cfg(feature = "host-runtime")]
+impl DeadlineSocket for rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        self.sock.read_timeout()
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.sock.set_read_timeout(timeout)
+    }
+}
+
+#[cfg(feature = "host-runtime")]
+impl DeadlineSocket for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        self.sock.read_timeout()
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.sock.set_read_timeout(timeout)
+    }
+}
+
+/// Points the socket's read timeout at the remaining time before `deadline`;
+/// `None` leaves an untimed socket untimed.
+pub fn arm_read_deadline(
+    stream: &impl DeadlineSocket,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    let Some(deadline) = deadline else {
+        return Ok(());
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("read timed out before the peer finished".into());
+    }
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|error| error.to_string())
+}
+
+fn valid_websocket_path(path: &str) -> bool {
+    path.starts_with('/') && !path.contains(['\r', '\n'])
+}
+
 fn read_http_request(stream: &mut TcpStream, maximum: usize) -> Result<HttpRequest, String> {
+    // The socket's read timeout is the budget for the whole request, not a
+    // per-read allowance that a client dripping one byte at a time renews.
+    let previous = stream.read_timeout().map_err(|error| error.to_string())?;
+    let deadline = previous.map(|timeout| Instant::now() + timeout);
+    let result = read_http_request_within(stream, maximum, deadline);
+    let _ = stream.set_read_timeout(previous);
+    result
+}
+
+fn read_http_request_within(
+    stream: &mut TcpStream,
+    maximum: usize,
+    deadline: Option<Instant>,
+) -> Result<HttpRequest, String> {
     let mut bytes = Vec::new();
     let boundary = loop {
         if let Some(boundary) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -12757,6 +12858,7 @@ fn read_http_request(stream: &mut TcpStream, maximum: usize) -> Result<HttpReque
         if bytes.len() >= 64 * 1024 {
             return Err("HTTP request headers exceed 64 KiB".into());
         }
+        arm_read_deadline(stream, deadline)?;
         let mut chunk = [0; 4096];
         let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
         if read == 0 {
@@ -12816,6 +12918,7 @@ fn read_http_request(stream: &mut TcpStream, maximum: usize) -> Result<HttpReque
     while bytes.len().saturating_sub(body_start) < content_length {
         let remaining = content_length - bytes.len().saturating_sub(body_start);
         let mut chunk = vec![0; remaining.min(4096)];
+        arm_read_deadline(stream, deadline)?;
         let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
         if read == 0 {
             return Err("HTTP request ended before its declared body".into());
