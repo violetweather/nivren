@@ -8,7 +8,7 @@ description = "Bounded SQLite, PostgreSQL, and MySQL host adapter for Nivren"
 repository = "https://github.com/violetweather/nivren"
 
 [dependencies]
-mysql = { version = "26.0.1", default-features = false, features = ["minimal"] }
+mysql = { version = "28.0.2", default-features = false, features = ["minimal"] }
 postgres = "0.19.10"
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 serde = { version = "1.0.229", features = ["derive"] }
