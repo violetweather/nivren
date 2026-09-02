@@ -577,7 +577,7 @@ fn decode_key(value: &str) -> Result<[u8; 32], NivError> {
 }
 
 fn decode_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N], NivError> {
-    if value.len() != N * 2 {
+    if !value.is_ascii() || value.len() != N * 2 {
         return Err(trust_error(format!("invalid {label} length")));
     }
     let mut bytes = [0; N];

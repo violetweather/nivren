@@ -145,7 +145,7 @@ if [ -n "$CHANNEL" ]; then
   [ ! -f "$INSTALL_ROOT/channel-$CHANNEL-generation" ] || minimum=$(cat "$INSTALL_ROOT/channel-$CHANNEL-generation")
   case "$minimum" in ""|*[!0-9]*) echo "stored channel generation is invalid" >&2; exit 65 ;; esac
   now=$(date +%s)
-  "$verifier" release verify-channel "$manifest" "$CHANNEL_KEY" "$now" "$minimum"
+  "$verifier" release verify-channel "$manifest" "$CHANNEL_KEY" "$now" "$minimum" "$CHANNEL"
   VERSION=$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$manifest")
   channel_generation=$(awk '/^[[:space:]]*"generation"[[:space:]]*:/ { value=$2; gsub(/,/, "", value); print value; exit }' "$manifest")
   case "$VERSION" in ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) echo "signed channel version is invalid" >&2; exit 65 ;; esac

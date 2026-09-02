@@ -40,12 +40,12 @@ jobs:
             msvc_arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         if: runner.os == 'Windows'
         with:
           arch: ${{ matrix.msvc_arch }}
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
       - name: Verify release version
         shell: python
         run: |
@@ -141,7 +141,7 @@ jobs:
             if ((Get-FileHash $_.FullName -Algorithm SHA256).Hash -ne (Get-FileHash $rebuilt -Algorithm SHA256).Hash) { throw "$($_.Name) is not reproducible" }
           }
           python tools/package_release.py reproducible-first "${env:RELEASE_LABEL}" "${{ matrix.platform }}" "dist/nivren-${env:RELEASE_LABEL}-${{ matrix.platform }}.zip" target-repro/release
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-${{ matrix.platform }}
           path: dist/*
@@ -151,11 +151,11 @@ jobs:
     name: build (wasm32-wasip1)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
         with:
           targets: wasm32-wasip1, wasm32-unknown-unknown
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
       - name: Build and verify reproducible WASI and browser modules
@@ -178,7 +178,7 @@ jobs:
           cp reproducible-first.wasm "dist/nivren-${RELEASE_LABEL}-wasm32-wasip1.wasm"
           cp reproducible-browser.wasm "dist/nivren-${RELEASE_LABEL}-browser.wasm"
           cp sdk/browser/nivren.mjs "dist/nivren-${RELEASE_LABEL}-browser.mjs"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-wasm32-wasip1
           path: dist/*
@@ -193,11 +193,11 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Authenticate to GitHub Container Registry
         env:
           GH_TOKEN: ${{ github.token }}
-        run: echo "$GH_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+        run: echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Build and publish provenance-bearing OCI indexes
         shell: bash
         run: |
@@ -222,8 +222,8 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
       - name: Enforce the stable release policy
         if: ${{ !contains(github.ref_name, '-') }}
         run: cargo run --locked -- release check .
@@ -232,7 +232,7 @@ jobs:
         run: |
           grep -F "Product Proof is not complete" docs/RELEASES.md
           grep -F "prerelease" docs/RELEASES.md
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-*
           path: downloaded
@@ -246,7 +246,7 @@ jobs:
           test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*.zip' | wc -l)" -eq 6
           test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*.wasm' | wc -l)" -eq 2
           test "$(find release-assets -maxdepth 1 -type f -name 'nivren-*-browser.mjs' | wc -l)" -eq 1
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: npm
@@ -263,7 +263,7 @@ jobs:
       - name: Verify the complete release set
         run: python tools/verify_release_artifacts.py release-assets "${RELEASE_LABEL}"
       - name: Sign release provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: release-assets/*
       - name: Publish immutable GitHub release
@@ -273,7 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           release_flags=(--verify-tag --generate-notes)
-          if [[ "${{ github.ref_name }}" == *-* ]]; then
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             release_flags+=(--prerelease)
           fi
-          gh release create "${{ github.ref_name }}" release-assets/* "${release_flags[@]}"
+          gh release create "$GITHUB_REF_NAME" release-assets/* "${release_flags[@]}"

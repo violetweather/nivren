@@ -104,6 +104,14 @@ impl CompiledTrace {
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|error| error.to_string())?;
+        // Deep recursion with wide frames must hit the guard page, not skip
+        // past it: probe every frame instead of trusting the call-depth count.
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("probestack_strategy", "inline")
+            .map_err(|error| error.to_string())?;
         flags
             .set("is_pic", "false")
             .map_err(|error| error.to_string())?;
@@ -196,6 +204,14 @@ impl TraceObject {
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        // Deep recursion with wide frames must hit the guard page, not skip
+        // past it: probe every frame instead of trusting the call-depth count.
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("probestack_strategy", "inline")
             .map_err(|error| error.to_string())?;
         flags
             .set("is_pic", "true")
@@ -357,6 +373,14 @@ impl AotObject {
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|error| error.to_string())?;
+        // Deep recursion with wide frames must hit the guard page, not skip
+        // past it: probe every frame instead of trusting the call-depth count.
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("probestack_strategy", "inline")
+            .map_err(|error| error.to_string())?;
         flags
             .set("is_pic", "true")
             .map_err(|error| error.to_string())?;
@@ -404,6 +428,14 @@ impl AotObject {
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        // Deep recursion with wide frames must hit the guard page, not skip
+        // past it: probe every frame instead of trusting the call-depth count.
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("probestack_strategy", "inline")
             .map_err(|error| error.to_string())?;
         flags
             .set("is_pic", "true")
@@ -537,6 +569,14 @@ impl CompiledFunction {
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        // Deep recursion with wide frames must hit the guard page, not skip
+        // past it: probe every frame instead of trusting the call-depth count.
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("probestack_strategy", "inline")
             .map_err(|error| error.to_string())?;
         flags
             .set("is_pic", "false")
@@ -730,6 +770,14 @@ impl CompiledProgram {
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
+            .map_err(|error| error.to_string())?;
+        // Deep recursion with wide frames must hit the guard page, not skip
+        // past it: probe every frame instead of trusting the call-depth count.
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| error.to_string())?;
+        flags
+            .set("probestack_strategy", "inline")
             .map_err(|error| error.to_string())?;
         flags
             .set("is_pic", "false")

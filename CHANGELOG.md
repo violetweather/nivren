@@ -39,6 +39,39 @@ regression test. No language or package-format change.
   peer hold a connection open indefinitely one byte at a time. A WebSocket
   now shuts its socket when the peer closes.
 
+Medium and low findings from the same review:
+
+- Relative `path:` scopes in `niv.toml` are anchored to the manifest's
+  directory instead of the current working directory, so a grant means the
+  same directory no matter where `niv` runs.
+- On Windows, paths whose components name a DOS device (`NUL`, `CON`,
+  `COM1`–`COM9`, `LPT1`–`LPT9`, …) never satisfy a `path:` scope, since
+  Win32 redirects them out of any directory.
+- `niv install` compares each fetched archive with the digest already
+  recorded in `niv.lock` and refuses a substituted archive for a pinned
+  version.
+- The persisted trusted-registry generation is bound to the root key that
+  issued it.
+- The JIT enables Cranelift stack probes so deep native recursion with wide
+  frames faults on the guard page instead of skipping past it.
+- `niv trust keygen` creates the secret file owner-readable only and
+  zeroizes key material in memory.
+- The registry daemon reads each request under one wall-clock deadline and
+  buffers at most 64 KiB for every path except `POST /v1/publish`.
+- Signed channel manifests are verified against the channel that was
+  requested (`niv release verify-channel … [expected-channel]`; both
+  installers pass it), so a signed nightly manifest cannot be served in
+  place of stable.
+- Hex decoders reject non-ASCII input instead of panicking; the HTTP server
+  rejects `Content-Length` values that are not plain digits, control
+  characters in request targets and header values, and non-hex chunk sizes.
+- `promise never` clauses are inherited by spawned tasks.
+- CI workflows declare read-only token permissions, every GitHub and
+  third-party action is pinned to a commit SHA (dependabot keeps them
+  current), release steps take the tag and actor from environment variables
+  rather than expression interpolation, and the release packager refuses a
+  crate `license-file` that points outside its crate directory.
+
 Dependency advisories:
 
 - `mysql` moves from 26 to 28, which takes `lru` to 0.16.4 and closes

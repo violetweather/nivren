@@ -413,6 +413,7 @@ pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usiz
         }
         let bytes = fetch(&name, &version, registry)?;
         let digest = sha256(&bytes);
+        check_locked_digest(manifest, &name, &version, &digest)?;
         let package = Package::decode(&bytes)?;
         let embedded = package
             .files
@@ -433,6 +434,46 @@ pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usiz
     write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
     guard_authority_lock(manifest)?;
     Ok(resolved.len())
+}
+
+/// Digests an existing niv.lock records, keyed by (name, version).
+fn locked_digests(manifest: &Manifest) -> BTreeMap<(String, String), String> {
+    let Ok(text) = fs::read_to_string(manifest.root.join(LOCKFILE_NAME)) else {
+        return BTreeMap::new();
+    };
+    let mut digests = BTreeMap::new();
+    for block in text.split("[[dependency]]").skip(1) {
+        let field = |key: &str| {
+            block.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix(key)?.trim_start();
+                rest.strip_prefix("= \"")?
+                    .strip_suffix('"')
+                    .map(str::to_string)
+            })
+        };
+        if let (Some(name), Some(version), Some(sha256)) =
+            (field("name"), field("version"), field("sha256"))
+        {
+            digests.insert((name, version), sha256);
+        }
+    }
+    digests
+}
+
+/// A registry must not be able to swap the bytes behind a version the lock
+/// already pins; the lock changes only through an explicit removal.
+fn check_locked_digest(
+    manifest: &Manifest,
+    name: &str,
+    version: &str,
+    digest: &str,
+) -> Result<(), NivError> {
+    match locked_digests(manifest).get(&(name.to_string(), version.to_string())) {
+        Some(expected) if expected != digest => Err(package_error(format!(
+            "{name} {version} no longer matches niv.lock (locked {expected}, fetched {digest}); remove its lock entry to accept the new archive"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 pub fn install_offline_dependencies(manifest: &Manifest) -> Result<usize, NivError> {
@@ -479,10 +520,22 @@ fn install_trusted_with(
     reject_symlink_if_present(&dependencies)?;
     fs::create_dir_all(&dependencies)
         .map_err(|error| package_error(format!("cannot create dependency store: {error}")))?;
+    // The persisted generation is bound to the root key that issued it, so a
+    // second trusted registry in the same project neither false-positives as
+    // a rollback nor lowers the bar for the first. A bare integer is the
+    // pre-1.0.1 format and belongs to whichever registry wrote it.
+    let root_hex = crate::trust::encode_hex(&root_public_key);
     let generation_path = state.join("registry-generation");
     let persisted_generation = fs::read_to_string(&generation_path)
         .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(|value| {
+            let mut parts = value.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some(key), Some(generation)) if key == root_hex => generation.parse::<u64>().ok(),
+                (Some(generation), None) => generation.parse::<u64>().ok(),
+                _ => None,
+            }
+        })
         .unwrap_or(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -534,6 +587,7 @@ fn install_trusted_with(
             return Err(package_error("registry returned the wrong dependency"));
         }
         let digest = sha256(&package_bytes);
+        check_locked_digest(manifest, &name, &version, &digest)?;
         let embedded = package
             .files
             .get(MANIFEST_NAME)
@@ -553,7 +607,7 @@ fn install_trusted_with(
     )?;
     write_atomic(
         &generation_path,
-        format!("{}\n", status.generation).as_bytes(),
+        format!("{root_hex} {}\n", status.generation).as_bytes(),
     )?;
     guard_authority_lock(manifest)?;
     Ok(resolved.len())
@@ -1228,7 +1282,7 @@ mod tests {
             fs::read_to_string(app_root.join(".niv/registry-generation"))
                 .unwrap()
                 .trim(),
-            "5"
+            format!("{} 5", super::encode_hex(&root_key))
         );
         let authority = fs::read_to_string(app_root.join("niv.authority.lock")).unwrap();
         assert!(authority.contains("name = \"app\""));
