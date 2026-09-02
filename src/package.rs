@@ -426,14 +426,86 @@ pub fn install_dependencies(manifest: &Manifest, registry: &Path) -> Result<usiz
             pending.push((child_name.clone(), child_version.clone()));
         }
 
-        install_package(&package, &destination, &digest, &bytes)?;
-        resolved.insert((name, version), digest);
+        resolved.insert(
+            (name, version),
+            StagedPackage {
+                package,
+                destination,
+                digest,
+                bytes,
+                manifest: dependency_manifest,
+            },
+        );
     }
+    commit_staged_install(manifest, resolved)
+}
 
-    let lockfile = manifest.resolved_lockfile(&resolved);
-    write_atomic(&manifest.root.join(LOCKFILE_NAME), lockfile.as_bytes())?;
-    guard_authority_lock(manifest)?;
-    Ok(resolved.len())
+/// One verified dependency waiting to be written, so authority can be
+/// reviewed against the complete graph before anything touches disk.
+struct StagedPackage {
+    package: Package,
+    destination: PathBuf,
+    digest: String,
+    bytes: Vec<u8>,
+    manifest: Manifest,
+}
+
+/// Gates the whole fetched graph on the authority lock, then installs every
+/// package, writes niv.lock, and records the accepted authority lock.
+fn commit_staged_install(
+    manifest: &Manifest,
+    staged: BTreeMap<(String, String), StagedPackage>,
+) -> Result<usize, NivError> {
+    let mut packages = BTreeMap::new();
+    packages.insert(
+        (manifest.name.clone(), manifest.version.clone()),
+        ("root".to_string(), manifest.clone()),
+    );
+    for ((name, version), entry) in &staged {
+        if entry.manifest.name != *name || entry.manifest.version != *version {
+            return Err(package_error(format!(
+                "fetched package '{name}' has the wrong authority identity"
+            )));
+        }
+        packages.insert(
+            (name.clone(), version.clone()),
+            ("dependency".to_string(), entry.manifest.clone()),
+        );
+    }
+    let expected_authority = render_authority_lock(packages);
+    guard_prospective_authority(manifest, &expected_authority)?;
+    let mut digests = BTreeMap::new();
+    for ((name, version), entry) in staged {
+        install_package(
+            &entry.package,
+            &entry.destination,
+            &entry.digest,
+            &entry.bytes,
+        )?;
+        digests.insert((name, version), entry.digest);
+    }
+    write_atomic(
+        &manifest.root.join(LOCKFILE_NAME),
+        manifest.resolved_lockfile(&digests).as_bytes(),
+    )?;
+    write_atomic(
+        &manifest.root.join(AUTHORITY_LOCKFILE_NAME),
+        expected_authority.as_bytes(),
+    )?;
+    Ok(digests.len())
+}
+
+/// Refuses an install whose dependency authority differs from the reviewed
+/// lock before a single file is written; a first install has no lock yet.
+fn guard_prospective_authority(manifest: &Manifest, expected: &str) -> Result<(), NivError> {
+    match std::fs::read_to_string(manifest.root.join(AUTHORITY_LOCKFILE_NAME)) {
+        Ok(actual) if actual == expected => Ok(()),
+        Err(_) => Ok(()),
+        Ok(actual) => Err(package_error(format!(
+            "dependency authority changed; review the difference and run 'niv authority lock' to accept it before installing:\n{}",
+            authority_diff(&actual, expected)
+        ))),
+    }
 }
 
 /// Digests an existing niv.lock records, keyed by (name, version).
@@ -598,19 +670,23 @@ fn install_trusted_with(
         for (child_name, child_version) in &dependency_manifest.dependencies {
             pending.push((child_name.clone(), child_version.clone()));
         }
-        install_package(&package, &destination, &digest, &package_bytes)?;
-        resolved.insert((name, version), digest);
+        resolved.insert(
+            (name, version),
+            StagedPackage {
+                package,
+                destination,
+                digest,
+                bytes: package_bytes,
+                manifest: dependency_manifest,
+            },
+        );
     }
-    write_atomic(
-        &manifest.root.join(LOCKFILE_NAME),
-        manifest.resolved_lockfile(&resolved).as_bytes(),
-    )?;
+    let installed = commit_staged_install(manifest, resolved)?;
     write_atomic(
         &generation_path,
         format!("{root_hex} {}\n", status.generation).as_bytes(),
     )?;
-    guard_authority_lock(manifest)?;
-    Ok(resolved.len())
+    Ok(installed)
 }
 
 fn remote_get(base: &str, path: &str, maximum: usize) -> Result<Vec<u8>, NivError> {
@@ -784,7 +860,10 @@ pub fn installed_authority_lockfile(manifest: &Manifest) -> Result<String, NivEr
         }
         packages.insert((name, version), ("dependency".to_string(), dependency));
     }
+    Ok(render_authority_lock(packages))
+}
 
+fn render_authority_lock(packages: BTreeMap<(String, String), (String, Manifest)>) -> String {
     let mut output =
         String::from("# This file is generated by Nivren. Review authority changes.\nformat = 1\n");
     for ((name, version), (source, package)) in packages {
@@ -819,7 +898,7 @@ pub fn installed_authority_lockfile(manifest: &Manifest) -> Result<String, NivEr
             ));
         }
     }
-    Ok(output)
+    output
 }
 
 pub fn write_authority_lock(manifest: &Manifest) -> Result<(), NivError> {
@@ -1222,6 +1301,7 @@ mod tests {
             "owner/repository".into(),
             ".github/workflows/release.yml".into(),
             now + 3600,
+            BTreeSet::from(["*".to_string()]),
         )
         .unwrap();
         let provenance = attest_release(

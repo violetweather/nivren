@@ -2953,7 +2953,7 @@ impl Interpreter {
     fn call(
         &mut self,
         callee: Value,
-        arguments: Vec<Value>,
+        mut arguments: Vec<Value>,
         span: Span,
     ) -> Result<Value, NivError> {
         match callee {
@@ -3029,6 +3029,15 @@ impl Interpreter {
                             span.line,
                             span.column,
                         ));
+                    }
+                    if capability == "Native"
+                        && function.name == "open"
+                        && self.capability_scopes.contains_key("Native")
+                    {
+                        // Check and load the same resolved path: a symlink
+                        // swapped between the scope check and the load must
+                        // not redirect the library outside the grant.
+                        canonicalize_native_open_argument(&mut arguments);
                     }
                     self.authorize_scope(capability, function.name, &arguments, span)?;
                     if let Some(metrics) = &self.metrics {
@@ -3350,6 +3359,24 @@ impl Interpreter {
     fn host_open_handle(&self, arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
         let kind = expect_host_name(&arguments[0], "std.host.open", span)?;
         let request = expect_host_request(&arguments[1], "std.host.open", span)?;
+        // A database handle that dials a server is network reach: it must
+        // pass the same Network grant and host scope as std.net would.
+        if kind == "database"
+            && let Some(host) = remote_database_host(request)
+        {
+            if self
+                .capabilities
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains("Network"))
+            {
+                return Err(NivError::new(
+                    "opening a remote database needs Network; add Network = \"host:…\" under [capabilities] in niv.toml",
+                    span.line,
+                    span.column,
+                ));
+            }
+            self.authorize_scope("Network", "connect", &[Value::String(host)], span)?;
+        }
         let Some(callback) = &self.host_callback else {
             return Ok(result_error("no native host callback is installed"));
         };
@@ -5258,7 +5285,14 @@ impl Interpreter {
     }
 
     fn charge_memory(&self, value: &Value, span: Span) -> Result<(), NivError> {
-        let bytes = estimated_value_bytes(value).max(1);
+        let Some(bytes) = estimated_value_bytes_within(value, 0) else {
+            return Err(NivError::new(
+                format!("value nesting exceeds the supported depth of {MAXIMUM_VALUE_DEPTH}"),
+                span.line,
+                span.column,
+            ));
+        };
+        let bytes = bytes.max(1);
         if let Some(metrics) = &self.metrics {
             let mut metrics = metrics.lock().unwrap();
             metrics.allocation_work_bytes = metrics.allocation_work_bytes.saturating_add(bytes);
@@ -7630,6 +7664,15 @@ fn named_native_module(kind: &'static str, functions: &[NamedNative]) -> Value {
             })
             .collect(),
     ))
+}
+
+fn canonicalize_native_open_argument(arguments: &mut [Value]) {
+    if let Some(Value::String(path)) = arguments.first()
+        && let Ok(canonical) = Path::new(path).canonicalize()
+        && let Some(text) = canonical.to_str()
+    {
+        arguments[0] = Value::String(text.to_string());
+    }
 }
 
 fn native_library_open(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
@@ -14401,6 +14444,26 @@ fn path_is_within(target: &str, scope: &str) -> bool {
     }
 }
 
+/// The server host named by a `postgres://`, `postgresql://`, or `mysql://`
+/// configuration; `None` for local backends.
+fn remote_database_host(configuration: &str) -> Option<String> {
+    let rest = ["postgres://", "postgresql://", "mysql://"]
+        .iter()
+        .find_map(|scheme| configuration.strip_prefix(scheme))?;
+    let authority = rest.split(['/', '?']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    Some(if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host.to_string()
+    })
+}
+
 fn host_is_within(target: &str, scope: &str) -> bool {
     let target = if target.starts_with("http://") || target.starts_with("https://") {
         match parse_http_url(target) {
@@ -14498,9 +14561,18 @@ fn stable_key(value: &Value) -> bool {
     }
 }
 
-fn estimated_value_bytes(value: &Value) -> u64 {
+/// Values nest at most this deep. Beyond it construction fails with a typed
+/// error instead of the process aborting when a recursive walk or drop
+/// overflows the thread stack.
+pub const MAXIMUM_VALUE_DEPTH: usize = 1024;
+
+fn estimated_value_bytes_within(value: &Value, depth: usize) -> Option<u64> {
     const HANDLE_BYTES: u64 = 64;
-    match value {
+    if depth > MAXIMUM_VALUE_DEPTH {
+        return None;
+    }
+    let nested = |value: &Value| estimated_value_bytes_within(value, depth + 1);
+    Some(match value {
         Value::Int(_)
         | Value::UInt(_)
         | Value::U128(_)
@@ -14508,46 +14580,51 @@ fn estimated_value_bytes(value: &Value) -> u64 {
         | Value::Bool(_)
         | Value::Null => 16,
         Value::SourceDeclaration(_) => HANDLE_BYTES,
-        Value::Enum(value) => value.payload.as_ref().map_or(16, |payload| {
-            16u64.saturating_add(estimated_value_bytes(payload))
-        }),
+        Value::Enum(value) => match value.payload.as_ref() {
+            Some(payload) => 16u64.saturating_add(nested(payload)?),
+            None => 16,
+        },
         Value::DateTime(_) => HANDLE_BYTES,
         Value::BigInt(value) => 24u64.saturating_add(value.to_string().len() as u64),
         Value::Decimal(_) => 16,
         Value::FixedInt(_) => 16,
         Value::String(value) => 24u64.saturating_add(value.len() as u64),
         Value::Bytes(value) => 24u64.saturating_add(value.len() as u64),
-        Value::Array(values) | Value::Set(values) => values.iter().fold(24, |total, value| {
-            total.saturating_add(estimated_value_bytes(value))
-        }),
-        Value::Map(entries) => entries.iter().fold(24u64, |total, (key, value)| {
-            total
-                .saturating_add(estimated_value_bytes(key))
-                .saturating_add(estimated_value_bytes(value))
-        }),
-        Value::Record(record) => record.fields().fold(32, |total, (name, value)| {
-            total
-                .saturating_add(name.len() as u64)
-                .saturating_add(estimated_value_bytes(value))
-        }),
+        Value::Array(values) | Value::Set(values) => {
+            values.iter().try_fold(24u64, |total, value| {
+                nested(value).map(|bytes| total.saturating_add(bytes))
+            })?
+        }
+        Value::Map(entries) => entries.iter().try_fold(24u64, |total, (key, value)| {
+            Some(
+                total
+                    .saturating_add(nested(key)?)
+                    .saturating_add(nested(value)?),
+            )
+        })?,
+        Value::Record(record) => record.fields().try_fold(32u64, |total, (name, value)| {
+            nested(value).map(|bytes| {
+                total
+                    .saturating_add(name.len() as u64)
+                    .saturating_add(bytes)
+            })
+        })?,
         Value::Ok(value) | Value::Err(value) | Value::EarlyReturn(value) => {
-            16u64.saturating_add(estimated_value_bytes(value))
+            16u64.saturating_add(nested(value)?)
         }
-        Value::Lock(lock) => {
-            HANDLE_BYTES.saturating_add(estimated_value_bytes(&lock.value.lock().unwrap()))
-        }
+        Value::Lock(lock) => HANDLE_BYTES.saturating_add(nested(&lock.value.lock().unwrap())?),
         Value::Iterator(iterator) => {
             let iterator = iterator.lock().unwrap();
             let values = iterator.values[iterator.index..]
                 .iter()
-                .fold(HANDLE_BYTES, |total, value| {
-                    total.saturating_add(estimated_value_bytes(value))
-                });
+                .try_fold(HANDLE_BYTES, |total, value| {
+                    nested(value).map(|bytes| total.saturating_add(bytes))
+                })?;
             match &iterator.adapter {
                 Some(IteratorAdapter::Transform { callback, .. })
                 | Some(IteratorAdapter::Select { callback, .. }) => values
                     .saturating_add(HANDLE_BYTES)
-                    .saturating_add(estimated_value_bytes(callback)),
+                    .saturating_add(nested(callback)?),
                 None => values,
             }
         }
@@ -14557,11 +14634,13 @@ fn estimated_value_bytes(value: &Value) -> u64 {
                 .original
                 .iter()
                 .chain(&transaction.working)
-                .fold(HANDLE_BYTES, |total, (key, value)| {
-                    total
-                        .saturating_add(estimated_value_bytes(key))
-                        .saturating_add(estimated_value_bytes(value))
-                })
+                .try_fold(HANDLE_BYTES, |total, (key, value)| {
+                    Some(
+                        total
+                            .saturating_add(nested(key)?)
+                            .saturating_add(nested(value)?),
+                    )
+                })?
         }
         Value::Function(_)
         | Value::Native(_)
@@ -14585,7 +14664,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
         | Value::AtomicInt(_)
         | Value::Task(_)
         | Value::Channel(_) => HANDLE_BYTES,
-    }
+    })
 }
 
 fn collection_length(length: usize, span: Span) -> Result<Value, NivError> {

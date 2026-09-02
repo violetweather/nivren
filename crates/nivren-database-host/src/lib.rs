@@ -112,16 +112,42 @@ impl DatabaseHost {
             } else if configuration.starts_with("postgres://")
                 || configuration.starts_with("postgresql://")
             {
-                Backend::Postgres(
-                    postgres::Client::connect(configuration, postgres::NoTls)
-                        .map_err(|error| format!("cannot open PostgreSQL connection: {error}"))?,
-                )
+                // Anything beyond the loopback interface travels over verified
+                // TLS; credentials and rows never cross a network in the clear.
+                let mut config: postgres::Config = configuration
+                    .parse()
+                    .map_err(|_| "invalid PostgreSQL configuration".to_string())?;
+                let remote = config.get_hosts().iter().any(|host| {
+                    // Unix-socket hosts exist only on Unix builds; on other
+                    // targets the TCP arm covers every variant.
+                    #[allow(unreachable_patterns)]
+                    let remote = match host {
+                        postgres::config::Host::Tcp(name) => !is_loopback(name),
+                        _ => false,
+                    };
+                    remote
+                });
+                let client = if remote {
+                    config.ssl_mode(postgres::config::SslMode::Require);
+                    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_client_config()?);
+                    config.connect(tls)
+                } else {
+                    config.connect(postgres::NoTls)
+                }
+                .map_err(|_| "cannot open PostgreSQL connection".to_string())?;
+                Backend::Postgres(client)
             } else if configuration.starts_with("mysql://") {
                 let options = mysql::Opts::from_url(configuration)
-                    .map_err(|error| format!("invalid MySQL configuration: {error}"))?;
+                    .map_err(|_| "invalid MySQL configuration".to_string())?;
+                let remote = !is_loopback(&options.get_ip_or_hostname());
+                let options = if remote {
+                    mysql::OptsBuilder::from_opts(options).ssl_opts(mysql::SslOpts::default())
+                } else {
+                    mysql::OptsBuilder::from_opts(options)
+                };
                 Backend::Mysql(
                     mysql::Conn::new(options)
-                        .map_err(|error| format!("cannot open MySQL connection: {error}"))?,
+                        .map_err(|_| "cannot open MySQL connection".to_string())?,
                 )
             } else {
                 return Err(
@@ -138,7 +164,29 @@ impl DatabaseHost {
         connections.insert(identifier.clone(), backend);
         Ok(identifier)
     }
+}
 
+/// True for hosts that resolve to the local machine only, where plaintext
+/// database traffic never leaves the host.
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim_matches(|character| character == '[' || character == ']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn tls_client_config() -> Result<rustls::ClientConfig, String> {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| "cannot configure database TLS".to_string())
+        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+}
+
+impl DatabaseHost {
     fn open_sqlite(&self, configuration: &str) -> Result<Connection, String> {
         // No SQLITE_OPEN_URI: a `file:` URI could name any path or VFS, and
         // the root confinement below only reasons about plain paths.

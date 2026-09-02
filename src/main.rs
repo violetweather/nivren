@@ -200,7 +200,21 @@ fn main() -> ExitCode {
             secret,
             output,
         ] if command == "trust" && action == "authorize" => trust_authorize(
-            publisher, key, repository, workflow, expires, secret, output,
+            publisher, key, repository, workflow, expires, secret, output, "*",
+        ),
+        [
+            command,
+            action,
+            publisher,
+            key,
+            repository,
+            workflow,
+            expires,
+            secret,
+            output,
+            packages,
+        ] if command == "trust" && action == "authorize" => trust_authorize(
+            publisher, key, repository, workflow, expires, secret, output, packages,
         ),
         [
             command,
@@ -390,6 +404,7 @@ public {}",
     })())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trust_authorize(
     publisher: &str,
     key: &str,
@@ -398,6 +413,7 @@ fn trust_authorize(
     expires: &str,
     secret: &str,
     output: &str,
+    packages: &str,
 ) -> ExitCode {
     trust_result((|| {
         let public = fs::read_to_string(key)
@@ -407,6 +423,12 @@ fn trust_authorize(
             .parse::<u64>()
             .map_err(|_| "expires must be a Unix time in seconds".to_string())?;
         let root_secret = read_secret_key(secret)?;
+        let packages = packages
+            .split(',')
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty())
+            .map(str::to_string)
+            .collect();
         let authorization = nivren::trust::authorize_publisher(
             root_secret,
             publisher.to_string(),
@@ -414,6 +436,7 @@ fn trust_authorize(
             repository.to_string(),
             workflow.to_string(),
             expires,
+            packages,
         )
         .map_err(|error| error.message)?;
         let encoded = serde_json::to_vec_pretty(&authorization)
@@ -939,7 +962,7 @@ fn bundled_host_for_handle(handle: &str) -> BundledHost {
 fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
     let interpreter = Interpreter::new()
         .with_capabilities(manifest.capabilities.iter().cloned())
-        .with_capability_scopes(manifest.capability_scopes.clone());
+        .with_capability_scopes(manifest.anchored_capability_scopes());
     let interpreter = if manifest.capabilities.contains("Native") {
         let database_root = manifest.root.join(".nivren").join("database");
         match nivren_database_host::DatabaseHost::new(database_root) {
@@ -3263,6 +3286,25 @@ fn verify_dependency_lock(manifest: &nivren::project::Manifest) -> Result<(), Ni
             1,
         ));
     }
+    // The authority lock is a gate, not a report: a dependency whose grants
+    // changed must be reviewed before the project runs again.
+    let expected_authority = nivren::package::installed_authority_lockfile(manifest)?;
+    let actual_authority =
+        fs::read_to_string(manifest.root.join(nivren::project::AUTHORITY_LOCKFILE_NAME))
+            .map_err(|_| {
+                NivError::new(
+                    "dependency authority lock is missing; review 'niv authority report' and run 'niv authority lock'",
+                    1,
+                    1,
+                )
+            })?;
+    if actual_authority != expected_authority {
+        return Err(NivError::new(
+            "dependency authority changed since it was reviewed; run 'niv authority report' and then 'niv authority lock' to accept it",
+            1,
+            1,
+        ));
+    }
     Ok(())
 }
 
@@ -3368,7 +3410,8 @@ fn help() {
 
 Registry trust operations:
   niv trust keygen <secret-output>
-  niv trust authorize <publisher> <publisher-key-file> <repository> <workflow> <expires-unix> <root-secret-file> <output.json>
+  niv trust authorize <publisher> <publisher-key-file> <repository> <workflow> <expires-unix> <root-secret-file> <output.json> [packages]
+      packages: comma-separated names, prefix* patterns, or * (default *)
   niv trust attest <file.nivpkg> <publisher> <repository> <workflow> <commit> <publisher-secret-file> <output.json>
   niv trust sign-status <status.json> <root-secret-file> <output.json> [advisories.json]
   niv trust sign-advisory <advisory.json> <root-secret-file> <output.json>"
