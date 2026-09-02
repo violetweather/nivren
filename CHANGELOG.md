@@ -90,6 +90,13 @@ Medium and low findings from the same review:
   rather than expression interpolation, and the release packager refuses a
   crate `license-file` that points outside its crate directory.
 
+Signed update channels:
+
+- The offline Ed25519 channel signing key now exists; its public half is
+  published as `install/nivren-channel.pub` in this repository and on the
+  website, so `--channel-key` has two independent sources to compare.
+  Channel manifests are signed per release with `niv release sign-channel`.
+
 Remaining low findings:
 
 - Installers require the build attestation to come from the release
