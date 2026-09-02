@@ -57,6 +57,10 @@ chmod +x "$archive_root/bin/niv"
 digest=$(shasum -a 256 "$fixture/$asset" | awk '{print $1}')
 printf '%s  %s\n' "$digest" "$asset" > "$fixture/SHA256SUMS"
 printf '{\n  "format": 1,\n  "channel": "beta",\n  "version": "2.0.0",\n  "generation": 2,\n  "issued_at": 1,\n  "expires_at": 4102444800,\n  "base_url": "https://example.invalid/v2.0.0",\n  "assets": {\n    "%s": "%s"\n  },\n  "signature": "test"\n}\n' "$asset" "$digest" > "$fixture/channel-beta.json"
+# The installer consumes the verifier's stdout rather than the manifest, so
+# the stub speaks the real CLI's output: the verified line and one asset
+# line per offered archive.
+printf '#!/bin/sh\nif [ "$1 $2" = "release verify-channel" ]; then printf "verified beta 2.0.0 generation 2\\nasset %s %s\\n"; exit 0; fi\nprintf "Nivren 1.0.0\\n"\n' "$asset" "$digest" > "$channel_root/versions/1.0.0/bin/niv"
 
 printf '#!/bin/sh\nset -eu\noutput=""\nurl=""\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in --output) output=$2; shift 2 ;; http*) url=$1; shift ;; *) shift ;; esac\ndone\ncase "$url" in *channel-beta.json) cp "$FIXTURE_DIR/channel-beta.json" "$output" ;; *SHA256SUMS) cp "$FIXTURE_DIR/SHA256SUMS" "$output" ;; *.zip) cp "$FIXTURE_DIR/'"$asset"'" "$output" ;; *) exit 22 ;; esac\n' > "$fakebin/curl"
 printf '#!/bin/sh\nexit 0\n' > "$fakebin/gh"
