@@ -12917,6 +12917,9 @@ pub fn arm_read_deadline(
         .map_err(|error| error.to_string())
 }
 
+/// Only the host runtime opens WebSocket connections; the portable guest
+/// never needs the check.
+#[cfg(feature = "host-runtime")]
 fn valid_websocket_path(path: &str) -> bool {
     path.starts_with('/') && !path.contains(['\r', '\n'])
 }
