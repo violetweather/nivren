@@ -184,6 +184,9 @@ fn handle_request(
             }
         }
         ("GET", path) => match public_path(path) {
+            Some((relative, _)) if archive_is_yanked(registry, &relative) => {
+                response(410, "Gone", "text/plain", b"release is yanked\n")
+            }
             Some((relative, content_type)) => match bounded_read(&registry.join(relative)) {
                 Ok(bytes) => response(200, "OK", content_type, &bytes),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -354,6 +357,35 @@ fn complete_admin(
     fs::remove_file(pending)
         .map_err(|error| server_error(format!("cannot complete admin action: {error}")))?;
     Ok(action.generation)
+}
+
+/// A yanked release's archive is withheld by the daemon itself, so a client
+/// that fetches archives directly (as `niv install --trusted` does) cannot
+/// install it. A signed advisory remains the tamper-proof signal for mirrors.
+fn archive_is_yanked(registry: &Path, relative: &Path) -> bool {
+    let mut components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        });
+    if components.next() != Some("v1") || components.next() != Some("packages") {
+        return false;
+    }
+    let (Some(name), Some(file)) = (components.next(), components.next()) else {
+        return false;
+    };
+    let Some(version) = file.strip_suffix(".nivpkg") else {
+        return false;
+    };
+    let index = registry
+        .join("v1/index")
+        .join(name)
+        .join(format!("{version}.json"));
+    fs::read(&index)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|metadata| metadata["yanked"] == serde_json::Value::Bool(true))
 }
 
 fn public_path(path: &str) -> Option<(PathBuf, &'static str)> {

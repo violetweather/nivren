@@ -20,6 +20,10 @@ pub struct PublisherAuthorization {
     pub repository: String,
     pub workflow: String,
     pub expires_at: u64,
+    /// Package names this publisher may release: exact names, `prefix*`
+    /// patterns, or `*` for every package. An empty set authorizes nothing.
+    #[serde(default)]
+    pub packages: BTreeSet<String>,
     pub signature: String,
 }
 
@@ -166,14 +170,25 @@ pub fn authorize_publisher(
     repository: String,
     workflow: String,
     expires_at: u64,
+    packages: BTreeSet<String>,
 ) -> Result<PublisherAuthorization, NivError> {
     decode_key(&public_key)?;
+    if packages.is_empty()
+        || packages
+            .iter()
+            .any(|pattern| !valid_package_pattern(pattern))
+    {
+        return Err(trust_error(
+            "authorized package list must name packages, prefix* patterns, or *",
+        ));
+    }
     let mut authorization = PublisherAuthorization {
         publisher,
         public_key,
         repository,
         workflow,
         expires_at,
+        packages,
         signature: String::new(),
     };
     authorization.signature = sign(&root_secret, &authorization_bytes(&authorization));
@@ -311,6 +326,11 @@ pub fn verify_release(
     {
         return Err(trust_error("release identity is not authorized"));
     }
+    if !authorization_allows_package(&authorization.packages, &provenance.package) {
+        return Err(trust_error(
+            "publisher is not authorized to release this package",
+        ));
+    }
     if status.revoked_keys.contains(&provenance.public_key) {
         return Err(trust_error("publisher key has been revoked"));
     }
@@ -372,16 +392,38 @@ pub fn parse_secret_key(value: &str) -> Result<[u8; 32], NivError> {
 }
 
 fn authorization_bytes(value: &PublisherAuthorization) -> Vec<u8> {
+    let packages = canonical_list(value.packages.iter().map(String::as_bytes));
     canonical(
-        b"nivren.publisher-authorization.v1",
+        b"nivren.publisher-authorization.v2",
         &[
             value.publisher.as_bytes(),
             value.public_key.as_bytes(),
             value.repository.as_bytes(),
             value.workflow.as_bytes(),
             &value.expires_at.to_le_bytes(),
+            &packages,
         ],
     )
+}
+
+fn valid_package_pattern(pattern: &str) -> bool {
+    pattern == "*"
+        || pattern
+            .strip_suffix('*')
+            .map_or(valid_publisher(pattern), |prefix| {
+                !prefix.is_empty() && valid_publisher(prefix)
+            })
+}
+
+/// Whether an authorization's package list covers `package`.
+pub fn authorization_allows_package(patterns: &BTreeSet<String>, package: &str) -> bool {
+    valid_publisher(package)
+        && patterns.iter().any(|pattern| {
+            pattern == "*"
+                || pattern
+                    .strip_suffix('*')
+                    .map_or(pattern == package, |prefix| package.starts_with(prefix))
+        })
 }
 
 fn provenance_bytes(value: &ReleaseProvenance) -> Vec<u8> {
@@ -702,6 +744,36 @@ mod tests {
         assert!(validate_status(&bad_digest).is_err());
         assert!(validate_advisory(&advisory(&["1.0.0"])).is_ok());
         assert!(validate_advisory(&advisory(&["1.0.0\u{0}1.0.1"])).is_err());
+    }
+
+    #[test]
+    fn authorizations_bind_publishers_to_packages() {
+        let exact = BTreeSet::from(["nivren_stats".to_string()]);
+        assert!(authorization_allows_package(&exact, "nivren_stats"));
+        assert!(!authorization_allows_package(&exact, "nivren_stat"));
+        assert!(!authorization_allows_package(&exact, "nivren_stats_extra"));
+        let prefix = BTreeSet::from(["nivren_*".to_string()]);
+        assert!(authorization_allows_package(&prefix, "nivren_aead"));
+        assert!(!authorization_allows_package(&prefix, "registry_drill"));
+        let any = BTreeSet::from(["*".to_string()]);
+        assert!(authorization_allows_package(&any, "registry_drill"));
+        assert!(!authorization_allows_package(
+            &BTreeSet::new(),
+            "nivren_aead"
+        ));
+        assert!(!authorization_allows_package(&any, "../escape"));
+        assert!(
+            authorize_publisher(
+                [1u8; 32],
+                "team".into(),
+                encode_hex(&public_key([2u8; 32])),
+                "example/repo".into(),
+                "release.yml".into(),
+                10,
+                BTreeSet::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

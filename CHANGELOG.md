@@ -41,6 +41,24 @@ regression test. No language or package-format change.
 
 Medium and low findings from the same review:
 
+- PostgreSQL and MySQL connections to any host beyond the loopback
+  interface use verified TLS (rustls, WebPKI roots); plaintext stays
+  available for local servers only. Opening a remote database also requires
+  the `Network` grant and passes the same host scope as `std.net`.
+- Values nest at most 1024 levels deep; deeper construction fails with a
+  typed error instead of overflowing the thread stack.
+- The bytecode verifier checks the operands each instruction reads, so a
+  crafted `.nivb` bundle can no longer panic the VM on an empty stack.
+- Publisher authorizations name the packages they cover (exact names,
+  `prefix*`, or `*`), the client enforces it, and `niv trust authorize`
+  takes the list as its last argument. Authorizations must be re-issued.
+- Installs verify the complete dependency graph and review its authority
+  against `niv.authority.lock` before writing anything; `niv run`, `build`,
+  and `test` refuse a project whose authority lock is missing or stale.
+- The hosted registry daemon answers 410 for a yanked release's archive.
+- `std.native.open` loads exactly the resolved path that passed the scope
+  check.
+
 - Relative `path:` scopes in `niv.toml` are anchored to the manifest's
   directory instead of the current working directory, so a grant means the
   same directory no matter where `niv` runs.

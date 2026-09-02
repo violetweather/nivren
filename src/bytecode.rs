@@ -1705,6 +1705,17 @@ fn verify_stack(chunk: &Chunk) -> Result<(), NivError> {
             continue;
         }
         let instruction = &chunk.code[index];
+        // The net effect alone let ops that pop more than they net-consume
+        // (Return, Binary, Call, JumpIfFalse …) pass at a depth too shallow
+        // to serve them, so a crafted bundle could panic the VM on an empty
+        // stack. Check the operands each op actually needs first.
+        if depth < stack_pops(&instruction.op) as isize {
+            return Err(NivError::new(
+                "bytecode stack underflow",
+                instruction.span.line,
+                instruction.span.column,
+            ));
+        }
         let next_depth = depth + stack_effect(&instruction.op);
         let next_scope = scope_depth
             + match instruction.op {
@@ -1737,6 +1748,48 @@ fn verify_stack(chunk: &Chunk) -> Result<(), NivError> {
         }
     }
     Ok(())
+}
+
+/// How many operands an op reads from the stack before it runs, matching the
+/// VM's pops and peeks exactly.
+fn stack_pops(op: &Op) -> usize {
+    match op {
+        Op::Constant(_)
+        | Op::Load(_)
+        | Op::MakeFunction { .. }
+        | Op::DefineRecord { .. }
+        | Op::DefineEnum { .. }
+        | Op::DefineProtocol { .. }
+        | Op::AdoptProtocol { .. }
+        | Op::DefineModule { .. }
+        | Op::Repeat { .. }
+        | Op::Sample { .. }
+        | Op::Jump(_)
+        | Op::EnterScope
+        | Op::ExitScope
+        | Op::LoopExit { .. }
+        | Op::Prepare(_)
+        | Op::Perform
+        | Op::Promise(_) => 0,
+        Op::Pop
+        | Op::Store(_)
+        | Op::Define { .. }
+        | Op::Unary(_)
+        | Op::JumpIfFalse(_)
+        | Op::Coalesce(_)
+        | Op::Propagate
+        | Op::Get(_)
+        | Op::Print
+        | Op::Return
+        | Op::Match(_)
+        | Op::Iterate { .. }
+        | Op::IfCarries { .. }
+        | Op::DefinePattern { .. }
+        | Op::Using { .. } => 1,
+        Op::Binary(_) | Op::Index => 2,
+        Op::Call(arguments) | Op::PerformCall(arguments) => arguments + 1,
+        Op::MakeArray(values) | Op::MakeText(values) => *values,
+    }
 }
 
 fn stack_effect(op: &Op) -> isize {

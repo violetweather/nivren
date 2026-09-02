@@ -186,14 +186,6 @@ impl Manifest {
                     ));
                 }
                 if value != "allow" {
-                    // A relative path scope is anchored to the manifest, not
-                    // to whichever directory `niv` happens to run from.
-                    let value = match value.strip_prefix("path:") {
-                        Some(scope) if Path::new(scope).is_relative() => {
-                            format!("path:{}", root.join(scope).display())
-                        }
-                        _ => value,
-                    };
                     capability_scopes.insert(key.to_string(), value);
                 }
             } else if section == "unsafe" {
@@ -396,6 +388,26 @@ impl Manifest {
 
     pub fn lockfile(&self) -> String {
         self.resolved_lockfile(&BTreeMap::new())
+    }
+
+    /// The capability scopes as the runtime must apply them: a relative
+    /// `path:` scope is anchored to this manifest's directory, so a grant
+    /// means the same directory no matter where `niv` was started. The
+    /// manifest itself keeps the scopes as written, so published metadata
+    /// and authority locks stay deterministic across machines.
+    pub fn anchored_capability_scopes(&self) -> BTreeMap<String, String> {
+        self.capability_scopes
+            .iter()
+            .map(|(capability, scope)| {
+                let anchored = match scope.strip_prefix("path:") {
+                    Some(path) if Path::new(path).is_relative() => {
+                        format!("path:{}", self.root.join(path).display())
+                    }
+                    _ => scope.clone(),
+                };
+                (capability.clone(), anchored)
+            })
+            .collect()
     }
 
     pub fn resolved_lockfile(&self, resolved: &BTreeMap<(String, String), String>) -> String {

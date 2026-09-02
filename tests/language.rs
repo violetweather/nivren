@@ -4995,6 +4995,46 @@ choose serve() {{ case Ok carries message => message, case Err carries problem =
 }
 
 #[test]
+fn relative_path_scopes_anchor_to_the_manifest_directory() {
+    let root = std::env::temp_dir().join(format!("nivren-scope-anchor-{}", std::process::id()));
+    let manifest = nivren::project::Manifest::parse(
+        "[package]\nname = \"anchored\"\nversion = \"0.1.0\"\nentry = \"src/main.niv\"\n\n[capabilities]\nFileRead = \"path:./data\"\nFileWrite = \"allow\"\n",
+        root.clone(),
+    )
+    .unwrap();
+    // The manifest keeps the scope as written so published metadata and
+    // authority locks stay deterministic across machines.
+    assert_eq!(manifest.capability_scopes["FileRead"], "path:./data");
+    // The runtime receives it anchored to the manifest, not the cwd.
+    let anchored = manifest.anchored_capability_scopes();
+    assert_eq!(
+        anchored["FileRead"],
+        format!("path:{}", root.join("./data").display())
+    );
+    assert!(!anchored.contains_key("FileWrite"));
+}
+
+#[test]
+fn deeply_nested_values_fail_with_a_typed_error_instead_of_aborting() {
+    let source = "choice Nest holds {
+    case Leaf
+    case Node carries Nest
+}
+change value set Nest.Leaf
+change index set 0
+repeat index < 1100 {
+    value = Nest.Node(value)
+    index = index + 1
+}
+index";
+    let program = nivren::parser::parse(nivren::lexer::scan(source).unwrap()).unwrap();
+    let error = nivren::runtime::Interpreter::new()
+        .run(&program)
+        .unwrap_err();
+    assert!(error.message.contains("nesting"), "{}", error.message);
+}
+
+#[test]
 fn network_scope_targets_are_positional_and_reads_have_deadlines() {
     use std::io::{Read, Write};
     use std::time::Duration;
@@ -6466,6 +6506,7 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
         "example/trusted".into(),
         ".github/workflows/release.yml".into(),
         2_000,
+        BTreeSet::from(["*".to_string()]),
     )
     .unwrap();
     let provenance = nivren::trust::attest_release(
@@ -6512,6 +6553,7 @@ fn public_registry_provenance_revocation_and_advisories_are_enforced() {
         "example/trusted".into(),
         ".github/workflows/release.yml".into(),
         2_000,
+        BTreeSet::from(["*".to_string()]),
     )
     .unwrap();
     let unsafe_provenance = nivren::trust::attest_release(
