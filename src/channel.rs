@@ -40,8 +40,16 @@ impl ChannelManifest {
         public_hex: &str,
         now: u64,
         minimum_generation: u64,
+        expected_channel: Option<&str>,
     ) -> Result<(), NivError> {
         validate_unsigned(self)?;
+        // A validly signed nightly manifest served at the stable URL would
+        // otherwise move stable installs onto nightly builds.
+        if expected_channel.is_some_and(|expected| expected != self.channel) {
+            return Err(channel_error(
+                "channel manifest names a different channel than the one requested",
+            ));
+        }
         if self.generation < minimum_generation {
             return Err(channel_error(
                 "channel manifest generation is below the trusted minimum",
@@ -127,7 +135,7 @@ fn safe_component(value: &str) -> bool {
 }
 
 fn decode_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N], NivError> {
-    if value.len() != N * 2 {
+    if !value.is_ascii() || value.len() != N * 2 {
         return Err(channel_error(format!("invalid {label} length")));
     }
     let mut bytes = [0; N];
@@ -180,14 +188,22 @@ mod tests {
             signature: String::new(),
         };
         manifest.sign(&hex(&secret)).unwrap();
-        manifest.verify(&hex(&public), 150, 7).unwrap();
+        manifest.verify(&hex(&public), 150, 7, None).unwrap();
+        manifest
+            .verify(&hex(&public), 150, 7, Some(manifest.channel.as_str()))
+            .unwrap();
+        assert!(
+            manifest
+                .verify(&hex(&public), 150, 7, Some("definitely-other"))
+                .is_err()
+        );
         assert_eq!(
             ChannelManifest::decode(&manifest.encode().unwrap()).unwrap(),
             manifest
         );
-        assert!(manifest.verify(&hex(&public), 201, 7).is_err());
-        assert!(manifest.verify(&hex(&public), 150, 8).is_err());
+        assert!(manifest.verify(&hex(&public), 201, 7, None).is_err());
+        assert!(manifest.verify(&hex(&public), 150, 8, None).is_err());
         manifest.version = "0.10.0-beta.8".into();
-        assert!(manifest.verify(&hex(&public), 150, 7).is_err());
+        assert!(manifest.verify(&hex(&public), 150, 7, None).is_err());
     }
 }

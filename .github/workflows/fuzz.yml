@@ -6,6 +6,9 @@ on:
     - cron: "17 3 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
@@ -14,12 +17,12 @@ jobs:
       matrix:
         target: [frontend, binary]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: rustup toolchain install nightly
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: cargo +nightly fuzz build ${{ matrix.target }}
       - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=30 -max_len=1048576
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: failure()
         with:
           name: fuzz-artifacts-${{ matrix.target }}-${{ github.sha }}

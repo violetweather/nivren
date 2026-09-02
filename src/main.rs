@@ -240,7 +240,12 @@ fn main() -> ExitCode {
         [command, action, manifest, public, now, minimum]
             if command == "release" && action == "verify-channel" =>
         {
-            release_verify_channel(manifest, public, now, minimum)
+            release_verify_channel(manifest, public, now, minimum, None)
+        }
+        [command, action, manifest, public, now, minimum, channel]
+            if command == "release" && action == "verify-channel" =>
+        {
+            release_verify_channel(manifest, public, now, minimum, Some(channel))
         }
         [command, path] if command == "fmt" => format_path(path, false),
         [command, flag, path] if command == "fmt" && flag == "--check" => format_path(path, true),
@@ -322,8 +327,10 @@ fn main() -> ExitCode {
 }
 
 fn read_secret_key(path: &str) -> Result<[u8; 32], String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read signing key {path}: {error}"))?;
+    let text = zeroize::Zeroizing::new(
+        fs::read_to_string(path)
+            .map_err(|error| format!("cannot read signing key {path}: {error}"))?,
+    );
     nivren::trust::parse_secret_key(text.trim()).map_err(|error| error.message)
 }
 
@@ -347,26 +354,34 @@ fn trust_result(result: Result<String, String>) -> ExitCode {
     }
 }
 
+/// Writes a secret key file readable only by its owner, refusing to touch an
+/// existing file.
+fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
 fn trust_keygen(output: &str) -> ExitCode {
     trust_result((|| {
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret)
+        let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut *secret)
             .map_err(|error| format!("cannot gather key entropy: {error}"))?;
         let path = Path::new(output);
         if path.exists() {
             return Err(format!("refusing to overwrite existing key file {output}"));
         }
-        write_atomic(
-            path,
-            format!(
-                "{}
-",
-                nivren::trust::encode_hex(&secret)
-            )
-            .as_bytes(),
-        )
-        .map_err(|error| error.to_string())?;
-        let public = nivren::trust::public_key(secret);
+        let encoded = zeroize::Zeroizing::new(format!("{}\n", nivren::trust::encode_hex(&*secret)));
+        write_secret_file(path, encoded.as_bytes()).map_err(|error| error.to_string())?;
+        let public = nivren::trust::public_key(*secret);
         Ok(format!(
             "secret {output}
 public {}",
@@ -522,7 +537,13 @@ fn release_sign_channel(manifest: &str, secret: &str, output: &str) -> ExitCode 
     }
 }
 
-fn release_verify_channel(manifest: &str, public: &str, now: &str, minimum: &str) -> ExitCode {
+fn release_verify_channel(
+    manifest: &str,
+    public: &str,
+    now: &str,
+    minimum: &str,
+    expected_channel: Option<&str>,
+) -> ExitCode {
     let result = fs::read(manifest)
         .map_err(|error| format!("cannot read channel manifest: {error}"))
         .and_then(|bytes| {
@@ -538,7 +559,7 @@ fn release_verify_channel(manifest: &str, public: &str, now: &str, minimum: &str
                 .parse::<u64>()
                 .map_err(|_| "invalid minimum generation".to_string())?;
             manifest
-                .verify(public.trim(), now, minimum)
+                .verify(public.trim(), now, minimum, expected_channel)
                 .map_err(|error| error.message)?;
             Ok(manifest)
         });
@@ -3343,7 +3364,7 @@ fn help() {
         nivren::VERSION
     );
     println!(
-        "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation>
+        "\nSigned release channels:\n  niv release sign-channel <manifest.json> <secret-key-file> <signed.json>\n  niv release verify-channel <signed.json> <public-key-file> <unix-time> <minimum-generation> [expected-channel]
 
 Registry trust operations:
   niv trust keygen <secret-output>

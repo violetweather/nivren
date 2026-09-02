@@ -462,10 +462,24 @@ fn parse_request(bytes: &[u8]) -> Result<Request, String> {
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    // The per-read socket timeout becomes the budget for the whole request;
+    // otherwise a client dripping one byte per period pins a worker forever.
+    let previous = stream.read_timeout().map_err(|error| error.to_string())?;
+    let deadline = previous.map(|timeout| std::time::Instant::now() + timeout);
+    let result = read_request_within(stream, deadline);
+    let _ = stream.set_read_timeout(previous);
+    result
+}
+
+fn read_request_within(
+    stream: &mut TcpStream,
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     let mut target = None;
     loop {
         let mut chunk = [0; 8192];
+        crate::runtime::arm_read_deadline(stream, deadline)?;
         let count = stream.read(&mut chunk).map_err(|error| error.to_string())?;
         if count == 0 {
             break;
@@ -485,11 +499,20 @@ fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
             let mut length = 0usize;
             for line in head.split("\r\n").skip(1) {
                 if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse().map_err(|_| "invalid Content-Length")?;
+                    let value = value.trim();
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err("invalid Content-Length".into());
+                    }
+                    length = value.parse().map_err(|_| "invalid Content-Length")?;
                 }
             }
-            if length > MAX_BODY {
-                return Err("request body exceeds 66 MiB".into());
+            // Only a publish envelope may be large; every other path buffers
+            // at most 64 KiB so unauthenticated clients cannot pin a gigabyte
+            // across the worker pool.
+            let publish = head.starts_with("POST /v1/publish ");
+            let body_limit = if publish { MAX_BODY } else { MAX_HEADER };
+            if length > body_limit {
+                return Err("request body exceeds the size limit for this path".into());
             }
             target = Some(boundary + 4 + length);
         }

@@ -153,7 +153,12 @@ def dependency_licenses(prefix: str, binary: Path) -> list[tuple[str, bytes, int
             if child.name.upper().startswith(("LICENSE", "COPYING", "NOTICE"))
         }
         if license_file:
-            candidates.add((directory / license_file).resolve())
+            # A crate's license-file must stay inside its own directory, or a
+            # dependency could ship arbitrary build-machine files in the archive.
+            license_path = (directory / license_file).resolve()
+            if not license_path.is_relative_to(directory.resolve()):
+                fail(f"license-file escapes its crate directory: {name!r} {version!r}")
+            candidates.add(license_path)
         if not candidates:
             index.append(
                 f"{name} {version} | {license_expression} | package supplied no license file"

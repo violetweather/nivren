@@ -186,6 +186,14 @@ impl Manifest {
                     ));
                 }
                 if value != "allow" {
+                    // A relative path scope is anchored to the manifest, not
+                    // to whichever directory `niv` happens to run from.
+                    let value = match value.strip_prefix("path:") {
+                        Some(scope) if Path::new(scope).is_relative() => {
+                            format!("path:{}", root.join(scope).display())
+                        }
+                        _ => value,
+                    };
                     capability_scopes.insert(key.to_string(), value);
                 }
             } else if section == "unsafe" {

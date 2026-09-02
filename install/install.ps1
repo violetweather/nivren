@@ -100,7 +100,7 @@ try {
         $minimum = if (Test-Path $minimumPath -PathType Leaf) { (Get-Content -Raw $minimumPath).Trim() } else { "0" }
         if ($minimum -notmatch '^\d+$') { throw "Stored channel generation is invalid" }
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
-        & $verifier release verify-channel $channelPath $ChannelKey $now $minimum
+        & $verifier release verify-channel $channelPath $ChannelKey $now $minimum $Channel
         if ($LASTEXITCODE -ne 0) { throw "Signed channel verification failed" }
         $channelManifest = Get-Content -Raw $channelPath | ConvertFrom-Json
         $Version = [string]$channelManifest.version

@@ -3660,6 +3660,7 @@ impl Interpreter {
         let worker_budget = self.instruction_budget.clone();
         let worker_memory = self.memory_budget.clone();
         let worker_scopes = self.capability_scopes.clone();
+        let worker_promises = self.active_promises.clone();
         let worker_host = self.host_callback.clone();
         let worker_call_depth_limit = self.max_call_depth;
         let worker_event_loop = self.event_loop.clone();
@@ -3680,6 +3681,7 @@ impl Interpreter {
             worker.instruction_budget = worker_budget;
             worker.memory_budget = worker_memory;
             worker.capability_scopes = worker_scopes;
+            worker.active_promises = worker_promises;
             worker.host_callback = worker_host;
             worker.max_call_depth = worker_call_depth_limit;
             worker.event_loop = worker_event_loop;
@@ -12878,7 +12880,7 @@ fn read_http_request_within(
         || !matches!(protocol, "HTTP/1.0" | "HTTP/1.1")
         || !method.bytes().all(|byte| byte.is_ascii_uppercase())
         || !path.starts_with('/')
-        || path.contains(['\r', '\n'])
+        || path.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
     {
         return Err("invalid or unsupported HTTP request line".into());
     }
@@ -12893,9 +12895,19 @@ fn read_http_request_within(
         }
         let name = name.to_ascii_lowercase();
         let value = value.trim().to_string();
+        if value
+            .bytes()
+            .any(|byte| (byte < 0x20 && byte != b'\t') || byte == 0x7f)
+        {
+            return Err("invalid HTTP request header value".into());
+        }
         if name == "content-length" {
             if declared_length.is_some() {
                 return Err("duplicate Content-Length header".into());
+            }
+            // RFC 9110 allows digits only; `+5` parses but is not a length.
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("invalid Content-Length header".into());
             }
             let content_length = value.parse().map_err(|_| "invalid Content-Length header")?;
             if content_length > maximum {
@@ -13032,6 +13044,9 @@ fn decode_chunks(mut bytes: &[u8], maximum: usize) -> Result<Vec<u8>, String> {
             .next()
             .unwrap()
             .trim();
+        if size_text.is_empty() || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid chunk size".into());
+        }
         let size = usize::from_str_radix(size_text, 16).map_err(|_| "invalid chunk size")?;
         bytes = &bytes[line_end + 2..];
         if size == 0 {
@@ -14345,7 +14360,29 @@ fn ensure_key(value: &Value, name: &str, span: Span) -> Result<(), NivError> {
     }
 }
 
+/// Win32 maps a component named CON, PRN, AUX, NUL, COM1-9, or LPT1-9 (with
+/// any extension) to the device no matter which directory precedes it, so
+/// such a path can never land inside a scoped directory.
+fn has_reserved_device_name(path: &str) -> bool {
+    Path::new(path).components().any(|component| {
+        let Some(name) = component.as_os_str().to_str() else {
+            return false;
+        };
+        let stem = name.split('.').next().unwrap_or("").trim_end();
+        let upper = stem.to_ascii_uppercase();
+        let bytes = upper.as_bytes();
+        matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (bytes.len() == 4
+                && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && bytes[3].is_ascii_digit()
+                && bytes[3] != b'0')
+    })
+}
+
 fn path_is_within(target: &str, scope: &str) -> bool {
+    if cfg!(windows) && has_reserved_device_name(target) {
+        return false;
+    }
     let resolve = |value: &str| {
         let path = Path::new(value);
         let absolute = if path.is_absolute() {
