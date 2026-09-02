@@ -90,6 +90,31 @@ Medium and low findings from the same review:
   rather than expression interpolation, and the release packager refuses a
   crate `license-file` that points outside its crate directory.
 
+Remaining low findings:
+
+- Installers require the build attestation to come from the release
+  workflow (`--signer-workflow`) and explain the `gh auth login` case;
+  `install.sh` reads the values `niv release verify-channel` prints instead
+  of re-parsing the manifest JSON; the Windows uninstaller refuses an
+  install root containing a reparse point; the documented bootstrap URL
+  names the release tag.
+- `std.files.read` stops at 16 MiB; a program may run at most 4096 live
+  OS-thread tasks at once.
+- The trusted-registry generation record includes the status issue time, so
+  a status re-signed at the same generation cannot replace a newer one.
+- The HTTP client rejects non-digit `Content-Length` values and brackets
+  IPv6 literals in the `Host` header.
+- Generated API docs HTML-escape doc-comment text.
+- The desktop host verifies an update manifest's Ed25519 signature against
+  the key in `NIVREN_DESKTOP_UPDATE_PUBLIC_KEY` before staging it, and
+  refuses to stage anything when no key is configured.
+- The COFF archive normalizer rejects negative member sizes; the Android
+  wrapper surfaces Nivren's own diagnostic.
+- Docs state that top-level statements are governed by runtime grants, and
+  the audit-scope document records the threat-model notes assessors asked
+  about (host-name matching, additional roots, trusted single-file runs,
+  unsigned evidence receipts).
+
 Dependency advisories:
 
 - `mysql` moves from 26 to 28, which takes `lru` to 0.16.4 and closes

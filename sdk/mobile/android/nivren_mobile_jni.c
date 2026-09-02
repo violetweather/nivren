@@ -68,8 +68,17 @@ JNIEXPORT jbyteArray JNICALL Java_org_nivren_NivrenMobile_invoke(
         return NULL;
     }
     if (result.status != 0) {
+        /* Surface Nivren's own diagnostic, bounded and NUL-terminated, so the
+         * Kotlin side sees the same message the Swift wrapper does. */
+        char message[1024];
+        size_t copied = result.length < sizeof(message) - 1 ? result.length : sizeof(message) - 1;
+        if (copied != 0) {
+            memcpy(message, result.data, copied);
+        }
+        message[copied] = '\0';
         nivren_buffer_free(result);
-        throw_failure(environment, "java/lang/IllegalStateException", "Nivren compilation or execution failed");
+        throw_failure(environment, "java/lang/IllegalStateException",
+                      copied != 0 ? message : "Nivren compilation or execution failed");
         return NULL;
     }
     jbyteArray output = (*environment)->NewByteArray(environment, (jsize)result.length);

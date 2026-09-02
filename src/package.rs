@@ -598,22 +598,35 @@ fn install_trusted_with(
     // pre-1.0.1 format and belongs to whichever registry wrote it.
     let root_hex = crate::trust::encode_hex(&root_public_key);
     let generation_path = state.join("registry-generation");
-    let persisted_generation = fs::read_to_string(&generation_path)
+    let (persisted_generation, persisted_issued_at) = fs::read_to_string(&generation_path)
         .ok()
         .and_then(|value| {
             let mut parts = value.split_whitespace();
-            match (parts.next(), parts.next()) {
-                (Some(key), Some(generation)) if key == root_hex => generation.parse::<u64>().ok(),
-                (Some(generation), None) => generation.parse::<u64>().ok(),
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(key), Some(generation), issued_at) if key == root_hex => Some((
+                    generation.parse::<u64>().ok()?,
+                    issued_at
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0),
+                )),
+                (Some(generation), None, None) => Some((generation.parse::<u64>().ok()?, 0)),
                 _ => None,
             }
         })
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| package_error("system clock is before Unix epoch"))?
         .as_secs();
 
+    // An equal generation is accepted for plain re-installs, but a status
+    // re-signed at the same generation with fewer revocations must not
+    // replace a newer one: the issue time has to move forward too.
+    if status.generation == persisted_generation && status.issued_at < persisted_issued_at {
+        return Err(package_error(
+            "registry status was replayed: same generation, earlier issue time",
+        ));
+    }
     let mut pending: Vec<(String, String)> = manifest
         .dependencies
         .iter()
@@ -684,7 +697,7 @@ fn install_trusted_with(
     let installed = commit_staged_install(manifest, resolved)?;
     write_atomic(
         &generation_path,
-        format!("{root_hex} {}\n", status.generation).as_bytes(),
+        format!("{root_hex} {} {}\n", status.generation, status.issued_at).as_bytes(),
     )?;
     Ok(installed)
 }
@@ -1361,7 +1374,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(app_root.join(".niv/registry-generation"))
                 .unwrap()
-                .trim(),
+                .split_whitespace()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" "),
             format!("{} 5", super::encode_hex(&root_key))
         );
         let authority = fs::read_to_string(app_root.join("niv.authority.lock")).unwrap();

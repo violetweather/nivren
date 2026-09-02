@@ -17,14 +17,14 @@ today runs unchanged on every later release.
 **macOS / Linux**
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSLO https://raw.githubusercontent.com/violetweather/nivren/main/install/install.sh
+curl --proto '=https' --tlsv1.2 -fsSLO https://raw.githubusercontent.com/violetweather/nivren/v1.0.1/install/install.sh
 sh install.sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/violetweather/nivren/main/install/install.ps1 -OutFile install.ps1
+Invoke-WebRequest https://raw.githubusercontent.com/violetweather/nivren/v1.0.1/install/install.ps1 -OutFile install.ps1
 Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```

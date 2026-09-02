@@ -121,6 +121,52 @@ pub fn shell_response(path: &str) -> (u16, &'static str, &'static str) {
 pub struct DesktopHost {
     next_handle: AtomicU64,
     windows: Mutex<HashMap<String, platform::WindowSession>>,
+    /// The Ed25519 key that must have signed any update manifest before it
+    /// is staged. Without one, staging is refused rather than recorded.
+    update_public_key: Mutex<Option<[u8; 32]>>,
+}
+
+/// The bytes an update manifest's signature covers.
+pub fn update_signing_bytes(update: &UpdateManifest) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for field in [
+        &b"nivren.desktop-update.v1"[..],
+        update.channel.as_bytes(),
+        update.version.as_bytes(),
+        update.url.as_bytes(),
+        update.sha256.as_bytes(),
+    ] {
+        bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(field);
+    }
+    bytes
+}
+
+fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if !value.is_ascii() || value.len() != N * 2 {
+        return None;
+    }
+    let mut bytes = [0; N];
+    for (index, output) in bytes.iter_mut().enumerate() {
+        *output = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// Verifies an update manifest's signature against the configured key.
+pub fn verify_update_signature(
+    update: &UpdateManifest,
+    public_key: &[u8; 32],
+) -> Result<(), String> {
+    let key = ed25519_dalek::VerifyingKey::from_bytes(public_key)
+        .map_err(|_| "desktop update signing key is invalid".to_string())?;
+    let signature = decode_hex::<64>(&update.signature)
+        .ok_or_else(|| "desktop update signature is not 64 hexadecimal bytes".to_string())?;
+    key.verify_strict(
+        &update_signing_bytes(update),
+        &ed25519_dalek::Signature::from_bytes(&signature),
+    )
+    .map_err(|_| "desktop update signature verification failed".to_string())
 }
 
 impl DesktopHost {
@@ -128,7 +174,23 @@ impl DesktopHost {
         Arc::new(Self {
             next_handle: AtomicU64::new(1),
             windows: Mutex::new(HashMap::new()),
+            update_public_key: Mutex::new(None),
         })
+    }
+
+    /// Pins the Ed25519 public key (64 hexadecimal characters) that update
+    /// manifests must be signed with before `stage_update` accepts them.
+    pub fn set_update_public_key(&self, hex: &str) -> Result<(), String> {
+        let key = decode_hex::<32>(hex.trim()).ok_or_else(|| {
+            "desktop update public key must be 64 hexadecimal characters".to_string()
+        })?;
+        ed25519_dalek::VerifyingKey::from_bytes(&key)
+            .map_err(|_| "desktop update public key is not a valid Ed25519 key".to_string())?;
+        *self
+            .update_public_key
+            .lock()
+            .map_err(|_| "desktop host lock is poisoned")? = Some(key);
+        Ok(())
     }
 
     pub fn callback(
@@ -196,6 +258,17 @@ impl DesktopHost {
                 let update: UpdateManifest = serde_json::from_str(request)
                     .map_err(|error| format!("invalid desktop update manifest: {error}"))?;
                 validate_update(&update)?;
+                // Shape checks are not trust: only a manifest signed by the
+                // pinned key may be staged, and no key means nothing stages.
+                let key = self
+                    .update_public_key
+                    .lock()
+                    .map_err(|_| "desktop host lock is poisoned")?
+                    .ok_or_else(|| {
+                        "desktop update staging requires a configured update signing key"
+                            .to_string()
+                    })?;
+                verify_update_signature(&update, &key)?;
                 session.staged_update = Some(request.to_string());
                 Ok(serde_json::json!({
                     "state": "staged",
@@ -445,6 +518,35 @@ mod tests {
         assert!(validate_update(&update).is_err());
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn update_manifests_need_a_signature_from_the_pinned_key() {
+        use ed25519_dalek::Signer as _;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let mut update = UpdateManifest {
+            channel: "stable".into(),
+            version: "1.0.1".into(),
+            url: "https://example.com/niv.msi".into(),
+            sha256: "b".repeat(64),
+            signature: String::new(),
+        };
+        update.signature = hex(&signing_key.sign(&update_signing_bytes(&update)).to_bytes());
+        let public = signing_key.verifying_key().to_bytes();
+        assert!(verify_update_signature(&update, &public).is_ok());
+        let other = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(verify_update_signature(&update, &other).is_err());
+        update.url = "https://attacker.example/niv.msi".into();
+        assert!(verify_update_signature(&update, &public).is_err());
+        let host = DesktopHost::new();
+        assert!(host.set_update_public_key("zz").is_err());
+        assert!(host.set_update_public_key(&hex(&public)).is_ok());
+    }
+
     #[test]
     fn the_shell_serves_only_index_html_with_a_locked_csp() {
         let (status, csp, body) = shell_response("/index.html");
@@ -484,12 +586,46 @@ mod tests {
                 assert_eq!(decoded["command"], "preferences.load");
                 assert_eq!(decoded["handled"], true);
 
-                let update = serde_json::json!({
-                    "channel": "beta",
-                    "version": "1.0.0",
-                    "url": "https://example.com/niv.msi",
-                    "sha256": "a".repeat(64),
+                let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+                let mut manifest = UpdateManifest {
+                    channel: "beta".into(),
+                    version: "1.0.0".into(),
+                    url: "https://example.com/niv.msi".into(),
+                    sha256: "a".repeat(64),
+                    signature: String::new(),
+                };
+                let unsigned = serde_json::json!({
+                    "channel": manifest.channel,
+                    "version": manifest.version,
+                    "url": manifest.url,
+                    "sha256": manifest.sha256,
                     "signature": "s".repeat(128),
+                })
+                .to_string();
+                let unsigned_envelope =
+                    serde_json::json!({ "handle": &handle, "request": unsigned }).to_string();
+                assert!(
+                    host.dispatch("nivren.handle.call:stage_update", &unsigned_envelope)
+                        .unwrap_err()
+                        .contains("signing key")
+                );
+                host.set_update_public_key(&hex(signing_key.verifying_key().as_bytes()))
+                    .unwrap();
+                assert!(
+                    host.dispatch("nivren.handle.call:stage_update", &unsigned_envelope)
+                        .unwrap_err()
+                        .contains("signature")
+                );
+                use ed25519_dalek::Signer as _;
+                manifest.signature = hex(&signing_key
+                    .sign(&update_signing_bytes(&manifest))
+                    .to_bytes());
+                let update = serde_json::json!({
+                    "channel": manifest.channel,
+                    "version": manifest.version,
+                    "url": manifest.url,
+                    "sha256": manifest.sha256,
+                    "signature": manifest.signature,
                 })
                 .to_string();
                 let envelope =

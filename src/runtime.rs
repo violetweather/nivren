@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 #[cfg(feature = "host-runtime")]
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
@@ -1040,6 +1040,9 @@ pub struct Interpreter {
     collector: Box<dyn Collector>,
     cancellation: Option<Arc<AtomicBool>>,
     inherited_cancellations: Vec<Arc<AtomicBool>>,
+    /// Live OS-thread tasks across the whole structured task tree, so a
+    /// program cannot spawn threads without bound.
+    live_tasks: Arc<AtomicUsize>,
     metrics: Option<Arc<Mutex<ExecutionMetrics>>>,
     debug_hook: Option<DebugHook>,
     /// When present, `show` output is written here instead of stdout, so a
@@ -1248,6 +1251,7 @@ impl Interpreter {
             collector: Box::new(GenerationalCollector::default()),
             cancellation: None,
             inherited_cancellations: vec![],
+            live_tasks: Arc::new(AtomicUsize::new(0)),
             metrics: None,
             debug_hook: None,
             print_sink: None,
@@ -3701,9 +3705,21 @@ impl Interpreter {
         if let Some(cancellation) = &self.cancellation {
             inherited_cancellations.push(cancellation.clone());
         }
+        let live_tasks = self.live_tasks.clone();
+        if live_tasks.fetch_add(1, Ordering::AcqRel) >= MAXIMUM_LIVE_TASKS {
+            live_tasks.fetch_sub(1, Ordering::AcqRel);
+            return Err(NivError::new(
+                format!("too many live tasks; at most {MAXIMUM_LIVE_TASKS} may run at once"),
+                span.line,
+                span.column,
+            ));
+        }
+        let worker_live_tasks = live_tasks.clone();
         let handle = thread::spawn(move || {
+            let _slot = LiveTaskSlot(live_tasks);
             let _wake = EventLoopWake(worker_event_loop.clone());
             let mut worker = Interpreter::new();
+            worker.live_tasks = worker_live_tasks;
             worker.capabilities = worker_capabilities;
             worker.instruction_budget = worker_budget;
             worker.memory_budget = worker_memory;
@@ -7786,9 +7802,27 @@ fn native_library_close(arguments: Vec<Value>, span: Span) -> Result<Value, NivE
     Ok(Value::Ok(Arc::new(Value::Null)))
 }
 
+/// Whole-file reads stop at 16 MiB, matching every other bounded read; a
+/// larger file needs `std.files.read_from` with an explicit maximum.
+const MAXIMUM_WHOLE_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+fn read_bounded_text(path: &str) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(MAXIMUM_WHOLE_FILE_BYTES as u64 + 1)
+        .read_to_string(&mut text)?;
+    if text.len() > MAXIMUM_WHOLE_FILE_BYTES {
+        return Err(std::io::Error::other(
+            "file exceeds 16 MiB; use std.files.read_from with an explicit maximum",
+        ));
+    }
+    Ok(text)
+}
+
 fn native_fs_read(arguments: Vec<Value>, span: Span) -> Result<Value, NivError> {
     let path = expect_string(&arguments[0], "std.files.read", span)?;
-    Ok(match fs::read_to_string(path) {
+    Ok(match read_bounded_text(path) {
         Ok(contents) => Value::Ok(Arc::new(Value::String(contents))),
         Err(error) => result_error(error),
     })
@@ -12380,11 +12414,7 @@ pub fn http_get_binary(url: &str, timeout: Duration, maximum: usize) -> Result<V
         return Err("HTTP response limit must be from 1 byte through 66 MiB".into());
     }
     let url = parse_http_url(url)?;
-    let host_header = if (url.tls && url.port == 443) || (!url.tls && url.port == 80) {
-        url.host.clone()
-    } else {
-        format!("{}:{}", url.host, url.port)
-    };
+    let host_header = http_host_header(&url);
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Nivren/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         url.target,
@@ -12393,6 +12423,21 @@ pub fn http_get_binary(url: &str, timeout: Duration, maximum: usize) -> Result<V
     );
     let bytes = exchange_http_url(&url, &request, timeout, maximum)?;
     parse_http_response(&bytes, maximum)
+}
+
+/// The `Host` header for a parsed URL: IPv6 literals are re-bracketed and
+/// the default port for the scheme is omitted.
+fn http_host_header(url: &HttpUrl) -> String {
+    let host = if url.host.contains(':') {
+        format!("[{}]", url.host)
+    } else {
+        url.host.clone()
+    };
+    if (url.tls && url.port == 443) || (!url.tls && url.port == 80) {
+        host
+    } else {
+        format!("{host}:{}", url.port)
+    }
 }
 
 fn exchange_http_url(
@@ -12643,11 +12688,7 @@ fn http_request(
         return Err("HTTP method must be GET, POST, PUT, PATCH, DELETE, or HEAD".into());
     }
     let url = parse_http_url(url)?;
-    let host_header = if (url.tls && url.port == 443) || (!url.tls && url.port == 80) {
-        url.host.clone()
-    } else {
-        format!("{}:{}", url.host, url.port)
-    };
+    let host_header = http_host_header(&url);
     let mut request = format!(
         "{method} {} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: Nivren/{}\r\nAccept: */*\r\nConnection: close\r\nContent-Length: {}\r\n",
         url.target,
@@ -13043,8 +13084,11 @@ fn parse_http_response_details(response: &[u8], maximum: usize) -> Result<HttpRe
             })
             .or_insert(normalized_value);
         if name.eq_ignore_ascii_case("content-length") {
-            let length = value
-                .trim()
+            let digits = value.trim();
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("invalid Content-Length".into());
+            }
+            let length = digits
                 .parse::<usize>()
                 .map_err(|_| "invalid Content-Length")?;
             if content_length.replace(length).is_some() {
@@ -14558,6 +14602,18 @@ fn stable_key(value: &Value) -> bool {
         | Value::Task(_)
         | Value::Channel(_)
         | Value::EarlyReturn(_) => false,
+    }
+}
+
+/// Live OS-thread tasks per task tree; the blocking executor is bounded
+/// separately.
+const MAXIMUM_LIVE_TASKS: usize = 4096;
+
+struct LiveTaskSlot(Arc<AtomicUsize>);
+
+impl Drop for LiveTaskSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

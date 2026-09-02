@@ -51,6 +51,10 @@ if ($Uninstall) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $pathParts = @($userPath -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $binDir.TrimEnd('\') })
     [Environment]::SetEnvironmentVariable("Path", ($pathParts -join ';'), "User")
+    # A junction planted inside the root could make the recursive removal
+    # follow it into a foreign directory.
+    $nested = Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($nested) { throw "Refusing to remove an install root that contains a reparse point: $($nested.FullName)" }
     Remove-Item -Recurse -Force $InstallRoot
     Write-Host "Nivren was uninstalled." -ForegroundColor Cyan
     return
@@ -133,8 +137,10 @@ try {
 
     $gh = Get-Command gh -ErrorAction SilentlyContinue
     if ($gh) {
-        & $gh.Source attestation verify --repo violetweather/nivren $archive | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "GitHub build provenance verification failed" }
+        # The attestation must come from the release workflow itself, not from
+        # any workflow a repository collaborator could run.
+        & $gh.Source attestation verify --repo violetweather/nivren --signer-workflow violetweather/nivren/.github/workflows/release.yml $archive | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "GitHub build provenance verification failed; if gh is installed but not signed in, run 'gh auth login' first" }
         Write-Host "Verified checksum and GitHub build provenance." -ForegroundColor Green
     } else {
         Write-Host "Verified SHA-256 checksum. Install GitHub CLI to verify build provenance automatically." -ForegroundColor Yellow

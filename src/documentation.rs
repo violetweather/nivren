@@ -38,6 +38,13 @@ fn push_doc_text(statements: &[Stmt], position: usize, output: &mut String) {
     }
     if let Stmt::Doc { text, .. } = &statements[position - 1] {
         for line in text.lines() {
+            // Doc comments are source-controlled text; escape HTML so a
+            // Markdown renderer that allows raw HTML cannot run script from
+            // them.
+            let line = line
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
             output.push_str(&format!("  {line}\n"));
         }
     }

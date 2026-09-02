@@ -2642,6 +2642,7 @@ dependencies = [
 name = "nivren-desktop-host"
 version = "1.0.1"
 dependencies = [
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "tao",
