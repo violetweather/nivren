@@ -27,3 +27,10 @@ The assessor must combine manual design review with automated dependency review,
 - The evidence receipt is marked independent, is no older than the release policy permits, and points to retained audit artifacts.
 
 The repository's automated tests are implementation evidence, not an independent audit. A project maintainer cannot self-approve this gate.
+
+## Threat-model notes for assessors
+
+- A `Network` grant is matched on the host name a program supplies, not on the address it resolves to. A grant for a host that resolves to a private address reaches that address; there is no private-range filter. Grantors choose hosts accordingly.
+- A program with `Network` may pin additional PEM roots through the TLS options. WebPKI roots and host-name verification still apply; the program cannot disable verification, but it can extend the trusted set for its own connections.
+- Single-file `niv run`, the REPL, and `nivren::run` execute source with every capability granted and no budgets; they are for trusted source. Projects, the C ABI, and the mobile wrappers are the deny-by-default surfaces.
+- `release check` evidence receipts are unsigned JSON committed to the repository: a policy checklist, not tamper evidence. The signed artifacts are the release assets and their attestations.

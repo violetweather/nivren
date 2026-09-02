@@ -145,9 +145,11 @@ if [ -n "$CHANNEL" ]; then
   [ ! -f "$INSTALL_ROOT/channel-$CHANNEL-generation" ] || minimum=$(cat "$INSTALL_ROOT/channel-$CHANNEL-generation")
   case "$minimum" in ""|*[!0-9]*) echo "stored channel generation is invalid" >&2; exit 65 ;; esac
   now=$(date +%s)
-  "$verifier" release verify-channel "$manifest" "$CHANNEL_KEY" "$now" "$minimum" "$CHANNEL"
-  VERSION=$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$manifest")
-  channel_generation=$(awk '/^[[:space:]]*"generation"[[:space:]]*:/ { value=$2; gsub(/,/, "", value); print value; exit }' "$manifest")
+  # The verifier prints exactly the values it verified; the shell never
+  # re-parses the JSON itself.
+  verified=$("$verifier" release verify-channel "$manifest" "$CHANNEL_KEY" "$now" "$minimum" "$CHANNEL") || exit 65
+  VERSION=$(printf '%s\n' "$verified" | awk '$1 == "verified" { print $3; exit }')
+  channel_generation=$(printf '%s\n' "$verified" | awk '$1 == "verified" { print $5; exit }')
   case "$VERSION" in ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) echo "signed channel version is invalid" >&2; exit 65 ;; esac
   case "$channel_generation" in ""|*[!0-9]*) echo "signed channel generation is invalid" >&2; exit 65 ;; esac
 fi
@@ -155,7 +157,7 @@ fi
 asset="nivren-v${VERSION}-${platform}-${machine}.zip"
 base="https://github.com/violetweather/nivren/releases/download/v${VERSION}"
 if [ -n "$CHANNEL" ]; then
-  channel_digest=$(awk -F'"' -v name="$asset" '$2 == name { print $4; exit }' "$manifest")
+  channel_digest=$(printf '%s\n' "$verified" | awk -v name="$asset" '$1 == "asset" && $2 == name { print $3; exit }')
   [ -n "$channel_digest" ] || { echo "signed channel does not offer $asset" >&2; exit 65; }
 fi
 
@@ -180,7 +182,12 @@ fi
 [ -z "$channel_digest" ] || [ "$actual" = "$channel_digest" ] || { echo "signed channel digest verification failed" >&2; exit 65; }
 
 if command -v gh >/dev/null 2>&1; then
-  gh attestation verify --repo violetweather/nivren "$temporary/$asset" >/dev/null
+  # The attestation must come from the release workflow itself, not from any
+  # workflow a repository collaborator could run.
+  gh attestation verify --repo violetweather/nivren \
+    --signer-workflow violetweather/nivren/.github/workflows/release.yml \
+    "$temporary/$asset" >/dev/null \
+    || { echo "GitHub build provenance verification failed; if gh is installed but not signed in, run 'gh auth login' first" >&2; exit 65; }
   echo "Verified checksum and GitHub build provenance."
 else
   echo "Verified SHA-256 checksum. Install GitHub CLI to verify build provenance automatically."

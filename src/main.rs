@@ -588,10 +588,16 @@ fn release_verify_channel(
         });
     match result {
         Ok(manifest) => {
+            // Installers consume this output instead of re-parsing the JSON
+            // with ad-hoc tools, so the values they act on are exactly the
+            // values that were verified.
             println!(
                 "verified {} {} generation {}",
                 manifest.channel, manifest.version, manifest.generation
             );
+            for (name, digest) in &manifest.assets {
+                println!("asset {name} {digest}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -969,7 +975,15 @@ fn project_interpreter(manifest: &nivren::project::Manifest) -> Interpreter {
             Ok(database) => {
                 let database = database.callback();
                 let gpu = nivren_gpu_host::GpuHost::new().callback();
-                let desktop = nivren_desktop_host::DesktopHost::new().callback();
+                let desktop_host = nivren_desktop_host::DesktopHost::new();
+                // Update manifests stage only when signed by this key; with
+                // no key configured the host refuses to stage anything.
+                if let Ok(key) = std::env::var("NIVREN_DESKTOP_UPDATE_PUBLIC_KEY")
+                    && let Err(error) = desktop_host.set_update_public_key(&key)
+                {
+                    eprintln!("warning: NIVREN_DESKTOP_UPDATE_PUBLIC_KEY was ignored: {error}");
+                }
+                let desktop = desktop_host.callback();
                 interpreter.with_host_callback(move |operation, request| {
                     match bundled_host_for(operation, request) {
                         BundledHost::Gpu => gpu(operation, request),

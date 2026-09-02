@@ -26,6 +26,8 @@ def normalize(path: Path) -> None:
             size = int(bytes(data[offset + 48 : offset + 58]).strip() or b"0")
         except ValueError as error:
             raise SystemExit(f"invalid COFF archive member size: {path}") from error
+        if size < 0:
+            raise SystemExit(f"negative COFF archive member size: {path}")
 
         data[offset + 16 : offset + 28] = b"0" + (b" " * 11)
         data[offset + 28 : offset + 34] = b"0" + (b" " * 5)

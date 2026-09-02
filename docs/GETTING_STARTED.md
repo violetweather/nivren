@@ -96,7 +96,7 @@ instructions = "1000000"
 memory_bytes = "67108864"
 ```
 
-A missing `needs` is a check error. A missing or out-of-scope manifest grant is a runtime denial. `FileRead`/`FileWrite` and native libraries accept `path:` scopes; `Network` accepts exact or wildcard host alternatives plus an optional HTTP method constraint, such as `host:api.example.com,*.cdn.example.com;method:GET,POST`; `Environment` accepts `name:` or `prefix:`; `Process` accepts command alternatives plus an optional exact first argument, such as `command:git;arg0:status`; native host handles accept exact `kind:`. Every composed clause must pass. `allow` deliberately authorizes the whole capability. Shared instruction and memory budgets stop runaway work and are also applied by project tests, debugging, profiling, coverage, inspection, tasks, and standalone applications.
+Inside a function, a missing `needs` is a check error. Top-level statements have no `needs` clause and are governed by the manifest's runtime grants alone. A missing or out-of-scope manifest grant is a runtime denial. `FileRead`/`FileWrite` and native libraries accept `path:` scopes; `Network` accepts exact or wildcard host alternatives plus an optional HTTP method constraint, such as `host:api.example.com,*.cdn.example.com;method:GET,POST`; `Environment` accepts `name:` or `prefix:`; `Process` accepts command alternatives plus an optional exact first argument, such as `command:git;arg0:status`; native host handles accept exact `kind:`. Every composed clause must pass. `allow` deliberately authorizes the whole capability. Shared instruction and memory budgets stop runaway work and are also applied by project tests, debugging, profiling, coverage, inspection, tasks, and standalone applications.
 
 ## Build a service
 
